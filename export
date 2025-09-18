@@ -1,0 +1,3 @@
+#!/bin/bash
+
+strawberry export-schema indexer_utils.main:schema --output src/schema.gql
