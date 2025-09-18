@@ -1,0 +1,107 @@
+schema {
+  query: SchemaQuery
+  mutation: Mutation
+  subscription: Subscription
+}
+
+input AddItemInput {
+  id: ID!
+}
+
+type AttributeEntry {
+  key: String!
+  values: [String!]!
+  details: JSON
+}
+
+input Filter {
+  type: String = null
+  attribute: String = null
+  operator: String = null
+  value: String = null
+}
+
+type FilterRule {
+  itemType: String!
+  attribute: String!
+  operator: String!
+  value: String!
+  enabled: Boolean!
+  id: ID!
+}
+
+input FilterRuleInput {
+  itemType: String!
+  attribute: String!
+  operator: String!
+  value: String!
+  enabled: Boolean! = true
+}
+
+type FilterRuleList {
+  id: ID!
+  nodes: [FilterRule!]!
+}
+
+type HistoricalIgnoreItemList {
+  nodes: [IgnoreItem!]!
+  pageInfo: PageInfo!
+}
+
+type IgnoreItem {
+  type: String!
+  uid: String!
+  ignore: Boolean!
+  added: Boolean!
+  title: String!
+  checkedTitle: String
+  posterUrl: String
+  attributes: [AttributeEntry!]!
+  id: ID!
+}
+
+type IgnoreItemList {
+  id: ID!
+  nodes: [IgnoreItem!]!
+}
+
+"""
+The `JSON` scalar type represents JSON values as specified by [ECMA-404](https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf).
+"""
+scalar JSON @specifiedBy(url: "https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf")
+
+type Mutation {
+  addItem(data: AddItemInput!): IgnoreItem!
+  deleteItem(data: AddItemInput!): IgnoreItem!
+  createFilterRule(data: FilterRuleInput!): MutationReturn!
+  deleteFilterRule(id: ID!): MutationReturn!
+  setItemAdded(data: SetItemAddedInput!): IgnoreItem!
+}
+
+type MutationReturn {
+  ignoreItems: IgnoreItemList!
+  filterRules: FilterRuleList!
+}
+
+input SetItemAddedInput {
+  id: ID!
+  added: Boolean!
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startOffset: Int!
+  endOffset: Int!
+  totalCount: Int!
+}
+
+type SchemaQuery {
+  items(filters: [Filter!] = null): IgnoreItemList!
+  filterRules: FilterRuleList!
+  historicalItems(filters: [Filter!] = null, limit: Int! = 20, offset: Int! = 0, applyInvertedPermanentRules: Boolean! = false): HistoricalIgnoreItemList!
+}
+
+type Subscription {
+  items(filters: [Filter!]): IgnoreItemList!
+}
