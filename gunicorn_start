@@ -1,0 +1,16 @@
+#!/bin/bash
+
+NAME=fastapi-app
+WORKERS=3
+WORKER_CLASS=uvicorn.workers.UvicornWorker
+BIND=0.0.0.0:8000
+LOG_LEVEL=error
+
+exec gunicorn indexer_utils.main:app \
+  --name $NAME \
+  --workers $WORKERS \
+  --worker-class $WORKER_CLASS \
+  --bind=$BIND \
+  --log-level=$LOG_LEVEL \
+  --timeout 200 \
+  --log-file=-
