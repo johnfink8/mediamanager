@@ -17,12 +17,13 @@ from .models import IgnoreItem
 from .plex_utils import find_movie
 from .radarr_utils import get_movie, radarr_query, reset_movies
 from .sonarr_utils import query_series, reset_series
+from .tmdb import get_tv_cast, get_tv_id
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 logger.addHandler(logging.StreamHandler())
 
-TVDB_API_KEY = config("TVDB_API_KEY")
+TVDB_API_KEY = config("TVDB_API_KEY", default=None)
 
 
 def get_attr(item: ET.Element, name: str) -> Optional[str]:
@@ -313,6 +314,13 @@ def check_shows(days: int) -> None:
             continue
         attrs = get_attrs(item)
         attrs["year"] = show["year"]  # type: ignore
+        tmdb_id = show.get("tmdbId") or get_tv_id(tvdb)
+        if tmdb_id:
+            attrs["tmdb_id"] = str(tmdb_id)
+            try:
+                attrs["cast"] = get_tv_cast(tmdb_id, n=10)
+            except Exception:
+                logger.exception("Unable to fetch cast for %s", title)
         ratings = show.get("ratings")
         if ratings:
             attrs["rating_votes"] = ratings["votes"]  # type: ignore
