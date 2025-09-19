@@ -3,7 +3,12 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from decouple import config
-from indexer_utils.tmdb import get_movie_id, get_movie_cast
+from indexer_utils.tmdb import (
+    get_movie_cast,
+    get_movie_id,
+    get_tv_cast,
+    get_tv_id,
+)
 from openai import OpenAI
 
 from .models import IgnoreItem
@@ -18,7 +23,6 @@ logger.setLevel(logging.INFO)
 logger.addHandler(logging.StreamHandler())
 
 OPENAI_MODEL = config("OPENAI_MODEL", default="gpt-5-mini")
-OPENAI_API_KEY = config("OPENAI_API_KEY", default=None)
 
 SYNOPSIS_PROMPTS = {
     "mv": """
@@ -94,10 +98,11 @@ def get_openai_client():
     global _openai_client
     if _openai_client is not None:
         return _openai_client
-    if not OPENAI_API_KEY or OpenAI is None:
+    if OpenAI is None:
         return None
     try:
-        _openai_client = OpenAI(api_key=OPENAI_API_KEY)
+        api_key = config("OPENAI_API_KEY")
+        _openai_client = OpenAI(api_key=api_key)
         return _openai_client
     except Exception:
         logger.exception("Failed to initialize OpenAI client")
@@ -155,9 +160,16 @@ def annotate_with_ai(
     genres = _to_list_of_str(attrs.get("genres"))
     lang = _to_list_of_str(attrs.get("originalLanguage"))
     year = _year_from_attrs(attrs)
-    attrs["tmdb_id"] = attrs.get("tmdb_id") or get_movie_id(uid)
-    if attrs["tmdb_id"]:
-        attrs["cast"] = attrs.get("cast") or get_movie_cast(attrs["tmdb_id"], n=10)
+    if item_type == "mv":
+        attrs["tmdb_id"] = attrs.get("tmdb_id") or get_movie_id(uid)
+        if attrs["tmdb_id"]:
+            attrs["cast"] = attrs.get("cast") or get_movie_cast(
+                attrs["tmdb_id"], n=10
+            )
+    elif item_type == "tv":
+        attrs["tmdb_id"] = attrs.get("tmdb_id") or get_tv_id(uid)
+        if attrs["tmdb_id"]:
+            attrs["cast"] = attrs.get("cast") or get_tv_cast(attrs["tmdb_id"], n=10)
 
     # Generate synopsis and embedding first
     candidate_synopsis = generate_synopsis_for_candidate(
