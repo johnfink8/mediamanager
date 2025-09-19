@@ -1,0 +1,10 @@
+on:
+  push:
+    branches:
+      - main
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          ssh deploybot@home.finkdev.com -p 2020 "./deploy.sh"
