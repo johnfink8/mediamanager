@@ -7,9 +7,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          echo "$SSH_PRIVATE_KEY" > id_rsa
-          echo "$SSH_KNOWN_HOST" > ~/.ssh/known_hosts
-          ssh deploybot@home.finkdev.com -i id_rsa -p 2020 "./deploy.sh"
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          echo "$SSH_KNOWN_HOST" >> ~/.ssh/known_hosts
+          ssh deploybot@home.finkdev.com -p 2020 "./deploy.sh"
         env:
           SSH_PRIVATE_KEY: ${{secrets.SSH_PRIVATE_KEY}}
           SSH_KNOWN_HOST: ${{secrets.SSH_KNOWN_HOST}}
