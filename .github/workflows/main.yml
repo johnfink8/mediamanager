@@ -8,8 +8,11 @@ jobs:
     steps:
       - run: |
           mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
           echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
           echo "$SSH_KNOWN_HOST" >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/known_hosts
           ssh deploybot@home.finkdev.com -p 2020 "./deploy.sh"
         env:
           SSH_PRIVATE_KEY: ${{secrets.SSH_PRIVATE_KEY}}
