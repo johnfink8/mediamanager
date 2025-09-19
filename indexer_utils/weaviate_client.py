@@ -4,15 +4,15 @@ import weaviate
 from decouple import config
 from weaviate.classes.query import MetadataQuery
 
-headers = {
-    "X-OpenAI-Api-Key": config("OPENAI_API_KEY"),
-}
+
+def _request_headers() -> dict:
+    return {"X-OpenAI-Api-Key": config("OPENAI_API_KEY")}
 
 
 def get_weaviate_client():
     client = weaviate.connect_to_local(
         host=config("WEAVIATE_HOST", default="weaviate"),
-        headers=headers,
+        headers=_request_headers(),
     )
     return client
 
