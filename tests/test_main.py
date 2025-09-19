@@ -3,6 +3,13 @@
 import base64
 import json
 import logging
+import os
+
+os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
+os.environ.setdefault("TMDB_API_KEY", "test-tmdb-key")
+os.environ.setdefault("INDEXER_APIKEY", "test-indexer-apikey")
+os.environ.setdefault("INDEXER_NUM", "1")
+os.environ.setdefault("INDEXER_URL", "https://example.com")
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,7 +21,7 @@ from indexer_utils import main
 from indexer_utils.filters import should_ignore_by_rules
 from indexer_utils.models import FilterRule, IgnoreItem
 from indexer_utils.session import Base, db_session
-from indexer_utils.vid_utils import check_movies
+from indexer_utils.vid_utils import check_movies, check_shows
 
 logging.getLogger().setLevel(logging.DEBUG)
 
@@ -34,6 +41,8 @@ def test_db(monkeypatch):
         return SessionLocal()
 
     monkeypatch.setattr("indexer_utils.session.db_session", override_db_session)
+    monkeypatch.setattr("indexer_utils.models.db_session", override_db_session)
+    monkeypatch.setitem(globals(), "db_session", override_db_session)
     yield
 
 
@@ -636,6 +645,70 @@ def test_check_movies_creates_ignore_items(monkeypatch):
     assert item.attributes is not None
     assert "genres" in item.attributes
     assert "Comedy" in item.attributes["genres"]
+
+
+def test_check_shows_fetches_cast(monkeypatch):
+    session = db_session()
+    session.query(FilterRule).delete()
+    session.query(IgnoreItem).delete()
+    session.commit()
+
+    xml = """
+    <rss>
+      <channel>
+        <item>
+          <title>Test Show</title>
+          <attr name=\"tvdbid\" value=\"12345\" />
+        </item>
+      </channel>
+    </rss>
+    """
+
+    class MockResponse:
+        def __init__(self, text):
+            self.text = text
+
+    monkeypatch.setattr("requests.get", lambda url, params=None: MockResponse(xml))
+
+    def mock_query_series(tvdb):
+        assert tvdb == "12345"
+        return {
+            "year": "2023",
+            "tmdbId": "56789",
+            "ratings": {"votes": 10, "value": 8.1},
+            "network": "HBO",
+            "genres": ["Drama"],
+            "status": "continuing",
+            "seriesType": "standard",
+            "certification": "TV-MA",
+        }
+
+    monkeypatch.setattr("indexer_utils.vid_utils.query_series", mock_query_series)
+    monkeypatch.setattr("indexer_utils.vid_utils.reset_series", lambda: None)
+    monkeypatch.setattr("indexer_utils.vid_utils.should_ignore_by_rules", lambda item: False)
+
+    def mock_get_tv_cast(tmdb_id, n=10):
+        assert tmdb_id == "56789"
+        return ["Actor One", "Actor Two"]
+
+    monkeypatch.setattr("indexer_utils.vid_utils.get_tv_cast", mock_get_tv_cast)
+    monkeypatch.setattr("indexer_utils.vid_utils.get_tv_id", lambda tvdb: "56789")
+
+    def mock_annotate(item_type, uid, title, attrs):
+        assert attrs["cast"] == ["Actor One", "Actor Two"]
+        return attrs
+
+    monkeypatch.setattr("indexer_utils.vid_utils.annotate_with_ai", mock_annotate)
+
+    check_shows(days=1)
+
+    items = session.query(IgnoreItem).all()
+    assert len(items) == 1
+    item = items[0]
+    assert item.item_type == "tv"
+    assert item.attributes is not None
+    assert item.attributes.get("cast") == ["Actor One", "Actor Two"]
+    assert item.attributes.get("tmdb_id") == "56789"
 
 
 def test_temporary_filtering(run_graphql):
