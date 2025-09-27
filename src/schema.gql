@@ -100,8 +100,23 @@ type SchemaQuery {
   items(filters: [Filter!] = null): IgnoreItemList!
   filterRules: FilterRuleList!
   historicalItems(filters: [Filter!] = null, limit: Int! = 20, offset: Int! = 0, applyInvertedPermanentRules: Boolean! = false): HistoricalIgnoreItemList!
+  movieRecommendation(prompt: String = null): MovieRecommendation
 }
 
 type Subscription {
   items(filters: [Filter!]): IgnoreItemList!
+}
+
+type MovieRecommendation {
+  imdbId: String!
+  title: String!
+  overview: String
+  posterUrl: String
+  year: Int
+  genres: [String!]!
+  cast: [String!]!
+  reason: String
+  source: String!
+  prompt: String
+  excludedRecent: [String!]!
 }

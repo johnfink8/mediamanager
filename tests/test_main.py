@@ -42,6 +42,8 @@ def test_db(monkeypatch):
 
     monkeypatch.setattr("indexer_utils.session.db_session", override_db_session)
     monkeypatch.setattr("indexer_utils.models.db_session", override_db_session)
+    monkeypatch.setattr("indexer_utils.schema.db_session", override_db_session)
+    monkeypatch.setattr("indexer_utils.filters.db_session", override_db_session)
     monkeypatch.setitem(globals(), "db_session", override_db_session)
     yield
 
@@ -877,3 +879,87 @@ def test_apply_filters_lt_year():
     assert "Future Movie" not in titles
     assert "Unrelated Movie" not in titles
     assert "Malformatted Movie" in titles
+
+
+def test_movie_recommendation_query(run_graphql, monkeypatch):
+    sample_movies = [
+        {
+            "imdbId": "tt0000001",
+            "title": "Already Watched",
+            "hasFile": True,
+            "overview": "An older classic.",
+            "genres": ["Drama"],
+            "year": 1982,
+            "images": [
+                {"coverType": "poster", "url": "http://example.com/poster-old.jpg"}
+            ],
+            "credits": [{"name": "Actor Old", "type": "Actor"}],
+            "ratings": {"imdb": {"value": 7.1}},
+        },
+        {
+            "imdbId": "tt0000002",
+            "title": "Space Adventure",
+            "hasFile": True,
+            "overview": "A journey through the stars.",
+            "genres": ["Sci-Fi", "Adventure"],
+            "year": 2022,
+            "images": [
+                {
+                    "coverType": "poster",
+                    "url": "http://example.com/poster-space.jpg",
+                }
+            ],
+            "credits": [
+                {"name": "Star Captain", "type": "Actor"},
+                {"name": "Navigator", "type": "Actor"},
+            ],
+            "ratings": {"imdb": {"value": 8.6}},
+        },
+    ]
+
+    monkeypatch.setattr(
+        "indexer_utils.recommendations.radarr_query", lambda cmd: sample_movies
+    )
+    monkeypatch.setattr(
+        "indexer_utils.recommendations.get_recently_played_imdb_ids",
+        lambda limit=40: {"tt0000001"},
+    )
+
+    def fake_openai(system_prompt: str, user_payload: str):
+        payload = json.loads(user_payload)
+        assert payload["movies"][0]["imdb_id"] == "tt0000002"
+        return {"imdb_id": "tt0000002", "reason": "Fits the space adventure vibe."}
+
+    monkeypatch.setattr(
+        "indexer_utils.recommendations.call_openai_json", fake_openai
+    )
+
+    query = """
+    query MovieRecommendationQuery($prompt: String) {
+        movieRecommendation(prompt: $prompt) {
+            title
+            imdbId
+            posterUrl
+            overview
+            year
+            genres
+            cast
+            reason
+            source
+            prompt
+            excludedRecent
+        }
+    }
+    """
+
+    result = run_graphql(query, {"prompt": "space adventure"})
+    data = result["data"]["movieRecommendation"]
+    assert data["title"] == "Space Adventure"
+    assert data["imdbId"] == "tt0000002"
+    assert data["posterUrl"].endswith("poster-space.jpg")
+    assert "Sci-Fi" in data["genres"]
+    assert "Star Captain" in data["cast"]
+    assert data["reason"] == "Fits the space adventure vibe."
+    assert data["source"] == "openai"
+    assert data["prompt"] == "space adventure"
+    assert data["excludedRecent"] == ["Already Watched"]
