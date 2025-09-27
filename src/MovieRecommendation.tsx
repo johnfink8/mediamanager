@@ -1,4 +1,4 @@
-import React, { FC, useCallback, useEffect, useMemo, useState } from "react";
+import React, { FC, Suspense, useCallback, useEffect, useMemo, useState, useTransition } from "react";
 import { graphql, usePreloadedQuery, useQueryLoader, PreloadedQuery } from "react-relay";
 import Box from "@mui/material/Box";
 import Paper from "@mui/material/Paper";
@@ -137,37 +137,36 @@ const RecommendationContent: FC<{
 
 const MovieRecommendation: FC<{ menuItem: MenuItemType }> = ({ menuItem }) => {
     const [prompt, setPrompt] = useState<string>("");
-    const [isLoading, setIsLoading] = useState(false);
     const [queryRef, loadQuery, disposeQuery] = useQueryLoader<MovieRecommendationQuery>(RecommendationQuery);
+    const [isPending, startTransition] = useTransition();
+
+    const loadInitialRecommendation = useCallback(() => {
+        startTransition(() => {
+            loadQuery({ prompt: null });
+        });
+    }, [loadQuery, startTransition]);
 
     useEffect(() => {
-        setIsLoading(true);
-        loadQuery({ prompt: null });
+        loadInitialRecommendation();
         return () => {
             disposeQuery();
         };
-    }, [loadQuery, disposeQuery]);
+    }, [disposeQuery, loadInitialRecommendation]);
 
     const requestRecommendation = useCallback(() => {
-        setIsLoading(true);
-        loadQuery(
-            { prompt: prompt.trim() ? prompt.trim() : null },
-            {
-                fetchPolicy: "network-only",
-            }
-        );
-    }, [loadQuery, prompt]);
+        startTransition(() => {
+            loadQuery(
+                { prompt: prompt.trim() ? prompt.trim() : null },
+                {
+                    fetchPolicy: "network-only",
+                }
+            );
+        });
+    }, [loadQuery, prompt, startTransition]);
 
     const handlePromptChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
         setPrompt(event.target.value);
     }, []);
-
-    useEffect(() => {
-        if (!queryRef) {
-            return;
-        }
-        setIsLoading(false);
-    }, [queryRef]);
 
     const controls = (
         <Paper variant="outlined" sx={{ p: 2, mb: 3 }}>
@@ -185,11 +184,11 @@ const MovieRecommendation: FC<{ menuItem: MenuItemType }> = ({ menuItem }) => {
                     minRows={1}
                 />
                 <Stack direction="row" spacing={1} alignItems="center">
-                    <Button variant="contained" onClick={requestRecommendation} disabled={isLoading}>
+                    <Button variant="contained" onClick={requestRecommendation} disabled={isPending}>
                         Recommend something
                     </Button>
                     <Divider flexItem orientation="vertical" sx={{ display: { xs: "none", sm: "block" } }} />
-                    <Button variant="text" onClick={requestRecommendation} disabled={isLoading}>
+                    <Button variant="text" onClick={requestRecommendation} disabled={isPending}>
                         Refresh
                     </Button>
                 </Stack>
@@ -201,12 +200,14 @@ const MovieRecommendation: FC<{ menuItem: MenuItemType }> = ({ menuItem }) => {
         <Box>
             {controls}
             {queryRef ? (
-                <RecommendationContent
-                    menuItem={menuItem}
-                    queryRef={queryRef}
-                    onRefresh={requestRecommendation}
-                    isLoading={isLoading}
-                />
+                <Suspense fallback={<Loader open={true} />}>
+                    <RecommendationContent
+                        menuItem={menuItem}
+                        queryRef={queryRef}
+                        onRefresh={requestRecommendation}
+                        isLoading={isPending}
+                    />
+                </Suspense>
             ) : (
                 <Loader open={true} />
             )}
