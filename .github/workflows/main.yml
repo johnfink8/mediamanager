@@ -1,0 +1,17 @@
+on:
+  push:
+    branches:
+      - main
+jobs:
+  deploy:
+    runs-on: self-hosted  # Or your specific label, e.g., 'self-hosted-deploy'
+    if: github.event.pull_request.merged == true
+    steps:
+      - name: Run deployment script
+        run: |
+          # Your deployment commands here
+          echo "Deploying application..."
+          # Example: docker-compose up -d
+          cd /opt/servermonitor
+          git pull
+          docker compose up -d --build nginx
