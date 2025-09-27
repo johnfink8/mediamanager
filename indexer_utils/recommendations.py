@@ -203,8 +203,13 @@ def _choose_with_openai(
         "Always avoid suggesting movies that are flagged as recently watched. "
         "Respond using compact JSON with fields: imdb_id (string), title (string), reason (string)."
     )
+    logger.info(
+        "Sending OpenAI movie recommendation request with prompt: %s", prompt
+    )
+    logger.debug("OpenAI movie recommendation payload: %s", payload)
     try:
         result = call_openai_json(system_prompt, json.dumps(payload))
+        logger.info("Received OpenAI movie recommendation result: %s", result)
         if not isinstance(result, dict):
             return None
         return result
