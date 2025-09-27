@@ -98,7 +98,8 @@ def check_movies(days: int) -> None:
     seen = set()
     for item in root.iter("item"):
         title = item.find("title").text  # type: ignore
-        title = title.encode("ascii", "ignore")  # type: ignore
+        title_bytes = title.encode("ascii", "ignore")  # type: ignore
+        normalized_title = title_bytes.decode("ascii", "ignore")
         attrs = get_attrs(item)
         imdb = get_attr(item, "imdb")
         if not imdb:
@@ -139,17 +140,19 @@ def check_movies(days: int) -> None:
         add_attr(attrs, result, "status")
         add_attr(attrs, result, "genres")
         attrs["year"] = result["year"]
-        attrs.update(get_ratings_attrs(result["ratings"]))
+        ratings = result.get("ratings")
+        if ratings:
+            attrs.update(get_ratings_attrs(ratings))
         # Use filter logic
         temp_item = IgnoreItem(item_type="mv", uid=imdb_id, attributes=attrs)
         ignore = should_ignore_by_rules(temp_item)
-        poster = result["remotePoster"]
+        poster = result.get("remotePoster")
         vec = None
         if ignore:
             enriched_attrs = attrs
         else:
             enriched_attrs = annotate_with_ai(
-                "mv", imdb_id, result.get("title", str(title)), attrs
+                "mv", imdb_id, result.get("title", normalized_title), attrs
             )
         try:
             plex_movie = find_movie(result["title"], result["year"])
@@ -159,9 +162,9 @@ def check_movies(days: int) -> None:
                 result["year"],
                 result["title"],
             )
-            logger.info("New movie found %s", title)
+            logger.info("New movie found %s", normalized_title)
             created = IgnoreItem.create(
-                title=title,
+                title=normalized_title,
                 uid=imdb_id,
                 ignore=ignore,
                 item_type="mv",
@@ -170,9 +173,9 @@ def check_movies(days: int) -> None:
             )
         else:
             if not plex_movie:
-                logger.info("New movie found %s", title)
+                logger.info("New movie found %s", normalized_title)
                 created = IgnoreItem.create(
-                    title=title,
+                    title=normalized_title,
                     uid=imdb_id,
                     ignore=ignore,
                     item_type="mv",

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from typing import AsyncIterator, Dict, List, Optional, Type, Union
 
@@ -14,6 +15,9 @@ from indexer_utils.sonarr_utils import add_series
 from indexer_utils.vid_utils import addMovie
 
 from .models import FilterRule, IgnoreItem
+from .recommendations import MovieRecommendationResult, recommend_movie
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -41,6 +45,31 @@ def apply_filters(query: Query, spec: FilterSpec) -> Query:
     # Cross-database JSON filtering (works for both SQLite and MySQL):
     # - .contains(value) checks if value is present as a substring in any element of the list
     # - This is not an exact match, but works cross-db
+    def _cast_json(element):
+        if hasattr(element, "astext"):
+            element = element.astext
+        return func.cast(element, Integer)
+
+    def _numeric_expr():
+        raw_first = func.nullif(func.json_extract(field, "$[0]"), "null")
+        raw_root = func.nullif(func.json_extract(field, "$"), "null")
+        cast_first = func.cast(raw_first, Integer)
+        cast_root = func.cast(raw_root, Integer)
+        cast_direct = _cast_json(func.nullif(field, "null"))
+        return func.coalesce(cast_first, cast_root, cast_direct)
+
+    def _numeric_condition(operator: str, compare_value: int):
+        numeric_value = _numeric_expr()
+        if operator == "lt":
+            return numeric_value < compare_value
+        if operator == "gt":
+            return numeric_value > compare_value
+        if operator == "lte":
+            return numeric_value <= compare_value
+        if operator == "gte":
+            return numeric_value >= compare_value
+        raise ValueError(f"Unsupported numeric operator: {operator}")
+
     if op == "eq":
         query = query.where(field.contains(value))
     elif op == "neq":
@@ -52,13 +81,17 @@ def apply_filters(query: Query, spec: FilterSpec) -> Query:
         values = [v.strip() for v in value.split(",")]
         query = query.where(and_(*[~field.contains(v) for v in values]))
     elif op == "lt":
-        query = query.where(func.cast(field[0], Integer) < int(value))
+        query = query.where(field.is_not(None))
+        query = query.where(_numeric_condition("lt", int(value)))
     elif op == "gt":
-        query = query.where(func.cast(field[0], Integer) > int(value))
+        query = query.where(field.is_not(None))
+        query = query.where(_numeric_condition("gt", int(value)))
     elif op == "lte":
-        query = query.where(func.cast(field[0], Integer) <= int(value))
+        query = query.where(field.is_not(None))
+        query = query.where(_numeric_condition("lte", int(value)))
     elif op == "gte":
-        query = query.where(func.cast(field[0], Integer) >= int(value))
+        query = query.where(field.is_not(None))
+        query = query.where(_numeric_condition("gte", int(value)))
     elif op == "contains":
         query = query.where(field.contains(value))
     elif op == "not_contains":
@@ -402,6 +435,40 @@ class HistoricalIgnoreItemList:
 
 
 @strawberry.type
+class MovieRecommendationType:
+    imdb_id: str
+    title: str
+    overview: Optional[str]
+    poster_url: Optional[str]
+    year: Optional[int]
+    genres: List[str]
+    cast: List[str]
+    reason: Optional[str]
+    source: str
+    prompt: Optional[str]
+    excluded_recent: List[str]
+
+    @classmethod
+    def from_result(
+        cls: type["MovieRecommendationType"],
+        result: MovieRecommendationResult,
+    ) -> "MovieRecommendationType":
+        return cls(
+            imdb_id=result.imdb_id,
+            title=result.title,
+            overview=result.overview,
+            poster_url=result.poster_url,
+            year=result.year,
+            genres=result.genres,
+            cast=result.cast,
+            reason=result.reason,
+            source=result.source,
+            prompt=result.prompt,
+            excluded_recent=result.excluded_recent,
+        )
+
+
+@strawberry.type
 class SchemaQuery:
     @strawberry.field
     def items(
@@ -427,6 +494,15 @@ class SchemaQuery:
             offset=offset,
             apply_inverted_permanent_rules=apply_inverted_permanent_rules,
         )
+
+    @strawberry.field
+    def movie_recommendation(
+        self: "SchemaQuery", prompt: Optional[str] = None
+    ) -> Optional[MovieRecommendationType]:
+        result = recommend_movie(prompt)
+        if result is None:
+            return None
+        return MovieRecommendationType.from_result(result)
 
 
 @strawberry.type
@@ -465,10 +541,13 @@ class Mutation:
         item = session.query(IgnoreItem).get(data.id.node_id)
         if not item:
             raise Exception(f"Item not found: {data.id.node_id}")
-        if item.item_type == "mv":
-            addMovie(item.uid)
-        else:
-            add_series(item.uid)
+        try:
+            if item.item_type == "mv":
+                addMovie(item.uid)
+            else:
+                add_series(item.uid)
+        except Exception:
+            logger.exception("Failed to trigger download for %s", item.uid)
 
         item.added = True
         item.ignore = True
