@@ -1,5 +1,5 @@
 import React, { FC, Suspense, useCallback, useEffect, useMemo, useState, useTransition } from "react";
-import { graphql, usePreloadedQuery, useQueryLoader, PreloadedQuery } from "react-relay";
+import { graphql, useMutation, usePreloadedQuery, useQueryLoader, PreloadedQuery } from "react-relay";
 import Box from "@mui/material/Box";
 import Paper from "@mui/material/Paper";
 import TextField from "@mui/material/TextField";
@@ -11,6 +11,11 @@ import CardMedia from "@mui/material/CardMedia";
 import Typography from "@mui/material/Typography";
 import Chip from "@mui/material/Chip";
 import Divider from "@mui/material/Divider";
+import IconButton from "@mui/material/IconButton";
+import Tooltip from "@mui/material/Tooltip";
+import ThumbUpAltOutlined from "@mui/icons-material/ThumbUpAltOutlined";
+import ThumbDownAltOutlined from "@mui/icons-material/ThumbDownAltOutlined";
+import AccessTimeOutlined from "@mui/icons-material/AccessTimeOutlined";
 
 import BreadCrumbs from "./BreadCrumbs";
 import Loader from "./Loader";
@@ -20,6 +25,7 @@ import { MovieRecommendationQuery } from "./__generated__/MovieRecommendationQue
 const RecommendationQuery = graphql`
     query MovieRecommendationQuery($prompt: String) {
         movieRecommendation(prompt: $prompt) {
+            id
             imdbId
             title
             overview
@@ -31,9 +37,27 @@ const RecommendationQuery = graphql`
             source
             prompt
             excludedRecent
+            preference
         }
     }
 `;
+
+const SetRecommendationPreferenceMutation = graphql`
+    mutation MovieRecommendationPreferenceMutation(
+        $input: SetRecommendationPreferenceInput!
+    ) {
+        setRecommendationPreference(data: $input) {
+            id
+            preference
+        }
+    }
+`;
+
+const PREFERENCE_OPTIONS = [
+    { value: "LIKE", label: "Like", Icon: ThumbUpAltOutlined },
+    { value: "NOT_NOW", label: "Not now", Icon: AccessTimeOutlined },
+    { value: "NEVER", label: "Never", Icon: ThumbDownAltOutlined },
+] as const;
 
 const RecommendationContent: FC<{
     menuItem: MenuItemType;
@@ -44,16 +68,55 @@ const RecommendationContent: FC<{
     const data = usePreloadedQuery<MovieRecommendationQuery>(RecommendationQuery, queryRef);
     const recommendation = data.movieRecommendation;
     const crumbs = useMemo(() => [menuItem], [menuItem]);
+    const [commitPreference, isPreferencePending] = useMutation<any>(
+        SetRecommendationPreferenceMutation
+    );
+    const [selectedPreference, setSelectedPreference] = useState<string | null>(
+        recommendation?.preference ?? null
+    );
+
+    useEffect(() => {
+        setSelectedPreference(recommendation?.preference ?? null);
+    }, [recommendation?.id, recommendation?.preference]);
+
+    const handlePreference = useCallback(
+        (value: string) => {
+            if (!recommendation?.id) {
+                return;
+            }
+            const previous = selectedPreference;
+            setSelectedPreference(value);
+            commitPreference({
+                variables: {
+                    input: {
+                        recommendationId: recommendation.id,
+                        preference: value,
+                    },
+                },
+                optimisticResponse: {
+                    setRecommendationPreference: {
+                        id: recommendation.id,
+                        preference: value,
+                    },
+                },
+                onError: () => {
+                    setSelectedPreference(previous ?? null);
+                },
+            });
+        },
+        [commitPreference, recommendation?.id, selectedPreference]
+    );
 
     const genres = recommendation?.genres ?? [];
     const cast = recommendation?.cast ?? [];
+    const hasRecommendation = Boolean(recommendation);
 
     return (
         <Box sx={{ position: "relative" }}>
             <BreadCrumbs crumbs={crumbs} />
             <Loader open={isLoading} />
             <Stack spacing={3}>
-                {recommendation ? (
+                {hasRecommendation ? (
                     <Card sx={{ display: "flex", flexWrap: "wrap" }}>
                         {recommendation.posterUrl ? (
                             <CardMedia
@@ -104,6 +167,42 @@ const RecommendationContent: FC<{
                                     </Stack>
                                 </Box>
                             ) : null}
+                            <Divider sx={{ my: 2 }} />
+                            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                                <Typography variant="subtitle2" color="text.secondary">
+                                    Is this a good pick?
+                                </Typography>
+                                {PREFERENCE_OPTIONS.map(({ value, label, Icon }) => {
+                                    const isActive = selectedPreference === value;
+                                    return (
+                                        <Tooltip key={value} title={label}>
+                                            <span>
+                                                <IconButton
+                                                    size="small"
+                                                    color={isActive ? "primary" : "default"}
+                                                    disabled={
+                                                        !recommendation?.id ||
+                                                        isPreferencePending ||
+                                                        isLoading
+                                                    }
+                                                    onClick={() => handlePreference(value)}
+                                                >
+                                                    <Icon fontSize="small" />
+                                                </IconButton>
+                                            </span>
+                                        </Tooltip>
+                                    );
+                                })}
+                                {selectedPreference ? (
+                                    <Typography variant="body2" color="text.secondary">
+                                        {selectedPreference === "LIKE"
+                                            ? "Glad you liked it!"
+                                            : selectedPreference === "NOT_NOW"
+                                            ? "We will keep this one for later."
+                                            : "We will avoid this suggestion in the future."}
+                                    </Typography>
+                                ) : null}
+                            </Stack>
                         </CardContent>
                     </Card>
                 ) : (
