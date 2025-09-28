@@ -51,6 +51,8 @@ def test_db(monkeypatch):
     monkeypatch.setattr("indexer_utils.schema.db_session", override_db_session)
     monkeypatch.setattr("indexer_utils.filters.db_session", override_db_session)
     monkeypatch.setitem(globals(), "db_session", override_db_session)
+    monkeypatch.setattr("indexer_utils.schema.addMovie", lambda uid: None)
+    monkeypatch.setattr("indexer_utils.schema.add_series", lambda uid: None)
     yield
 
 
