@@ -568,13 +568,10 @@ class Mutation:
         item = session.query(IgnoreItem).get(data.id.node_id)
         if not item:
             raise Exception(f"Item not found: {data.id.node_id}")
-        try:
-            if item.item_type == "mv":
-                addMovie(item.uid)
-            else:
-                add_series(item.uid)
-        except Exception:
-            logger.exception("Failed to trigger download for %s", item.uid)
+        if item.item_type == "mv":
+            addMovie(item.uid)
+        else:
+            add_series(item.uid)
 
         item.added = True
         item.ignore = True
