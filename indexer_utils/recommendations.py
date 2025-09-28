@@ -8,11 +8,13 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 from .ai_recs import OPENAI_MODEL, call_openai_json
 from .plex_utils import get_recently_played_imdb_ids
 from .radarr_utils import radarr_query
+from .models import MovieRecommendationRecord, RecommendationPreference
 
 logger = logging.getLogger(__name__)
 
 MAX_CANDIDATES = 25
 RECENT_HISTORY_LIMIT = 40
+HISTORY_PAYLOAD_LIMIT = 10
 
 
 def _safe_float(value: Any) -> float:
@@ -146,6 +148,27 @@ class MovieRecommendationResult:
     source: str
     prompt: Optional[str]
     excluded_recent: List[str]
+    record_id: Optional[int]
+    preference: Optional[RecommendationPreference]
+
+
+def _history_payload(limit: int = HISTORY_PAYLOAD_LIMIT) -> List[Dict[str, Optional[str]]]:
+    try:
+        records = MovieRecommendationRecord.recent_history(limit=limit)
+    except Exception:
+        logger.exception("Failed to load recommendation history")
+        return []
+    history: List[Dict[str, Optional[str]]] = []
+    for record in records:
+        history.append(
+            {
+                "prompt": record.prompt,
+                "imdb_id": record.recommended_imdb_id,
+                "title": record.recommended_title,
+                "preference": record.preference.value if record.preference else None,
+            }
+        )
+    return history
 
 
 def _build_candidates(radarr_movies: Sequence[Dict[str, Any]], recent_ids: Set[str]) -> List[MovieCandidate]:
@@ -195,6 +218,7 @@ def _choose_with_openai(
             }
             for c in candidates[:MAX_CANDIDATES]
         ],
+        "history": _history_payload(),
     }
     system_prompt = (
         "You are a movie recommendation assistant for a personal media library. "
@@ -270,6 +294,18 @@ def recommend_movie(prompt: Optional[str] = None) -> Optional[MovieRecommendatio
 
     excluded_titles = _recent_titles(recent_ids, radarr_movies)
 
+    record: Optional[MovieRecommendationRecord] = None
+    try:
+        record = MovieRecommendationRecord.log_recommendation(
+            prompt=prompt,
+            imdb_id=chosen.imdb_id,
+            title=chosen.title,
+            reason=reason,
+            source=source,
+        )
+    except Exception:
+        logger.exception("Failed to persist movie recommendation record")
+
     return MovieRecommendationResult(
         imdb_id=chosen.imdb_id,
         title=chosen.title,
@@ -282,5 +318,7 @@ def recommend_movie(prompt: Optional[str] = None) -> Optional[MovieRecommendatio
         source=source,
         prompt=prompt,
         excluded_recent=excluded_titles,
+        record_id=record.id if record else None,
+        preference=record.preference if record else None,
     )
 

@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import os
+import time
 
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 os.environ.setdefault("TMDB_API_KEY", "test-tmdb-key")
@@ -19,7 +20,12 @@ from sqlalchemy.pool import StaticPool
 
 from indexer_utils import main
 from indexer_utils.filters import should_ignore_by_rules
-from indexer_utils.models import FilterRule, IgnoreItem
+from indexer_utils.models import (
+    FilterRule,
+    IgnoreItem,
+    MovieRecommendationRecord,
+    RecommendationPreference,
+)
 from indexer_utils.session import Base, db_session
 from indexer_utils.vid_utils import check_movies, check_shows
 
@@ -882,6 +888,20 @@ def test_apply_filters_lt_year():
 
 
 def test_movie_recommendation_query(run_graphql, monkeypatch):
+    session = db_session()
+    session.add(
+        MovieRecommendationRecord(
+            prompt="space adventure but darker",
+            recommended_imdb_id="tt0000005",
+            recommended_title="Dark Space",
+            recommended_reason="Previously suggested",
+            source="openai",
+            preference=RecommendationPreference.NEVER,
+            created_at=int(time.time()) - 100,
+        )
+    )
+    session.commit()
+
     sample_movies = [
         {
             "imdbId": "tt0000001",
@@ -928,6 +948,9 @@ def test_movie_recommendation_query(run_graphql, monkeypatch):
     def fake_openai(system_prompt: str, user_payload: str):
         payload = json.loads(user_payload)
         assert payload["movies"][0]["imdb_id"] == "tt0000002"
+        history = payload.get("history")
+        assert history and history[0]["title"] == "Dark Space"
+        assert history[0]["preference"] == "never"
         return {"imdb_id": "tt0000002", "reason": "Fits the space adventure vibe."}
 
     monkeypatch.setattr(
@@ -937,6 +960,7 @@ def test_movie_recommendation_query(run_graphql, monkeypatch):
     query = """
     query MovieRecommendationQuery($prompt: String) {
         movieRecommendation(prompt: $prompt) {
+            id
             title
             imdbId
             posterUrl
@@ -948,12 +972,14 @@ def test_movie_recommendation_query(run_graphql, monkeypatch):
             source
             prompt
             excludedRecent
+            preference
         }
     }
     """
 
     result = run_graphql(query, {"prompt": "space adventure"})
     data = result["data"]["movieRecommendation"]
+    assert data["id"]
     assert data["title"] == "Space Adventure"
     assert data["imdbId"] == "tt0000002"
     assert data["posterUrl"].endswith("poster-space.jpg")
@@ -963,3 +989,55 @@ def test_movie_recommendation_query(run_graphql, monkeypatch):
     assert data["source"] == "openai"
     assert data["prompt"] == "space adventure"
     assert data["excludedRecent"] == ["Already Watched"]
+    assert data["preference"] is None
+
+    session = db_session()
+    records = session.query(MovieRecommendationRecord).order_by(MovieRecommendationRecord.id).all()
+    assert len(records) == 2
+    latest = records[-1]
+    assert latest.recommended_title == "Space Adventure"
+    assert latest.recommended_imdb_id == "tt0000002"
+    assert latest.prompt == "space adventure"
+    assert latest.preference is None
+    assert latest.source == "openai"
+
+
+def test_set_recommendation_preference_mutation(run_graphql):
+    session = db_session()
+    record = MovieRecommendationRecord(
+        prompt="space adventure",
+        recommended_imdb_id="tt0000002",
+        recommended_title="Space Adventure",
+        recommended_reason="Initial suggestion",
+        source="openai",
+        created_at=int(time.time()),
+    )
+    session.add(record)
+    session.commit()
+    session.refresh(record)
+
+    mutation = """
+    mutation SetPreference($input: SetRecommendationPreferenceInput!) {
+        setRecommendationPreference(data: $input) {
+            id
+            preference
+        }
+    }
+    """
+
+    result = run_graphql(
+        mutation,
+        {
+            "input": {
+                "recommendationId": str(record.id),
+                "preference": "LIKE",
+            }
+        },
+    )
+
+    payload = result["data"]["setRecommendationPreference"]
+    assert payload["id"] == str(record.id)
+    assert payload["preference"] == "LIKE"
+
+    refreshed = db_session().query(MovieRecommendationRecord).get(record.id)
+    assert refreshed.preference == RecommendationPreference.LIKE
