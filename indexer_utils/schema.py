@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import datetime
 import logging
 from dataclasses import dataclass
 from typing import AsyncIterator, Dict, List, Optional, Type, Union
@@ -14,7 +15,12 @@ from indexer_utils.session import db_session
 from indexer_utils.sonarr_utils import add_series
 from indexer_utils.vid_utils import addMovie
 
-from .models import FilterRule, IgnoreItem
+from .models import (
+    FilterRule,
+    IgnoreItem,
+    MovieRecommendationRecord,
+    RecommendationPreference,
+)
 from .recommendations import MovieRecommendationResult, recommend_movie
 
 logger = logging.getLogger(__name__)
@@ -151,6 +157,11 @@ class AttributeEntry:
     key: str
     values: List[str]
     details: Optional[JSON] = None
+
+
+RecommendationPreferenceEnum = strawberry.enum(
+    RecommendationPreference, name="RecommendationPreference"
+)
 
 
 @strawberry.type(name="IgnoreItem")
@@ -436,6 +447,7 @@ class HistoricalIgnoreItemList:
 
 @strawberry.type
 class MovieRecommendationType:
+    id: Optional[ID]
     imdb_id: str
     title: str
     overview: Optional[str]
@@ -447,6 +459,7 @@ class MovieRecommendationType:
     source: str
     prompt: Optional[str]
     excluded_recent: List[str]
+    preference: Optional[RecommendationPreferenceEnum]
 
     @classmethod
     def from_result(
@@ -454,6 +467,7 @@ class MovieRecommendationType:
         result: MovieRecommendationResult,
     ) -> "MovieRecommendationType":
         return cls(
+            id=str(result.record_id) if result.record_id is not None else None,
             imdb_id=result.imdb_id,
             title=result.title,
             overview=result.overview,
@@ -465,6 +479,7 @@ class MovieRecommendationType:
             source=result.source,
             prompt=result.prompt,
             excluded_recent=result.excluded_recent,
+            preference=result.preference,
         )
 
 
@@ -528,6 +543,18 @@ class AddItemInput:
 
 
 @strawberry.type
+class RecommendationFeedbackType:
+    id: ID
+    preference: RecommendationPreferenceEnum
+
+
+@strawberry.input
+class SetRecommendationPreferenceInput:
+    recommendation_id: ID
+    preference: RecommendationPreferenceEnum
+
+
+@strawberry.type
 class MutationReturn:
     ignore_items: IgnoreItemList
     filter_rules: FilterRuleList
@@ -581,6 +608,28 @@ class Mutation:
         session.add(item)
         session.commit()
         return IgnoreItemType.from_sqlalchemy(item)
+
+    @strawberry.mutation
+    def set_recommendation_preference(
+        self: "Mutation", data: SetRecommendationPreferenceInput
+    ) -> RecommendationFeedbackType:
+        try:
+            record_id = int(str(data.recommendation_id))
+        except (TypeError, ValueError):
+            raise Exception("Invalid recommendation id")
+        session = db_session()
+        record = session.query(MovieRecommendationRecord).get(record_id)
+        if record is None:
+            raise Exception("Recommendation not found")
+        record.preference = data.preference
+        record.updated_at = int(datetime.utcnow().timestamp())
+        session.add(record)
+        session.commit()
+        session.refresh(record)
+        return RecommendationFeedbackType(
+            id=str(record.id),
+            preference=record.preference,
+        )
 
     @strawberry.mutation
     def create_filter_rule(self, data: FilterRuleInput) -> MutationReturn:

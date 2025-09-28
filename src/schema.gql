@@ -70,12 +70,19 @@ The `JSON` scalar type represents JSON values as specified by [ECMA-404](https:/
 """
 scalar JSON @specifiedBy(url: "https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf")
 
+enum RecommendationPreference {
+  LIKE
+  NOT_NOW
+  NEVER
+}
+
 type Mutation {
   addItem(data: AddItemInput!): IgnoreItem!
   deleteItem(data: AddItemInput!): IgnoreItem!
   createFilterRule(data: FilterRuleInput!): MutationReturn!
   deleteFilterRule(id: ID!): MutationReturn!
   setItemAdded(data: SetItemAddedInput!): IgnoreItem!
+  setRecommendationPreference(data: SetRecommendationPreferenceInput!): RecommendationFeedback!
 }
 
 type MutationReturn {
@@ -86,6 +93,16 @@ type MutationReturn {
 input SetItemAddedInput {
   id: ID!
   added: Boolean!
+}
+
+input SetRecommendationPreferenceInput {
+  recommendationId: ID!
+  preference: RecommendationPreference!
+}
+
+type RecommendationFeedback {
+  id: ID!
+  preference: RecommendationPreference!
 }
 
 type PageInfo {
@@ -108,6 +125,7 @@ type Subscription {
 }
 
 type MovieRecommendation {
+  id: ID
   imdbId: String!
   title: String!
   overview: String
@@ -119,4 +137,5 @@ type MovieRecommendation {
   source: String!
   prompt: String
   excludedRecent: [String!]!
+  preference: RecommendationPreference
 }
