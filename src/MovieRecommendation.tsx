@@ -107,16 +107,12 @@ const RecommendationContent: FC<{
         [commitPreference, recommendation?.id, selectedPreference]
     );
 
-    const genres = recommendation?.genres ?? [];
-    const cast = recommendation?.cast ?? [];
-    const hasRecommendation = Boolean(recommendation);
-
     return (
         <Box sx={{ position: "relative" }}>
             <BreadCrumbs crumbs={crumbs} />
             <Loader open={isLoading} />
             <Stack spacing={3}>
-                {hasRecommendation ? (
+                {recommendation ? (
                     <Card sx={{ display: "flex", flexWrap: "wrap" }}>
                         {recommendation.posterUrl ? (
                             <CardMedia
@@ -143,25 +139,25 @@ const RecommendationContent: FC<{
                                     We could not find a synopsis for this title.
                                 </Typography>
                             )}
-                            {genres.length ? (
+                            {recommendation.genres?.length ? (
                                 <Box sx={{ mb: 2 }}>
                                     <Typography variant="subtitle2" color="text.secondary">
                                         Genres
                                     </Typography>
                                     <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap" }}>
-                                        {genres.map((genre) => (
+                                        {recommendation.genres.map((genre) => (
                                             <Chip key={genre} label={genre} color="primary" variant="outlined" />
                                         ))}
                                     </Stack>
                                 </Box>
                             ) : null}
-                            {cast.length ? (
+                            {recommendation.cast?.length ? (
                                 <Box>
                                     <Typography variant="subtitle2" color="text.secondary">
                                         Cast
                                     </Typography>
                                     <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap" }}>
-                                        {cast.map((person) => (
+                                        {recommendation.cast.map((person) => (
                                             <Chip key={person} label={person} variant="outlined" />
                                         ))}
                                     </Stack>
