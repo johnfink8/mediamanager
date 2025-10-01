@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import os
+import time
 
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 os.environ.setdefault("TMDB_API_KEY", "test-tmdb-key")
@@ -19,7 +20,12 @@ from sqlalchemy.pool import StaticPool
 
 from indexer_utils import main
 from indexer_utils.filters import should_ignore_by_rules
-from indexer_utils.models import FilterRule, IgnoreItem
+from indexer_utils.models import (
+    FilterRule,
+    IgnoreItem,
+    MovieRecommendationRecord,
+    RecommendationPreference,
+)
 from indexer_utils.session import Base, db_session
 from indexer_utils.vid_utils import check_movies, check_shows
 
@@ -42,7 +48,11 @@ def test_db(monkeypatch):
 
     monkeypatch.setattr("indexer_utils.session.db_session", override_db_session)
     monkeypatch.setattr("indexer_utils.models.db_session", override_db_session)
+    monkeypatch.setattr("indexer_utils.schema.db_session", override_db_session)
+    monkeypatch.setattr("indexer_utils.filters.db_session", override_db_session)
     monkeypatch.setitem(globals(), "db_session", override_db_session)
+    monkeypatch.setattr("indexer_utils.schema.addMovie", lambda uid: None)
+    monkeypatch.setattr("indexer_utils.schema.add_series", lambda uid: None)
     yield
 
 
@@ -877,3 +887,201 @@ def test_apply_filters_lt_year():
     assert "Future Movie" not in titles
     assert "Unrelated Movie" not in titles
     assert "Malformatted Movie" in titles
+
+
+def test_movie_recommendation_query(run_graphql, monkeypatch):
+    session = db_session()
+    session.add(
+        MovieRecommendationRecord(
+            prompt="space adventure but darker",
+            recommended_imdb_id="tt0000005",
+            recommended_title="Dark Space",
+            recommended_reason="Previously suggested",
+            source="openai",
+            preference=RecommendationPreference.NEVER,
+            created_at=int(time.time()) - 100,
+        )
+    )
+    session.commit()
+
+    sample_movies = [
+        {
+            "imdbId": "tt0000001",
+            "title": "Already Watched",
+            "hasFile": True,
+            "overview": "An older classic.",
+            "genres": ["Drama"],
+            "year": 1982,
+            "images": [
+                {"coverType": "poster", "url": "http://example.com/poster-old.jpg"}
+            ],
+            "credits": [{"name": "Actor Old", "type": "Actor"}],
+            "ratings": {"imdb": {"value": 7.1}},
+        },
+        {
+            "imdbId": "tt0000002",
+            "title": "Space Adventure",
+            "hasFile": True,
+            "overview": "A journey through the stars.",
+            "genres": ["Sci-Fi", "Adventure"],
+            "year": 2022,
+            "images": [
+                {
+                    "coverType": "poster",
+                    "url": "http://example.com/poster-space.jpg",
+                }
+            ],
+            "credits": [
+                {"name": "Star Captain", "type": "Actor"},
+                {"name": "Navigator", "type": "Actor"},
+            ],
+            "ratings": {"imdb": {"value": 8.6}},
+        },
+    ]
+
+    monkeypatch.setattr(
+        "indexer_utils.recommendations.radarr_query", lambda cmd: sample_movies
+    )
+    monkeypatch.setattr(
+        "indexer_utils.recommendations.get_recently_played_imdb_ids",
+        lambda limit=40: {"tt0000001"},
+    )
+
+    def fake_openai(system_prompt: str, user_payload: str):
+        payload = json.loads(user_payload)
+        assert payload["movies"][0]["imdb_id"] == "tt0000002"
+        history = payload.get("history")
+        assert history and history[0]["title"] == "Dark Space"
+        assert history[0]["preference"] == "NEVER"
+        return {"imdb_id": "tt0000002", "reason": "Fits the space adventure vibe."}
+
+    monkeypatch.setattr(
+        "indexer_utils.recommendations.call_openai_json", fake_openai
+    )
+
+    query = """
+    query MovieRecommendationQuery($prompt: String) {
+        movieRecommendation(prompt: $prompt) {
+            id
+            title
+            imdbId
+            posterUrl
+            overview
+            year
+            genres
+            cast
+            reason
+            source
+            prompt
+            excludedRecent
+            preference
+        }
+    }
+    """
+
+    result = run_graphql(query, {"prompt": "space adventure"})
+    data = result["data"]["movieRecommendation"]
+    assert data["id"]
+    assert data["title"] == "Space Adventure"
+    assert data["imdbId"] == "tt0000002"
+    assert data["posterUrl"].endswith("poster-space.jpg")
+    assert "Sci-Fi" in data["genres"]
+    assert "Star Captain" in data["cast"]
+    assert data["reason"] == "Fits the space adventure vibe."
+    assert data["source"] == "openai"
+    assert data["prompt"] == "space adventure"
+    assert data["excludedRecent"] == ["Already Watched"]
+    assert data["preference"] is None
+
+    session = db_session()
+    records = session.query(MovieRecommendationRecord).order_by(MovieRecommendationRecord.id).all()
+    assert len(records) == 2
+    latest = records[-1]
+    assert latest.recommended_title == "Space Adventure"
+    assert latest.recommended_imdb_id == "tt0000002"
+    assert latest.prompt == "space adventure"
+    assert latest.preference is None
+    assert latest.source == "openai"
+
+
+def test_movie_recommendation_uses_radarr_base_for_posters(
+    run_graphql, monkeypatch
+):
+    monkeypatch.setenv("RADARR_URL", "https://radarr.example.com/radarr/api/v3")
+
+    sample_movies = [
+        {
+            "imdbId": "tt0000003",
+            "title": "Relative Poster",
+            "hasFile": True,
+            "images": [
+                {"coverType": "poster", "url": "/MediaCover/3/poster.jpg"}
+            ],
+            "ratings": {"imdb": {"value": 7.5}},
+        }
+    ]
+
+    monkeypatch.setattr(
+        "indexer_utils.recommendations.radarr_query", lambda cmd: sample_movies
+    )
+    monkeypatch.setattr(
+        "indexer_utils.recommendations.get_recently_played_imdb_ids",
+        lambda limit=40: set(),
+    )
+    monkeypatch.setattr(
+        "indexer_utils.recommendations.call_openai_json",
+        lambda system_prompt, payload: {"imdb_id": "tt0000003"},
+    )
+
+    query = """
+    query MovieRecommendationQuery($prompt: String) {
+        movieRecommendation(prompt: $prompt) {
+            posterUrl
+        }
+    }
+    """
+
+    result = run_graphql(query, {"prompt": "anything"})
+    poster_url = result["data"]["movieRecommendation"]["posterUrl"]
+    assert poster_url == "https://radarr.example.com/MediaCover/3/poster.jpg"
+
+
+def test_set_recommendation_preference_mutation(run_graphql):
+    session = db_session()
+    record = MovieRecommendationRecord(
+        prompt="space adventure",
+        recommended_imdb_id="tt0000002",
+        recommended_title="Space Adventure",
+        recommended_reason="Initial suggestion",
+        source="openai",
+        created_at=int(time.time()),
+    )
+    session.add(record)
+    session.commit()
+    session.refresh(record)
+
+    mutation = """
+    mutation SetPreference($input: SetRecommendationPreferenceInput!) {
+        setRecommendationPreference(data: $input) {
+            id
+            preference
+        }
+    }
+    """
+
+    result = run_graphql(
+        mutation,
+        {
+            "input": {
+                "recommendationId": str(record.id),
+                "preference": "LIKE",
+            }
+        },
+    )
+
+    payload = result["data"]["setRecommendationPreference"]
+    assert payload["id"] == str(record.id)
+    assert payload["preference"] == "LIKE"
+
+    refreshed = db_session().query(MovieRecommendationRecord).get(record.id)
+    assert refreshed.preference == RecommendationPreference.LIKE
