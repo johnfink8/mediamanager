@@ -45,7 +45,12 @@ class InData(BaseModel):
 
 
 def load_scripts() -> str:
-    wps = json.load(open(ROOT_DIR / "webpack-stats.json"))
+    try:
+        with open(ROOT_DIR / "webpack-stats.json") as fp:
+            wps = json.load(fp)
+    except FileNotFoundError:
+        logger.warning("webpack-stats.json not found; serving without bundled assets")
+        return "<script></script>"
     templates = {
         ".js": '<script src="%s"></script>',
         ".css": '<link href="%s" rel="stylesheet" />',
