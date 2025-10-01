@@ -85,6 +85,7 @@ const RecommendationContent: FC<{
                 return;
             }
             const previous = selectedPreference;
+            const shouldRefresh = value === "NOT_NOW" || value === "NEVER";
             setSelectedPreference(value);
             commitPreference({
                 variables: {
@@ -102,9 +103,14 @@ const RecommendationContent: FC<{
                 onError: () => {
                     setSelectedPreference(previous ?? null);
                 },
+                onCompleted: () => {
+                    if (shouldRefresh) {
+                        onRefresh();
+                    }
+                },
             });
         },
-        [commitPreference, recommendation?.id, selectedPreference]
+        [commitPreference, onRefresh, recommendation?.id, selectedPreference]
     );
 
     return (
