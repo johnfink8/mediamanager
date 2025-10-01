@@ -1,5 +1,6 @@
+import enum
 from datetime import datetime
-from typing import Iterable, List, Optional, Type
+from typing import Iterable, List, Optional, Sequence, Type
 
 from sqlalchemy import (
     JSON,
@@ -7,6 +8,7 @@ from sqlalchemy import (
     Enum,
     Integer,
     String,
+    Text,
 )
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
@@ -90,3 +92,85 @@ class FilterRule(Base):
             session = db_session()
             session.add(self)
         session.commit()
+
+
+class RecommendationPreference(enum.Enum):
+    LIKE = "LIKE"
+    NOT_NOW = "NOT_NOW"
+    NEVER = "NEVER"
+
+
+class MovieRecommendationRecord(Base):
+    __tablename__ = "movie_recommendations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    recommended_imdb_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    recommended_title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    recommended_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    preference: Mapped[Optional[RecommendationPreference]] = mapped_column(
+        Enum(RecommendationPreference, name="movie_recommendation_preference"),
+        nullable=True,
+    )
+    created_at: Mapped[int] = mapped_column(
+        Integer, default=lambda: int(datetime.utcnow().timestamp())
+    )
+    updated_at: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    def save(self) -> None:
+        session = Session.object_session(self)
+        if session is None:
+            session = db_session()
+            session.add(self)
+        session.commit()
+
+    def set_preference(self, preference: RecommendationPreference) -> None:
+        session = Session.object_session(self)
+        if session is None:
+            session = db_session()
+            session.add(self)
+        self.preference = preference
+        self.updated_at = int(datetime.utcnow().timestamp())
+        session.commit()
+
+    @classmethod
+    def log_recommendation(
+        cls: Type["MovieRecommendationRecord"],
+        *,
+        prompt: Optional[str],
+        imdb_id: Optional[str],
+        title: Optional[str],
+        reason: Optional[str],
+        source: Optional[str],
+    ) -> "MovieRecommendationRecord":
+        session = db_session()
+        record = cls(
+            prompt=prompt,
+            recommended_imdb_id=imdb_id,
+            recommended_title=title,
+            recommended_reason=reason,
+            source=source,
+            created_at=int(datetime.utcnow().timestamp()),
+        )
+        session.add(record)
+        session.commit()
+        session.refresh(record)
+        return record
+
+    @classmethod
+    def get_by_id(cls, record_id: int) -> Optional["MovieRecommendationRecord"]:
+        session = db_session()
+        return session.query(cls).get(record_id)
+
+    @classmethod
+    def recent_history(
+        cls, limit: int = 10
+    ) -> Sequence["MovieRecommendationRecord"]:
+        session = db_session()
+        return (
+            session.query(cls)
+            .order_by(cls.created_at.desc(), cls.id.desc())
+            .limit(limit)
+            .all()
+        )

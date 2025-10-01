@@ -1,16 +1,20 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Set
 from urllib.parse import quote_plus
 
 import requests
 from decouple import config
 
 
-def find_movie(title: str, year: Optional[int] = None) -> Optional[Dict[str, Any]]:
-    url = config("PLEX_URL")
-    headers = {
+def _plex_headers() -> Dict[str, str]:
+    return {
         "X-Plex-Token": config("PLEX_TOKEN"),
         "Accept": "application/json",
     }
+
+
+def find_movie(title: str, year: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    url = config("PLEX_URL")
+    headers = _plex_headers()
     r = requests.get(
         url + "/search?query=%s" % quote_plus(title.encode(errors="ignore")),
         headers=headers,
@@ -23,3 +27,51 @@ def find_movie(title: str, year: Optional[int] = None) -> Optional[Dict[str, Any
             if year is None or movie["year"] == year:
                 return movie
     return None
+
+
+def get_recently_played(limit: int = 40) -> List[Dict[str, Any]]:
+    """Fetch recent play history for movies from Plex."""
+
+    url = config("PLEX_URL")
+    headers = _plex_headers()
+    params = {"maxResults": limit, "metadataItemType": 1}
+    response = requests.get(
+        f"{url}/status/sessions/history/all",
+        headers=headers,
+        params=params,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    return payload.get("MediaContainer", {}).get("Metadata", []) or []
+
+
+def _extract_imdb_from_guid(guid_value: str) -> Optional[str]:
+    if not guid_value:
+        return None
+    guid_value = str(guid_value)
+    if "tt" not in guid_value:
+        return None
+    idx = guid_value.index("tt")
+    imdb_id = guid_value[idx:]
+    imdb_id = imdb_id.split("?")[0]
+    imdb_id = imdb_id.strip()
+    return imdb_id or None
+
+
+def get_recently_played_imdb_ids(limit: int = 40) -> Set[str]:
+    metadata = get_recently_played(limit=limit)
+    recent_ids: Set[str] = set()
+    for entry in metadata:
+        guid = entry.get("guid")
+        imdb_id = _extract_imdb_from_guid(guid)
+        if imdb_id:
+            recent_ids.add(imdb_id)
+            continue
+        guid_list = entry.get("Guid") or []
+        if isinstance(guid_list, list):
+            for guid_entry in guid_list:
+                imdb_id = _extract_imdb_from_guid(guid_entry.get("id"))
+                if imdb_id:
+                    recent_ids.add(imdb_id)
+                    break
+    return recent_ids
