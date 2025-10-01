@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-from functools import lru_cache
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -13,8 +12,7 @@ from .ai_recs import OPENAI_MODEL, call_openai_json
 from .plex_utils import get_recently_played_imdb_ids
 from .radarr_utils import radarr_query
 from .models import MovieRecommendationRecord, RecommendationPreference
-from redis import Redis
-from redis.exceptions import RedisError
+from .redis_client import get_redis_client, redis_get_json, redis_set_json
 
 logger = logging.getLogger(__name__)
 
@@ -24,53 +22,6 @@ HISTORY_PAYLOAD_LIMIT = 10
 CACHE_TTL_SECONDS = 60 * 60
 RADARR_MOVIES_CACHE_KEY = "recommend_movie:radarr_movies"
 RECENT_IDS_CACHE_KEY = "recommend_movie:recent_ids"
-
-
-@lru_cache(maxsize=1)
-def _redis_client() -> Optional[Redis]:
-    url = config("REDIS_URL", default=None)
-    if url:
-        return Redis.from_url(str(url), decode_responses=True)
-
-    host = config("REDIS_HOST", default=None)
-    if host:
-        port = config("REDIS_PORT", default=6379, cast=int)
-        db = config("REDIS_DB", default=0, cast=int)
-        return Redis(host=str(host), port=port, db=db, decode_responses=True)
-
-    return None
-
-
-def _redis_get_json(client: Optional[Redis], key: str) -> Optional[Any]:
-    if client is None:
-        return None
-    try:
-        raw = client.get(key)
-    except RedisError as exc:
-        logger.debug("Failed to read %s from redis: %s", key, exc)
-        return None
-    if raw is None:
-        return None
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        logger.debug("Invalid JSON cached at %s", key)
-        return None
-
-
-def _redis_set_json(client: Optional[Redis], key: str, value: Any, ttl: int) -> None:
-    if client is None:
-        return
-    try:
-        payload = json.dumps(value)
-    except TypeError as exc:
-        logger.debug("Failed to serialize %s for redis cache: %s", key, exc)
-        return
-    try:
-        client.setex(key, ttl, payload)
-    except RedisError as exc:
-        logger.debug("Failed to write %s to redis: %s", key, exc)
-
 
 def _safe_float(value: Any) -> float:
     try:
@@ -360,9 +311,9 @@ def _resolve_openai_choice(
 
 
 def recommend_movie(prompt: Optional[str] = None) -> Optional[MovieRecommendationResult]:
-    redis_client = _redis_client()
+    redis_client = get_redis_client()
 
-    cached_movies = _redis_get_json(redis_client, RADARR_MOVIES_CACHE_KEY)
+    cached_movies = redis_get_json(redis_client, RADARR_MOVIES_CACHE_KEY)
     radarr_movies: Optional[List[Dict[str, Any]]]
     if isinstance(cached_movies, list):
         radarr_movies = cached_movies
@@ -373,7 +324,7 @@ def recommend_movie(prompt: Optional[str] = None) -> Optional[MovieRecommendatio
             logger.exception("Failed to load Radarr library")
             return None
         if isinstance(radarr_movies, list):
-            _redis_set_json(
+            redis_set_json(
                 redis_client,
                 RADARR_MOVIES_CACHE_KEY,
                 radarr_movies,
@@ -384,12 +335,12 @@ def recommend_movie(prompt: Optional[str] = None) -> Optional[MovieRecommendatio
         logger.warning("Unexpected Radarr response: %s", type(radarr_movies))
         return None
 
-    cached_recent = _redis_get_json(redis_client, RECENT_IDS_CACHE_KEY)
+    cached_recent = redis_get_json(redis_client, RECENT_IDS_CACHE_KEY)
     if isinstance(cached_recent, list):
         recent_ids = {str(item) for item in cached_recent if item}
     else:
         recent_ids = get_recently_played_imdb_ids(limit=RECENT_HISTORY_LIMIT)
-        _redis_set_json(
+        redis_set_json(
             redis_client,
             RECENT_IDS_CACHE_KEY,
             sorted(str(item) for item in recent_ids if item),
