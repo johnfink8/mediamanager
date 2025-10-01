@@ -95,9 +95,9 @@ class FilterRule(Base):
 
 
 class RecommendationPreference(enum.Enum):
-    LIKE = "like"
-    NOT_NOW = "not_now"
-    NEVER = "never"
+    LIKE = "LIKE"
+    NOT_NOW = "NOT_NOW"
+    NEVER = "NEVER"
 
 
 class MovieRecommendationRecord(Base):
