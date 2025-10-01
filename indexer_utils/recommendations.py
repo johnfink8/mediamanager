@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+from decouple import UndefinedValueError, config
+from urllib.parse import urljoin, urlparse
 
 from .ai_recs import OPENAI_MODEL, call_openai_json
 from .plex_utils import get_recently_played_imdb_ids
@@ -26,13 +29,55 @@ def _safe_float(value: Any) -> float:
         return 0.0
 
 
+def _radarr_url_parts() -> Tuple[Optional[str], Optional[str]]:
+    """Return the Radarr origin and media base URL if configured."""
+
+    try:
+        raw = config("RADARR_URL")
+    except UndefinedValueError:
+        return None, None
+
+    if not raw:
+        return None, None
+
+    parsed = urlparse(str(raw))
+    if parsed.scheme and parsed.netloc:
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        segments = [segment for segment in parsed.path.split("/") if segment]
+        while segments and segments[-1].lower().startswith("api"):
+            segments.pop()
+        base_path = "/" + "/".join(segments) if segments else ""
+        base = f"{origin}{base_path}"
+        if not base.endswith("/"):
+            base = f"{base}/"
+        return origin, base
+
+    raw = str(raw).rstrip("/")
+    if not raw:
+        return None, None
+    return raw, f"{raw}/"
+
+
 def _poster_url(movie: Dict[str, Any]) -> Optional[str]:
     images = movie.get("images") or []
     for image in images:
         if not isinstance(image, dict):
             continue
         if image.get("coverType") == "poster" and image.get("url"):
-            return str(image["url"])
+            poster = str(image["url"])
+            if poster.startswith(("http://", "https://", "data:")):
+                return poster
+            origin, base = _radarr_url_parts()
+            if poster.startswith("//") and origin:
+                scheme = origin.split(":", 1)[0]
+                return f"{scheme}:{poster}"
+            if poster.startswith("/"):
+                if origin:
+                    return f"{origin}{poster}"
+                return poster
+            if base:
+                return urljoin(base, poster)
+            return poster
     return None
 
 
