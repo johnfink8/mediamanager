@@ -29,9 +29,9 @@ def upgrade() -> None:
         sa.Column(
             "preference",
             sa.Enum(
-                "like",
-                "not_now",
-                "never",
+                "LIKE",
+                "NOT_NOW",
+                "NEVER",
                 name="movie_recommendation_preference",
             ),
             nullable=True,
