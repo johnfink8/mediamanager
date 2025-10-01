@@ -16,6 +16,7 @@ import Tooltip from "@mui/material/Tooltip";
 import ThumbUpAltOutlined from "@mui/icons-material/ThumbUpAltOutlined";
 import ThumbDownAltOutlined from "@mui/icons-material/ThumbDownAltOutlined";
 import AccessTimeOutlined from "@mui/icons-material/AccessTimeOutlined";
+import { useSnackbar } from "material-ui-snackbar-provider";
 
 import BreadCrumbs from "./BreadCrumbs";
 import Loader from "./Loader";
@@ -71,6 +72,7 @@ const RecommendationContent: FC<{
     const [commitPreference, isPreferencePending] = useMutation<any>(
         SetRecommendationPreferenceMutation
     );
+    const snackbar = useSnackbar();
     const [selectedPreference, setSelectedPreference] = useState<string | null>(
         recommendation?.preference ?? null
     );
@@ -102,6 +104,7 @@ const RecommendationContent: FC<{
                 },
                 onError: () => {
                     setSelectedPreference(previous ?? null);
+                    snackbar.showMessage("We couldn't save your feedback. Please try again.");
                 },
                 onCompleted: () => {
                     if (shouldRefresh) {
@@ -110,7 +113,7 @@ const RecommendationContent: FC<{
                 },
             });
         },
-        [commitPreference, onRefresh, recommendation?.id, selectedPreference]
+        [commitPreference, onRefresh, recommendation?.id, selectedPreference, snackbar]
     );
 
     return (

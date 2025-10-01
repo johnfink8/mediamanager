@@ -952,7 +952,7 @@ def test_movie_recommendation_query(run_graphql, monkeypatch):
         assert payload["movies"][0]["imdb_id"] == "tt0000002"
         history = payload.get("history")
         assert history and history[0]["title"] == "Dark Space"
-        assert history[0]["preference"] == "never"
+        assert history[0]["preference"] == "NEVER"
         return {"imdb_id": "tt0000002", "reason": "Fits the space adventure vibe."}
 
     monkeypatch.setattr(
