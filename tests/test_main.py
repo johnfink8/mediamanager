@@ -1004,6 +1004,48 @@ def test_movie_recommendation_query(run_graphql, monkeypatch):
     assert latest.source == "openai"
 
 
+def test_movie_recommendation_uses_radarr_base_for_posters(
+    run_graphql, monkeypatch
+):
+    monkeypatch.setenv("RADARR_URL", "https://radarr.example.com/radarr/api/v3")
+
+    sample_movies = [
+        {
+            "imdbId": "tt0000003",
+            "title": "Relative Poster",
+            "hasFile": True,
+            "images": [
+                {"coverType": "poster", "url": "/MediaCover/3/poster.jpg"}
+            ],
+            "ratings": {"imdb": {"value": 7.5}},
+        }
+    ]
+
+    monkeypatch.setattr(
+        "indexer_utils.recommendations.radarr_query", lambda cmd: sample_movies
+    )
+    monkeypatch.setattr(
+        "indexer_utils.recommendations.get_recently_played_imdb_ids",
+        lambda limit=40: set(),
+    )
+    monkeypatch.setattr(
+        "indexer_utils.recommendations.call_openai_json",
+        lambda system_prompt, payload: {"imdb_id": "tt0000003"},
+    )
+
+    query = """
+    query MovieRecommendationQuery($prompt: String) {
+        movieRecommendation(prompt: $prompt) {
+            posterUrl
+        }
+    }
+    """
+
+    result = run_graphql(query, {"prompt": "anything"})
+    poster_url = result["data"]["movieRecommendation"]["posterUrl"]
+    assert poster_url == "https://radarr.example.com/MediaCover/3/poster.jpg"
+
+
 def test_set_recommendation_preference_mutation(run_graphql):
     session = db_session()
     record = MovieRecommendationRecord(
