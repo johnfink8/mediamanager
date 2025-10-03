@@ -196,7 +196,12 @@ def get_show_titles() -> None:
         try:
             series = db.get_series(item.uid)
             item.checked_title = f"{series['name']} ({series['year']})"
-            item.poster_url = f"https://artworks.thetvdb.com/banners/{series['image']}"
+            img_url = series["image"]
+            item.poster_url = (
+                f"https://artworks.thetvdb.com/banners/{series['image']}"
+                if img_url and "https://" not in img_url
+                else img_url
+            )
             # new logging for poster_url presence
             if not item.poster_url:
                 logger.error(f"No poster_url for TV item {item.uid}")
