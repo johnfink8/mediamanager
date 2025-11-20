@@ -144,7 +144,7 @@ def backfill(item_type: str, limit: int, dry_run: bool, force: bool) -> None:
         synopsis = attrs.get("ai", {}).get("synopsis")
         if force or synopsis is None:
             logger.info(f"Generating synopsis for {item.uid}")
-            synopsis = generate_synopsis_for_candidate(
+            synopsis, _synopsis_failure = generate_synopsis_for_candidate(
                 title, year, genres, language, item.item_type
             )
             if synopsis:

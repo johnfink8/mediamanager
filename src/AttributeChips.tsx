@@ -25,7 +25,11 @@ const AttributeChips: React.FC<AttributeChipsProps> = ({ item }) => {
                 .filter((attr) => attr.key === "ai" && attr.details)
                 .slice(0, 1)
                 .map((attr, idx) => (
-                    <AIAttributeChip key={`ai:${idx}`} details={attr.details as unknown as Record<string, unknown>} />
+                    <AIAttributeChip
+                        key={`ai:${idx}`}
+                        details={attr.details as unknown as Record<string, unknown>}
+                        itemId={item.id}
+                    />
                 ))}
             {(item.attributes || [])
                 .filter((attr) => !SKIP_KEYS.includes(attr.key))
