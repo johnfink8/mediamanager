@@ -83,6 +83,7 @@ type Mutation {
   deleteFilterRule(id: ID!): MutationReturn!
   setItemAdded(data: SetItemAddedInput!): IgnoreItem!
   setRecommendationPreference(data: SetRecommendationPreferenceInput!): RecommendationFeedback!
+  retryAi(data: RetryAiInput!): IgnoreItem!
 }
 
 type MutationReturn {
@@ -93,6 +94,10 @@ type MutationReturn {
 input SetItemAddedInput {
   id: ID!
   added: Boolean!
+}
+
+input RetryAiInput {
+  id: ID!
 }
 
 input SetRecommendationPreferenceInput {
