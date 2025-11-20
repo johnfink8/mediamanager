@@ -280,8 +280,12 @@ def _choose_with_openai(
     )
     logger.debug("OpenAI movie recommendation payload: %s", payload)
     try:
-        result = call_openai_json(system_prompt, json.dumps(payload))
-        logger.info("Received OpenAI movie recommendation result: %s", result)
+        result, failure = call_openai_json(system_prompt, json.dumps(payload))
+        logger.info(
+            "Received OpenAI movie recommendation result: %s (failure=%s)",
+            result,
+            failure,
+        )
         if not isinstance(result, dict):
             return None
         return result
