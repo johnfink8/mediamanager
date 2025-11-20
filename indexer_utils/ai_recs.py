@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from decouple import config
 from indexer_utils.tmdb import (
@@ -109,10 +109,16 @@ def get_openai_client():
         return None
 
 
-def call_openai_json(system_prompt: str, user_prompt: str) -> Optional[Dict[str, Any]]:
+def call_openai_json(
+    system_prompt: str, user_prompt: str
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     client = get_openai_client()
     if client is None:
-        return None
+        return None, {
+            "code": "client_not_configured",
+            "message": "OpenAI client not configured",
+            "stage": "client",
+        }
     try:
         resp = client.chat.completions.create(
             model=OPENAI_MODEL,
@@ -124,10 +130,14 @@ def call_openai_json(system_prompt: str, user_prompt: str) -> Optional[Dict[str,
             reasoning_effort="high",
         )
         content = resp.choices[0].message.content or "{}"
-        return json.loads(content)
-    except Exception:
+        return json.loads(content), None
+    except Exception as exc:
         logger.exception("OpenAI recommendation request failed")
-        return None
+        return None, {
+            "code": exc.__class__.__name__,
+            "message": str(exc),
+            "stage": "request",
+        }
 
 
 def generate_synopsis_for_candidate(
@@ -137,7 +147,7 @@ def generate_synopsis_for_candidate(
     language: List[str],
     item_type: str,
     cast: Optional[List[str]] = None,
-) -> Optional[str]:
+) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     system_prompt = SYNOPSIS_PROMPTS.get(item_type)
     user_payload = {
         "title": title,
@@ -147,10 +157,29 @@ def generate_synopsis_for_candidate(
         "cast": cast,
     }
     user_prompt = json.dumps(user_payload)
-    result = call_openai_json(system_prompt, user_prompt)
+    result, failure = call_openai_json(system_prompt, user_prompt)
+    synopsis_failure = failure.copy() if failure else None
+    if synopsis_failure:
+        synopsis_failure.setdefault("stage", "synopsis")
+        synopsis_failure.setdefault("step", "synopsis")
     if not result:
-        return None
-    return result.get("synopsis")
+        if synopsis_failure is None:
+            synopsis_failure = {
+                "code": "empty_response",
+                "message": "No synopsis result returned",
+                "stage": "synopsis",
+                "step": "synopsis",
+            }
+        return None, synopsis_failure
+    synopsis = result.get("synopsis")
+    if synopsis is None and synopsis_failure is None:
+        synopsis_failure = {
+            "code": "missing_synopsis",
+            "message": "Synopsis missing from AI response",
+            "stage": "synopsis",
+            "step": "synopsis",
+        }
+    return synopsis, synopsis_failure
 
 
 def annotate_with_ai(
@@ -172,7 +201,7 @@ def annotate_with_ai(
             attrs["cast"] = attrs.get("cast") or get_tv_cast(attrs["tmdb_id"], n=10)
 
     # Generate synopsis and embedding first
-    candidate_synopsis = generate_synopsis_for_candidate(
+    candidate_synopsis, synopsis_failure = generate_synopsis_for_candidate(
         title, year, genres, lang, item_type, attrs.get("cast")
     )
     attrs = upsert_item_attrs(attrs, item_type, uid, title, candidate_synopsis)
@@ -231,7 +260,11 @@ def annotate_with_ai(
     }
     user_prompt = json.dumps(user_payload)
 
-    result = call_openai_json(system_prompt, user_prompt)
+    result, recommendation_failure = call_openai_json(system_prompt, user_prompt)
+    if recommendation_failure:
+        recommendation_failure = dict(recommendation_failure)
+        recommendation_failure.setdefault("stage", "recommendation")
+        recommendation_failure.setdefault("step", "recommendation")
 
     # Consolidate AI info into a single 'ai' attribute with boolean value and details
     attrs_out = dict(attrs)
@@ -245,8 +278,21 @@ def annotate_with_ai(
             "similar": similar_summary,
             "model": OPENAI_MODEL,
             "weaviate_uuid": None,
+            "failure": None,
+            "failed": False,
         },
     )
+
+    failure_details = synopsis_failure or recommendation_failure
+    if failure_details:
+        ai_details.update(
+            {
+                "failure": failure_details,
+                "failed": True,
+            }
+        )
+    else:
+        ai_details.update({"failure": None, "failed": False})
 
     if result is None:
         ai_details.update(
@@ -256,6 +302,17 @@ def annotate_with_ai(
                 "reason": "AI not configured or failed",
             }
         )
+        if ai_details.get("failure") is None:
+            ai_details.update(
+                {
+                    "failure": {
+                        "code": "unknown_failure",
+                        "message": "AI returned no result",
+                        "stage": "recommendation",
+                    },
+                    "failed": True,
+                }
+            )
     else:
         try:
             rec = bool(result.get("recommend"))
@@ -277,6 +334,17 @@ def annotate_with_ai(
                     "reason": "AI parse error",
                 }
             )
+            if ai_details.get("failure") is None:
+                ai_details.update(
+                    {
+                        "failure": {
+                            "code": "parse_error",
+                            "message": "Unable to parse AI recommendation",
+                            "stage": "recommendation",
+                        },
+                        "failed": True,
+                    }
+                )
 
     attrs_out["ai"] = ai_details
     return attrs_out
