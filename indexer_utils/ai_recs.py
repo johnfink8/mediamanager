@@ -177,6 +177,7 @@ def generate_synopsis_for_candidate(
             "code": "missing_synopsis",
             "message": "Synopsis missing from AI response",
             "stage": "synopsis",
+            "step": "synopsis",
         }
     return synopsis, synopsis_failure
 
