@@ -8,12 +8,14 @@ from typing import AsyncIterator, Dict, List, Optional, Type, Union
 import strawberry
 from sqlalchemy import Integer, and_, func, or_
 from sqlalchemy.orm import Query
+from sqlalchemy.orm.attributes import flag_modified
 from strawberry.relay import GlobalID
 from strawberry.scalars import ID, JSON
 
 from indexer_utils.session import db_session
 from indexer_utils.sonarr_utils import add_series
 from indexer_utils.vid_utils import addMovie
+from indexer_utils.ai_recs import annotate_with_ai
 
 from .models import (
     FilterRule,
@@ -542,6 +544,11 @@ class AddItemInput:
     id: GlobalID
 
 
+@strawberry.input
+class RetryAiInput:
+    id: GlobalID
+
+
 @strawberry.type
 class RecommendationFeedbackType:
     id: ID
@@ -604,6 +611,28 @@ class Mutation:
         item.added = bool(data.added)
         session.add(item)
         session.commit()
+        return IgnoreItemType.from_sqlalchemy(item)
+
+    @strawberry.mutation
+    def retry_ai(self: "Mutation", data: RetryAiInput) -> IgnoreItemType:
+        session = db_session()
+        item = session.query(IgnoreItem).get(data.id.node_id)
+        if not item:
+            raise Exception("Item not found")
+
+        attrs = dict(item.attributes or {})
+        # Clear any previous AI state before re-running
+        attrs.pop("ai", None)
+        attrs.pop("_synopsis_vector_tmp", None)
+
+        refreshed_attrs = annotate_with_ai(
+            item.item_type, item.uid, item.title, attrs
+        )
+        item.attributes = refreshed_attrs
+        flag_modified(item, "attributes")
+        session.add(item)
+        session.commit()
+        session.refresh(item)
         return IgnoreItemType.from_sqlalchemy(item)
 
     @strawberry.mutation
