@@ -23,8 +23,9 @@ jobs:
 
       - name: Build Docker image
         run: |
+          docker build -t builder:${{ github.sha }} --target build .
+          docker run --rm builder:${{ github.sha }} npm run lint
           docker build -t mediamanager:${{ github.sha }} .
-          npm run relay && npm run lint
 
   deploy:
     if: github.ref == 'refs/heads/main'
