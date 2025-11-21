@@ -12,6 +12,7 @@ from decouple import config
 from imdb import Cinemagoer
 
 from .ai_recs import annotate_with_ai
+from .check_feedback import record_check_result
 from .filters import should_ignore_by_rules
 from .models import IgnoreItem
 from .plex_utils import find_movie
@@ -61,6 +62,11 @@ def clean_radarr() -> None:
 
 
 def check_movies(days: int) -> None:
+    started_at = datetime.utcnow()
+    checked_movies = []
+    success = False
+    summary = "Movie check did not complete"
+    error_details = None
     context = {
         "r": config("INDEXER_APIKEY"),
         "num": config("INDEXER_NUM"),
@@ -96,83 +102,75 @@ def check_movies(days: int) -> None:
 
     reset_movies()
     seen = set()
-    for item in root.iter("item"):
-        title = item.find("title").text  # type: ignore
-        title_bytes = title.encode("ascii", "ignore")  # type: ignore
-        normalized_title = title_bytes.decode("ascii", "ignore")
-        attrs = get_attrs(item)
-        imdb = get_attr(item, "imdb")
-        if not imdb:
-            logger.info("IMDB not found for %s", title)
-            continue
-        if imdb in seen:
-            # we get a ton of duplicates now
-            continue
-        seen.add(imdb)
-        imdb_id = "tt%07i" % int(imdb)
-        if IgnoreItem.exists("mv", imdb_id):
-            continue
-        if already_have(imdb_id):
-            logger.info("Ignore movie already have %s", title)
-            continue
-        try:
-            radarr_movie = get_movie(imdb_id)
-            if radarr_movie:
-                logger.info("Ignore movie in radarr %s", title)
+    try:
+        for item in root.iter("item"):
+            title = item.find("title").text  # type: ignore
+            title_bytes = title.encode("ascii", "ignore")  # type: ignore
+            normalized_title = title_bytes.decode("ascii", "ignore")
+            attrs = get_attrs(item)
+            imdb = get_attr(item, "imdb")
+            if not imdb:
+                logger.info("IMDB not found for %s", title)
                 continue
-        except KeyError:
-            pass
-        if already_searched(imdb_id):
-            continue
-        already.append(imdb_id)
-        try:
-            result = radarr_query("movie/lookup", term="imdb:" + imdb_id)[0]
-        except ValueError:
-            logger.exception("Unable to search %s", title)
-            continue
-        except IndexError:
-            logger.exception("Unable to search %s", title)
-            continue
-        except KeyError:
-            logger.exception("Unable to search", title)
-            continue
-        add_attr(attrs, result, "originalLanguage")
-        add_attr(attrs, result, "status")
-        add_attr(attrs, result, "genres")
-        attrs["year"] = result["year"]
-        ratings = result.get("ratings")
-        if ratings:
-            attrs.update(get_ratings_attrs(ratings))
-        # Use filter logic
-        temp_item = IgnoreItem(item_type="mv", uid=imdb_id, attributes=attrs)
-        ignore = should_ignore_by_rules(temp_item)
-        poster = result.get("remotePoster")
-        vec = None
-        if ignore:
-            enriched_attrs = attrs
-        else:
-            enriched_attrs = annotate_with_ai(
-                "mv", imdb_id, result.get("title", normalized_title), attrs
-            )
-        try:
-            plex_movie = find_movie(result["title"], result["year"])
-        except Exception:
-            logger.exception(
-                'Exception getting plex info for "%s" "%s"',
-                result["year"],
-                result["title"],
-            )
-            logger.info("New movie found %s", normalized_title)
-            created = IgnoreItem.create(
-                title=normalized_title,
-                uid=imdb_id,
-                ignore=ignore,
-                item_type="mv",
-                attributes=enriched_attrs,
-                poster_url=poster,
-            )
-        else:
-            if not plex_movie:
+            if imdb in seen:
+                # we get a ton of duplicates now
+                continue
+            seen.add(imdb)
+            imdb_id = "tt%07i" % int(imdb)
+            if IgnoreItem.exists("mv", imdb_id):
+                continue
+            if already_have(imdb_id):
+                logger.info("Ignore movie already have %s", title)
+                continue
+            try:
+                radarr_movie = get_movie(imdb_id)
+                if radarr_movie:
+                    logger.info("Ignore movie in radarr %s", title)
+                    continue
+            except KeyError:
+                pass
+            if already_searched(imdb_id):
+                continue
+            already.append(imdb_id)
+            try:
+                result = radarr_query("movie/lookup", term="imdb:" + imdb_id)[0]
+            except ValueError:
+                logger.exception("Unable to search %s", title)
+                continue
+            except IndexError:
+                logger.exception("Unable to search %s", title)
+                continue
+            except KeyError:
+                logger.exception("Unable to search", title)
+                continue
+            add_attr(attrs, result, "originalLanguage")
+            add_attr(attrs, result, "status")
+            add_attr(attrs, result, "genres")
+            attrs["year"] = result["year"]
+            ratings = result.get("ratings")
+            if ratings:
+                attrs.update(get_ratings_attrs(ratings))
+            # Use filter logic
+            temp_item = IgnoreItem(item_type="mv", uid=imdb_id, attributes=attrs)
+            ignore = should_ignore_by_rules(temp_item)
+            poster = result.get("remotePoster")
+            vec = None
+            if ignore:
+                enriched_attrs = attrs
+                note = "Ignored by filter rules"
+            else:
+                enriched_attrs = annotate_with_ai(
+                    "mv", imdb_id, result.get("title", normalized_title), attrs
+                )
+                note = "Flagged for review"
+            try:
+                plex_movie = find_movie(result["title"], result["year"])
+            except Exception:
+                logger.exception(
+                    'Exception getting plex info for "%s" "%s"',
+                    result["year"],
+                    result["title"],
+                )
                 logger.info("New movie found %s", normalized_title)
                 created = IgnoreItem.create(
                     title=normalized_title,
@@ -182,10 +180,55 @@ def check_movies(days: int) -> None:
                     attributes=enriched_attrs,
                     poster_url=poster,
                 )
-                vec = enriched_attrs.pop("_synopsis_vector_tmp", None)
-                if vec is not None:
-                    created.synopsis_vector = vec
-                    created.save()
+            else:
+                if not plex_movie:
+                    logger.info("New movie found %s", normalized_title)
+                    created = IgnoreItem.create(
+                        title=normalized_title,
+                        uid=imdb_id,
+                        ignore=ignore,
+                        item_type="mv",
+                        attributes=enriched_attrs,
+                        poster_url=poster,
+                    )
+                    vec = enriched_attrs.pop("_synopsis_vector_tmp", None)
+                    if vec is not None:
+                        created.synopsis_vector = vec
+                        created.save()
+                else:
+                    created = None
+
+            if created:
+                checked_movies.append(
+                    {
+                        "title": normalized_title,
+                        "uid": imdb_id,
+                        "ignored": bool(ignore),
+                        "note": note,
+                    }
+                )
+        summary = (
+            f"Checked {len(checked_movies)} movie candidates from the last {days} days"
+        )
+        success = True
+        logger.info(summary)
+    except Exception as exc:
+        error_details = (
+            f"{type(exc).__name__}: {exc}. "
+            "Confirm INDEXER_URL, API keys, and Radarr connectivity."
+        )
+        summary = f"Movie check for last {days} days failed"
+        logger.exception(summary)
+        raise
+    finally:
+        record_check_result(
+            kind="movies",
+            started_at=started_at,
+            success=success,
+            message=summary,
+            checked_items=checked_movies,
+            error_details=error_details,
+        )
 
 
 def get_show_titles() -> None:
@@ -271,6 +314,11 @@ def add_attr(attrs: Dict[str, Any], show: Dict[str, Any], key: str) -> None:
 
 
 def check_shows(days: int) -> None:
+    started_at = datetime.utcnow()
+    checked_shows = []
+    success = False
+    summary = "Show check did not complete"
+    error_details = None
     context = {
         "r": config("INDEXER_APIKEY"),
         "num": config("INDEXER_NUM"),
@@ -300,53 +348,84 @@ def check_shows(days: int) -> None:
     reset_series()
     seen = set()
 
-    for item in root.iter("item"):
-        title = item.find("title").text  # type: ignore
-        tvdb = get_attr(item, "tvdbid")
-        if not tvdb:
-            logger.error("no tvdb found for %s", title)
-            continue
-        if tvdb in seen:
-            # cut down on log duplicates and api calls
-            continue
-        seen.add(tvdb)
-        if IgnoreItem.exists("tv", tvdb):
-            continue
-        if already_have(tvdb):
-            logger.debug("already have %s", title)
-            continue
-        try:
-            show = query_series(tvdb)
-        except IndexError:
-            logger.error("Unable to query series %s %s", tvdb, title)
-            continue
-        attrs = get_attrs(item)
-        attrs["year"] = show["year"]  # type: ignore
-        tmdb_id = show.get("tmdbId") or get_tv_id(tvdb)
-        if tmdb_id:
-            attrs["tmdb_id"] = str(tmdb_id)
+    try:
+        for item in root.iter("item"):
+            title = item.find("title").text  # type: ignore
+            tvdb = get_attr(item, "tvdbid")
+            if not tvdb:
+                logger.error("no tvdb found for %s", title)
+                continue
+            if tvdb in seen:
+                # cut down on log duplicates and api calls
+                continue
+            seen.add(tvdb)
+            if IgnoreItem.exists("tv", tvdb):
+                continue
+            if already_have(tvdb):
+                logger.debug("already have %s", title)
+                continue
             try:
-                attrs["cast"] = get_tv_cast(tmdb_id, n=10)
-            except Exception:
-                logger.exception("Unable to fetch cast for %s", title)
-        ratings = show.get("ratings")
-        if ratings:
-            attrs["rating_votes"] = ratings["votes"]  # type: ignore
-            attrs["rating_value"] = ratings["value"]  # type: ignore
-        for key in ("network", "genres", "status", "seriesType", "certification"):
-            add_attr(attrs, show, key)
-        temp_item = IgnoreItem(item_type="tv", uid=tvdb, attributes=attrs)
-        ignore = should_ignore_by_rules(temp_item)
-        if ignore:
-            enriched_attrs = attrs
-        else:
-            enriched_attrs = annotate_with_ai("tv", tvdb, title, attrs)
-        IgnoreItem.create(
-            title=title,
-            uid=tvdb,
-            ignore=ignore,
-            item_type="tv",
-            attributes=enriched_attrs,
+                show = query_series(tvdb)
+            except IndexError:
+                logger.error("Unable to query series %s %s", tvdb, title)
+                continue
+            attrs = get_attrs(item)
+            attrs["year"] = show["year"]  # type: ignore
+            tmdb_id = show.get("tmdbId") or get_tv_id(tvdb)
+            if tmdb_id:
+                attrs["tmdb_id"] = str(tmdb_id)
+                try:
+                    attrs["cast"] = get_tv_cast(tmdb_id, n=10)
+                except Exception:
+                    logger.exception("Unable to fetch cast for %s", title)
+            ratings = show.get("ratings")
+            if ratings:
+                attrs["rating_votes"] = ratings["votes"]  # type: ignore
+                attrs["rating_value"] = ratings["value"]  # type: ignore
+            for key in ("network", "genres", "status", "seriesType", "certification"):
+                add_attr(attrs, show, key)
+            temp_item = IgnoreItem(item_type="tv", uid=tvdb, attributes=attrs)
+            ignore = should_ignore_by_rules(temp_item)
+            if ignore:
+                enriched_attrs = attrs
+                note = "Ignored by filter rules"
+            else:
+                enriched_attrs = annotate_with_ai("tv", tvdb, title, attrs)
+                note = "Flagged for review"
+            created = IgnoreItem.create(
+                title=title,
+                uid=tvdb,
+                ignore=ignore,
+                item_type="tv",
+                attributes=enriched_attrs,
+            )
+            checked_shows.append(
+                {
+                    "title": title,
+                    "uid": tvdb,
+                    "ignored": bool(ignore),
+                    "note": note,
+                }
+            )
+        summary = f"Checked {len(checked_shows)} show candidates from the last {days} days"
+        success = True
+        logger.info(summary)
+    except Exception as exc:
+        error_details = (
+            f"{type(exc).__name__}: {exc}. "
+            "Confirm INDEXER_URL, API keys, and Sonarr connectivity."
+        )
+        summary = f"Show check for last {days} days failed"
+        logger.exception(summary)
+        raise
+    finally:
+        record_check_result(
+            kind="shows",
+            started_at=started_at,
+            success=success,
+            message=summary,
+            checked_items=checked_shows,
+            error_details=error_details,
         )
 
 
