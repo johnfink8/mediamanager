@@ -3,7 +3,7 @@ import json
 from datetime import datetime
 import logging
 from dataclasses import dataclass
-from typing import AsyncIterator, Dict, List, Optional, Type, Union
+from typing import Any, AsyncIterator, Dict, List, Optional, Type, Union
 
 import strawberry
 from sqlalchemy import Integer, and_, func, or_
@@ -16,6 +16,7 @@ from indexer_utils.session import db_session
 from indexer_utils.sonarr_utils import add_series
 from indexer_utils.vid_utils import addMovie
 from indexer_utils.ai_recs import annotate_with_ai
+from indexer_utils.check_feedback import get_check_history
 
 from .models import (
     FilterRule,
@@ -164,6 +165,62 @@ class AttributeEntry:
 RecommendationPreferenceEnum = strawberry.enum(
     RecommendationPreference, name="RecommendationPreference"
 )
+
+
+@strawberry.type
+class CheckedItemType:
+    title: str
+    uid: str
+    ignored: Optional[bool]
+    note: Optional[str]
+
+
+@strawberry.type
+class CheckRunType:
+    kind: str
+    timestamp: str
+    duration_ms: int
+    success: bool
+    message: str
+    checked_count: int
+    error: Optional[str]
+    checked_items: List[CheckedItemType]
+
+
+@strawberry.type
+class CheckRunHistory:
+    movies: List[CheckRunType]
+    shows: List[CheckRunType]
+
+
+def _check_run_from_dict(raw: Dict[str, Any]) -> CheckRunType:
+    def _safe_int(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    items = [
+        CheckedItemType(
+            title=item.get("title", ""),
+            uid=item.get("uid", ""),
+            ignored=item.get("ignored"),
+            note=item.get("note"),
+        )
+        for item in raw.get("checked_items", [])
+        if isinstance(item, dict)
+    ]
+
+    return CheckRunType(
+        kind=str(raw.get("kind", "")),
+        timestamp=str(raw.get("timestamp", "")),
+        duration_ms=_safe_int(raw.get("duration_ms", 0)),
+        success=bool(raw.get("success", False)),
+        message=str(raw.get("message", "")),
+        checked_count=_safe_int(raw.get("checked_count", 0)),
+        error=raw.get("error"),
+        checked_items=items,
+    )
 
 
 @strawberry.type(name="IgnoreItem")
@@ -496,6 +553,13 @@ class SchemaQuery:
     @strawberry.field
     def filter_rules(self) -> FilterRuleList:
         return FilterRuleList()
+
+    @strawberry.field
+    def check_runs(self) -> CheckRunHistory:
+        return CheckRunHistory(
+            movies=[_check_run_from_dict(entry) for entry in get_check_history("movies")],
+            shows=[_check_run_from_dict(entry) for entry in get_check_history("shows")],
+        )
 
     @strawberry.field
     def historical_items(

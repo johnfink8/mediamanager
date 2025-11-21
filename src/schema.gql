@@ -21,6 +21,29 @@ input Filter {
   value: String = null
 }
 
+type CheckedItemType {
+  title: String!
+  uid: String!
+  ignored: Boolean
+  note: String
+}
+
+type CheckRunType {
+  kind: String!
+  timestamp: String!
+  durationMs: Int!
+  success: Boolean!
+  message: String!
+  checkedCount: Int!
+  error: String
+  checkedItems: [CheckedItemType!]!
+}
+
+type CheckRunHistory {
+  movies: [CheckRunType!]!
+  shows: [CheckRunType!]!
+}
+
 type FilterRule {
   itemType: String!
   attribute: String!
@@ -121,6 +144,7 @@ type PageInfo {
 type SchemaQuery {
   items(filters: [Filter!] = null): IgnoreItemList!
   filterRules: FilterRuleList!
+  checkRuns: CheckRunHistory!
   historicalItems(filters: [Filter!] = null, limit: Int! = 20, offset: Int! = 0, applyInvertedPermanentRules: Boolean! = false): HistoricalIgnoreItemList!
   movieRecommendation(prompt: String = null): MovieRecommendation
 }
