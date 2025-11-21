@@ -110,7 +110,7 @@ const RunCard: React.FC<{ run: RunType }> = ({ run }) => (
     </Card>
 );
 
-const RunList: React.FC<{ title: string; runs: RunType[] }> = ({ title, runs }) => (
+const RunList: React.FC<{ title: string; runs: readonly RunType[] }> = ({ title, runs }) => (
     <Box sx={{ mt: 2 }}>
         <Typography variant="h5" gutterBottom>
             {title}
