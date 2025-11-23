@@ -1,14 +1,16 @@
 import React from "react";
 import {
+    Accordion,
+    AccordionDetails,
+    AccordionSummary,
     Box,
     Button,
-    Card,
-    CardContent,
     Chip,
     Divider,
     Stack,
     Typography,
 } from "@mui/material";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import {
     graphql,
     PreloadedQuery,
@@ -68,32 +70,43 @@ const formatDate = (timestamp?: string | null): string => {
 type RunType = CheckFeedbackPanelQuery["response"]["checkRuns"]["movies"][number];
 
 const RunCard: React.FC<{ run: RunType }> = ({ run }) => (
-    <Card variant="outlined">
-        <CardContent>
-            <Box display="flex" justifyContent="space-between" alignItems="center">
-                <Typography variant="h6">{formatDate(run.timestamp)}</Typography>
-                <Chip
-                    label={run.success ? "Success" : "Error"}
-                    color={run.success ? "success" : "error"}
-                    size="small"
-                />
-            </Box>
-            <Typography variant="body1" sx={{ mt: 1 }}>
-                {run.message}
-            </Typography>
-            {run.error && (
-                <Typography variant="body2" color="error" sx={{ mt: 0.5 }}>
-                    {run.error}
+    <Accordion disableGutters square>
+        <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+            <Box
+                sx={{
+                    display: "flex",
+                    flexDirection: "column",
+                    width: "100%",
+                    gap: 0.5,
+                }}
+            >
+                <Box display="flex" justifyContent="space-between" alignItems="center">
+                    <Typography variant="h6">{formatDate(run.timestamp)}</Typography>
+                    <Chip
+                        label={run.success ? "Success" : "Error"}
+                        color={run.success ? "success" : "error"}
+                        size="small"
+                    />
+                </Box>
+                <Typography variant="body1" sx={{ textAlign: "left" }}>
+                    {run.message}
                 </Typography>
-            )}
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                Duration: {run.durationMs} ms · Items processed: {run.checkedCount}
-            </Typography>
-            <Divider sx={{ my: 1 }} />
+                <Typography variant="body2" color="text.secondary">
+                    Duration: {run.durationMs} ms · Items processed: {run.checkedCount}
+                </Typography>
+            </Box>
+        </AccordionSummary>
+        <AccordionDetails>
             <Stack spacing={1}>
+                {run.error && (
+                    <Typography variant="body2" color="error">
+                        {run.error}
+                    </Typography>
+                )}
+                <Divider />
                 {run.checkedItems.length === 0 && (
                     <Typography variant="body2" color="text.secondary">
-                        No new items were recorded in this run.
+                        No items were recorded in this run.
                     </Typography>
                 )}
                 {run.checkedItems.map((item) => (
@@ -106,8 +119,8 @@ const RunCard: React.FC<{ run: RunType }> = ({ run }) => (
                     </Box>
                 ))}
             </Stack>
-        </CardContent>
-    </Card>
+        </AccordionDetails>
+    </Accordion>
 );
 
 const RunList: React.FC<{ title: string; runs: readonly RunType[] }> = ({ title, runs }) => (
