@@ -22,7 +22,7 @@ def _write_history(kind: str, entry: Dict[str, Any]) -> None:
         return
 
     history: List[Dict[str, Any]] = redis_get_json(client, _history_key(kind)) or []
-    updated_history = [entry] + history[:1]
+    updated_history = [entry] + history[:11]
     redis_set_json(client, _history_key(kind), updated_history, CHECK_HISTORY_TTL_SECONDS)
 
 
@@ -35,7 +35,7 @@ def record_check_result(
     checked_items: List[Dict[str, Any]],
     error_details: Optional[str] = None,
 ) -> None:
-    """Persist the latest check outcome while keeping the last two entries."""
+    """Persist the latest check outcome while keeping the last dozen entries."""
 
     finished_at = datetime.utcnow()
     entry = {
