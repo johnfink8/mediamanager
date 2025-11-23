@@ -89,6 +89,7 @@ def check_movies(days: int) -> None:
     else:
         raise Exception("SSL attempts exhausted")
     movies = []
+    checked_movie_ids = set()
     already = []
 
     def already_have(imdb_id: str) -> bool:
@@ -117,31 +118,52 @@ def check_movies(days: int) -> None:
                 continue
             seen.add(imdb)
             imdb_id = "tt%07i" % int(imdb)
+
+            def add_checked_item(note: str, *, ignored: Optional[bool] = None) -> None:
+                if imdb_id in checked_movie_ids:
+                    return
+                checked_movie_ids.add(imdb_id)
+                checked_movies.append(
+                    {
+                        "title": normalized_title,
+                        "uid": imdb_id,
+                        "ignored": ignored,
+                        "note": note,
+                    }
+                )
+
             if IgnoreItem.exists("mv", imdb_id):
+                add_checked_item("Already recorded in ignore list")
                 continue
             if already_have(imdb_id):
                 logger.info("Ignore movie already have %s", title)
+                add_checked_item("Duplicate in current feed")
                 continue
             try:
                 radarr_movie = get_movie(imdb_id)
                 if radarr_movie:
                     logger.info("Ignore movie in radarr %s", title)
+                    add_checked_item("Already present in Radarr")
                     continue
             except KeyError:
                 pass
             if already_searched(imdb_id):
+                add_checked_item("Already queried during this run")
                 continue
             already.append(imdb_id)
             try:
                 result = radarr_query("movie/lookup", term="imdb:" + imdb_id)[0]
             except ValueError:
                 logger.exception("Unable to search %s", title)
+                add_checked_item("Radarr lookup failed", ignored=None)
                 continue
             except IndexError:
                 logger.exception("Unable to search %s", title)
+                add_checked_item("No search results from Radarr", ignored=None)
                 continue
             except KeyError:
                 logger.exception("Unable to search", title)
+                add_checked_item("Malformed search results from Radarr", ignored=None)
                 continue
             add_attr(attrs, result, "originalLanguage")
             add_attr(attrs, result, "status")
@@ -197,16 +219,9 @@ def check_movies(days: int) -> None:
                         created.save()
                 else:
                     created = None
+                    note = f"{note} (already in Plex)"
 
-            if created:
-                checked_movies.append(
-                    {
-                        "title": normalized_title,
-                        "uid": imdb_id,
-                        "ignored": bool(ignore),
-                        "note": note,
-                    }
-                )
+            add_checked_item(note, ignored=bool(ignore))
         summary = (
             f"Checked {len(checked_movies)} movie candidates from the last {days} days"
         )
@@ -338,6 +353,7 @@ def check_shows(days: int) -> None:
     else:
         raise Exception("SSL attempts exhausted")
     shows = []
+    checked_show_ids = set()
 
     def already_have(tvdb: str) -> bool:
         for show in shows:
@@ -359,15 +375,32 @@ def check_shows(days: int) -> None:
                 # cut down on log duplicates and api calls
                 continue
             seen.add(tvdb)
+
+            def add_checked_show(note: str, *, ignored: Optional[bool] = None) -> None:
+                if tvdb in checked_show_ids:
+                    return
+                checked_show_ids.add(tvdb)
+                checked_shows.append(
+                    {
+                        "title": title,
+                        "uid": tvdb,
+                        "ignored": ignored,
+                        "note": note,
+                    }
+                )
+
             if IgnoreItem.exists("tv", tvdb):
+                add_checked_show("Already recorded in ignore list")
                 continue
             if already_have(tvdb):
                 logger.debug("already have %s", title)
+                add_checked_show("Duplicate in current feed")
                 continue
             try:
                 show = query_series(tvdb)
             except IndexError:
                 logger.error("Unable to query series %s %s", tvdb, title)
+                add_checked_show("Series query failed", ignored=None)
                 continue
             attrs = get_attrs(item)
             attrs["year"] = show["year"]  # type: ignore
@@ -399,14 +432,7 @@ def check_shows(days: int) -> None:
                 item_type="tv",
                 attributes=enriched_attrs,
             )
-            checked_shows.append(
-                {
-                    "title": title,
-                    "uid": tvdb,
-                    "ignored": bool(ignore),
-                    "note": note,
-                }
-            )
+            add_checked_show(note, ignored=bool(ignore))
         summary = f"Checked {len(checked_shows)} show candidates from the last {days} days"
         success = True
         logger.info(summary)
