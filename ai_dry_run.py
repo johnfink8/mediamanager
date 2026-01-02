@@ -13,19 +13,19 @@ from indexer_utils.vid_utils import annotate_attributes_for_item
 def load_items(
     item_type: Optional[str], uid: Optional[str], limit: int
 ) -> List[IgnoreItem]:
-    session = db_session()
-    query = session.query(IgnoreItem).where(IgnoreItem.ignore.is_(False))
-    if item_type:
-        query = query.where(IgnoreItem.item_type == item_type)
-    if uid:
-        query = query.where(IgnoreItem.uid == uid)
-        return query.all()
-    # Prefer most recent by created_at desc then id desc
-    try:
-        query = query.order_by(IgnoreItem.created_at.desc(), IgnoreItem.id.desc())
-    except Exception:
-        query = query.order_by(IgnoreItem.id.desc())
-    return query.limit(limit).all()
+    with db_session() as session:
+        query = session.query(IgnoreItem).where(IgnoreItem.ignore.is_(False))
+        if item_type:
+            query = query.where(IgnoreItem.item_type == item_type)
+        if uid:
+            query = query.where(IgnoreItem.uid == uid)
+            return query.all()
+        # Prefer most recent by created_at desc then id desc
+        try:
+            query = query.order_by(IgnoreItem.created_at.desc(), IgnoreItem.id.desc())
+        except Exception:
+            query = query.order_by(IgnoreItem.id.desc())
+        return query.limit(limit).all()
 
 
 def main() -> None:

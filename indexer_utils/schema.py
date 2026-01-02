@@ -1,8 +1,8 @@
 import asyncio
 import json
-from datetime import datetime
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, AsyncIterator, Dict, List, Optional, Type, Union
 
 import strawberry
@@ -12,11 +12,11 @@ from sqlalchemy.orm.attributes import flag_modified
 from strawberry.relay import GlobalID
 from strawberry.scalars import ID, JSON
 
+from indexer_utils.ai_recs import annotate_with_ai
+from indexer_utils.check_feedback import get_check_history
 from indexer_utils.session import db_session
 from indexer_utils.sonarr_utils import add_series
 from indexer_utils.vid_utils import addMovie
-from indexer_utils.ai_recs import annotate_with_ai
-from indexer_utils.check_feedback import get_check_history
 
 from .models import (
     FilterRule,
@@ -322,46 +322,48 @@ class IgnoreItemType:
         cls: Type["IgnoreItemType"],
         filters: Optional[List[Filter]] = None,
     ) -> List["IgnoreItemType"]:
-        session = db_session()
-        query = session.query(IgnoreItem).where(IgnoreItem.ignore.is_(False))
-        query = cls.apply_filters(filters, query)
+        with db_session() as session:
+            query = session.query(IgnoreItem).where(IgnoreItem.ignore.is_(False))
+            query = cls.apply_filters(filters, query)
 
-        # Only apply temporary rules from filters argument
-        temp_rules = []
-        if filters:
-            for f in filters:
-                if f.attribute and f.operator and f.value:
-                    temp_rules.append(f)
+            # Only apply temporary rules from filters argument
+            temp_rules = []
+            if filters:
+                for f in filters:
+                    if f.attribute and f.operator and f.value:
+                        temp_rules.append(f)
 
-        filter_specs = []
-        # Add temporary rules
-        for f in temp_rules:
-            if f.attribute in [
-                "type",
-                "uid",
-                "title",
-                "checked_title",
-                "poster_url",
-                "added",
-                "ignore",
-            ]:
-                field = f.attribute
-            else:
-                field = f"attributes.{f.attribute}"
-            filter_specs.append(
-                FilterSpec(
-                    model=IgnoreItem,
-                    field=field,
-                    op=f.operator,
-                    value=f.value,
+            filter_specs = []
+            # Add temporary rules
+            for f in temp_rules:
+                if f.attribute in [
+                    "type",
+                    "uid",
+                    "title",
+                    "checked_title",
+                    "poster_url",
+                    "added",
+                    "ignore",
+                ]:
+                    field = f.attribute
+                else:
+                    field = f"attributes.{f.attribute}"
+                filter_specs.append(
+                    FilterSpec(
+                        model=IgnoreItem,
+                        field=field,
+                        op=f.operator,
+                        value=f.value,
+                    )
                 )
-            )
-        for spec in filter_specs:
-            query = apply_filters(query, spec)
+            for spec in filter_specs:
+                query = apply_filters(query, spec)
 
-        print("query", query.statement.compile(compile_kwargs={"literal_binds": True}))
-        items = query.all()
-        return [cls.from_sqlalchemy(item) for item in items]
+            print(
+                "query", query.statement.compile(compile_kwargs={"literal_binds": True})
+            )
+            items = query.all()
+            return [cls.from_sqlalchemy(item) for item in items]
 
 
 @strawberry.type
@@ -422,9 +424,9 @@ class FilterRuleList:
 
     @strawberry.field
     def nodes(self) -> List[FilterRuleType]:
-        session = db_session()
-        rules = session.query(FilterRule).all()
-        return [FilterRuleType.from_sqlalchemy(rule) for rule in rules]
+        with db_session() as session:
+            rules = session.query(FilterRule).all()
+            return [FilterRuleType.from_sqlalchemy(rule) for rule in rules]
 
 
 @strawberry.type
@@ -448,60 +450,60 @@ class HistoricalIgnoreItemList:
         offset: int = 0,
         apply_inverted_permanent_rules: bool = False,
     ) -> "HistoricalIgnoreItemList":
-        session = db_session()
-        query = session.query(IgnoreItem).where(IgnoreItem.ignore.is_(True))
-        query = IgnoreItemType.apply_filters(filters, query)
+        with db_session() as session:
+            query = session.query(IgnoreItem).where(IgnoreItem.ignore.is_(True))
+            query = IgnoreItemType.apply_filters(filters, query)
 
-        # Optionally apply the inverted permanent rules for this type
-        if apply_inverted_permanent_rules:
-            item_type_filter = next(
-                (f.type for f in (filters or []) if f.type is not None),
-                None,
-            )
-            if item_type_filter:
-                rules = (
-                    session.query(FilterRule)
-                    .filter_by(item_type=item_type_filter, enabled=True)
-                    .all()
+            # Optionally apply the inverted permanent rules for this type
+            if apply_inverted_permanent_rules:
+                item_type_filter = next(
+                    (f.type for f in (filters or []) if f.type is not None),
+                    None,
                 )
-                for rule in rules:
-                    if rule.attribute in [
-                        "type",
-                        "uid",
-                        "title",
-                        "checked_title",
-                        "poster_url",
-                        "added",
-                        "ignore",
-                    ]:
-                        field = rule.attribute
-                    else:
-                        field = f"attributes.{rule.attribute}"
-                    spec = FilterSpec(
-                        model=IgnoreItem,
-                        field=field,
-                        op=invert_operator(rule.operator),
-                        value=rule.value,
+                if item_type_filter:
+                    rules = (
+                        session.query(FilterRule)
+                        .filter_by(item_type=item_type_filter, enabled=True)
+                        .all()
                     )
-                    query = apply_filters(query, spec)
-        # Order by created_at DESC, then id DESC
-        query = query.order_by(
-            IgnoreItem.created_at.desc(),
-            IgnoreItem.id.desc(),
-        )
-        total_count = query.count()
-        items = query.offset(offset).limit(limit).all()
-        nodes = [IgnoreItemType.from_sqlalchemy(item) for item in items]
-        has_next_page = offset + limit < total_count
-        has_previous_page = offset > 0
-        page_info = PageInfo(
-            has_next_page=has_next_page,
-            has_previous_page=has_previous_page,
-            start_offset=offset,
-            end_offset=offset + len(nodes) - 1 if nodes else offset,
-            total_count=total_count,
-        )
-        return HistoricalIgnoreItemList(nodes=nodes, page_info=page_info)
+                    for rule in rules:
+                        if rule.attribute in [
+                            "type",
+                            "uid",
+                            "title",
+                            "checked_title",
+                            "poster_url",
+                            "added",
+                            "ignore",
+                        ]:
+                            field = rule.attribute
+                        else:
+                            field = f"attributes.{rule.attribute}"
+                        spec = FilterSpec(
+                            model=IgnoreItem,
+                            field=field,
+                            op=invert_operator(rule.operator),
+                            value=rule.value,
+                        )
+                        query = apply_filters(query, spec)
+            # Order by created_at DESC, then id DESC
+            query = query.order_by(
+                IgnoreItem.created_at.desc(),
+                IgnoreItem.id.desc(),
+            )
+            total_count = query.count()
+            items = query.offset(offset).limit(limit).all()
+            nodes = [IgnoreItemType.from_sqlalchemy(item) for item in items]
+            has_next_page = offset + limit < total_count
+            has_previous_page = offset > 0
+            page_info = PageInfo(
+                has_next_page=has_next_page,
+                has_previous_page=has_previous_page,
+                start_offset=offset,
+                end_offset=offset + len(nodes) - 1 if nodes else offset,
+                total_count=total_count,
+            )
+            return HistoricalIgnoreItemList(nodes=nodes, page_info=page_info)
 
 
 @strawberry.type
@@ -557,7 +559,9 @@ class SchemaQuery:
     @strawberry.field
     def check_runs(self) -> CheckRunHistory:
         return CheckRunHistory(
-            movies=[_check_run_from_dict(entry) for entry in get_check_history("movies")],
+            movies=[
+                _check_run_from_dict(entry) for entry in get_check_history("movies")
+            ],
             shows=[_check_run_from_dict(entry) for entry in get_check_history("shows")],
         )
 
@@ -635,31 +639,31 @@ class MutationReturn:
 class Mutation:
     @strawberry.mutation
     def add_item(self: "Mutation", data: AddItemInput) -> IgnoreItemType:
-        session = db_session()
-        item = session.query(IgnoreItem).get(data.id.node_id)
-        if not item:
-            raise Exception(f"Item not found: {data.id.node_id}")
-        if item.item_type == "mv":
-            addMovie(item.uid)
-        else:
-            add_series(item.uid)
+        with db_session() as session:
+            item = session.query(IgnoreItem).get(data.id.node_id)
+            if not item:
+                raise Exception(f"Item not found: {data.id.node_id}")
+            if item.item_type == "mv":
+                addMovie(item.uid)
+            else:
+                add_series(item.uid)
 
-        item.added = True
-        item.ignore = True
-        session.add(item)
-        session.commit()
-        return IgnoreItemType.from_sqlalchemy(item)
+            item.added = True
+            item.ignore = True
+            session.add(item)
+            session.commit()
+            return IgnoreItemType.from_sqlalchemy(item)
 
     @strawberry.mutation
     def delete_item(self: "Mutation", data: AddItemInput) -> IgnoreItemType:
-        session = db_session()
-        item = session.query(IgnoreItem).get(data.id.node_id)
-        if not item:
-            raise Exception("Item not found")
-        item.ignore = True
-        session.add(item)
-        session.commit()
-        return IgnoreItemType.from_sqlalchemy(item)
+        with db_session() as session:
+            item = session.query(IgnoreItem).get(data.id.node_id)
+            if not item:
+                raise Exception("Item not found")
+            item.ignore = True
+            session.add(item)
+            session.commit()
+            return IgnoreItemType.from_sqlalchemy(item)
 
     @strawberry.input
     class SetItemAddedInput:
@@ -668,36 +672,36 @@ class Mutation:
 
     @strawberry.mutation
     def set_item_added(self: "Mutation", data: SetItemAddedInput) -> IgnoreItemType:
-        session = db_session()
-        item = session.query(IgnoreItem).get(data.id.node_id)
-        if not item:
-            raise Exception("Item not found")
-        item.added = bool(data.added)
-        session.add(item)
-        session.commit()
-        return IgnoreItemType.from_sqlalchemy(item)
+        with db_session() as session:
+            item = session.query(IgnoreItem).get(data.id.node_id)
+            if not item:
+                raise Exception("Item not found")
+            item.added = bool(data.added)
+            session.add(item)
+            session.commit()
+            return IgnoreItemType.from_sqlalchemy(item)
 
     @strawberry.mutation
     def retry_ai(self: "Mutation", data: RetryAiInput) -> IgnoreItemType:
-        session = db_session()
-        item = session.query(IgnoreItem).get(data.id.node_id)
-        if not item:
-            raise Exception("Item not found")
+        with db_session() as session:
+            item = session.query(IgnoreItem).get(data.id.node_id)
+            if not item:
+                raise Exception("Item not found")
 
-        attrs = dict(item.attributes or {})
-        # Clear any previous AI state before re-running
-        attrs.pop("ai", None)
-        attrs.pop("_synopsis_vector_tmp", None)
+            attrs = dict(item.attributes or {})
+            # Clear any previous AI state before re-running
+            attrs.pop("ai", None)
+            attrs.pop("_synopsis_vector_tmp", None)
 
-        refreshed_attrs = annotate_with_ai(
-            item.item_type, item.uid, item.title, attrs
-        )
-        item.attributes = refreshed_attrs
-        flag_modified(item, "attributes")
-        session.add(item)
-        session.commit()
-        session.refresh(item)
-        return IgnoreItemType.from_sqlalchemy(item)
+            refreshed_attrs = annotate_with_ai(
+                item.item_type, item.uid, item.title, attrs
+            )
+            item.attributes = refreshed_attrs
+            flag_modified(item, "attributes")
+            session.add(item)
+            session.commit()
+            session.refresh(item)
+            return IgnoreItemType.from_sqlalchemy(item)
 
     @strawberry.mutation
     def set_recommendation_preference(
@@ -707,81 +711,81 @@ class Mutation:
             record_id = int(str(data.recommendation_id))
         except (TypeError, ValueError):
             raise Exception("Invalid recommendation id")
-        session = db_session()
-        record = session.query(MovieRecommendationRecord).get(record_id)
-        if record is None:
-            raise Exception("Recommendation not found")
-        record.preference = data.preference
-        record.updated_at = int(datetime.utcnow().timestamp())
-        session.add(record)
-        session.commit()
-        session.refresh(record)
-        return RecommendationFeedbackType(
-            id=str(record.id),
-            preference=record.preference,
-        )
+        with db_session() as session:
+            record = session.query(MovieRecommendationRecord).get(record_id)
+            if record is None:
+                raise Exception("Recommendation not found")
+            record.preference = data.preference
+            record.updated_at = int(datetime.utcnow().timestamp())
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return RecommendationFeedbackType(
+                id=str(record.id),
+                preference=record.preference,
+            )
 
     @strawberry.mutation
     def create_filter_rule(self, data: FilterRuleInput) -> MutationReturn:
-        session = db_session()
-        rule = FilterRule(
-            item_type=data.item_type,
-            attribute=data.attribute,
-            operator=data.operator,
-            value=data.value,
-            enabled=data.enabled,
-        )
-        session.add(rule)
-        session.commit()
+        with db_session() as session:
+            rule = FilterRule(
+                item_type=data.item_type,
+                attribute=data.attribute,
+                operator=data.operator,
+                value=data.value,
+                enabled=data.enabled,
+            )
+            session.add(rule)
+            session.commit()
 
-        # Immediately apply the new rule to all matching IgnoreItems
-        # Build a query for IgnoreItems of the correct type and not already ignored
+            # Immediately apply the new rule to all matching IgnoreItems
+            # Build a query for IgnoreItems of the correct type and not already ignored
 
-        base_query = session.query(IgnoreItem).filter_by(
-            item_type=data.item_type, ignore=False
-        )
-        # Build a FilterSpec for the new rule
-        if data.attribute in [
-            "type",
-            "uid",
-            "title",
-            "checked_title",
-            "poster_url",
-            "added",
-            "ignore",
-        ]:
-            field = data.attribute
-        else:
-            field = f"attributes.{data.attribute}"
-        spec = FilterSpec(
-            model=IgnoreItem,
-            field=field,
-            op=data.operator,
-            value=data.value,
-        )
-        filtered_query = apply_filters(base_query, spec)
-        for item in filtered_query.all():
-            item.ignore = True
-            session.add(item)
-        session.commit()
+            base_query = session.query(IgnoreItem).filter_by(
+                item_type=data.item_type, ignore=False
+            )
+            # Build a FilterSpec for the new rule
+            if data.attribute in [
+                "type",
+                "uid",
+                "title",
+                "checked_title",
+                "poster_url",
+                "added",
+                "ignore",
+            ]:
+                field = data.attribute
+            else:
+                field = f"attributes.{data.attribute}"
+            spec = FilterSpec(
+                model=IgnoreItem,
+                field=field,
+                op=data.operator,
+                value=data.value,
+            )
+            filtered_query = apply_filters(base_query, spec)
+            for item in filtered_query.all():
+                item.ignore = True
+                session.add(item)
+            session.commit()
 
-        ignore_items = IgnoreItemList(filters=[Filter(type=data.item_type)])
-        filter_rules = FilterRuleList()
-        return MutationReturn(ignore_items=ignore_items, filter_rules=filter_rules)
+            ignore_items = IgnoreItemList(filters=[Filter(type=data.item_type)])
+            filter_rules = FilterRuleList()
+            return MutationReturn(ignore_items=ignore_items, filter_rules=filter_rules)
 
     @strawberry.mutation
     def delete_filter_rule(self, id: GlobalID) -> MutationReturn:
-        session = db_session()
-        i_id = int(id.node_id)
-        rule = session.query(FilterRule).get(i_id)
-        if not rule:
-            raise Exception("Rule not found")
-        item_type = rule.item_type
-        session.delete(rule)
-        session.commit()
-        ignore_items = IgnoreItemList(filters=[Filter(type=item_type)])
-        filter_rules = FilterRuleList()
-        return MutationReturn(ignore_items=ignore_items, filter_rules=filter_rules)
+        with db_session() as session:
+            i_id = int(id.node_id)
+            rule = session.query(FilterRule).get(i_id)
+            if not rule:
+                raise Exception("Rule not found")
+            item_type = rule.item_type
+            session.delete(rule)
+            session.commit()
+            ignore_items = IgnoreItemList(filters=[Filter(type=item_type)])
+            filter_rules = FilterRuleList()
+            return MutationReturn(ignore_items=ignore_items, filter_rules=filter_rules)
 
 
 schema = strawberry.Schema(
