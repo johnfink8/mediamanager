@@ -42,29 +42,31 @@ class IgnoreItem(Base):
 
     @classmethod
     def get_open(cls: Type["IgnoreItem"]) -> List["IgnoreItem"]:
-        session = db_session()
-        items = session.query(cls).filter_by(ignore=False)
-        return list(items)
+        with db_session() as session:
+            items = session.query(cls).filter_by(ignore=False)
+            return list(items)
 
     @classmethod
     def exists(cls: Type["IgnoreItem"], type: str, id: str) -> bool:
-        session = db_session()
-        return any(session.query(cls).filter_by(item_type=type.lower(), uid=id.lower()))
+        with db_session() as session:
+            return any(
+                session.query(cls).filter_by(item_type=type.lower(), uid=id.lower())
+            )
 
     @classmethod
     def create(cls: Type["IgnoreItem"], **kwargs: object) -> "IgnoreItem":
         if "created_at" not in kwargs or kwargs["created_at"] is None:
             kwargs["created_at"] = int(datetime.now().timestamp())
-        session = db_session()
-        item = cls(**kwargs)
-        session.add(item)
-        session.commit()
-        return item
+        with db_session() as session:
+            item = cls(**kwargs)
+            session.add(item)
+            session.commit()
+            return item
 
     @classmethod
     def filter(cls: Type["IgnoreItem"], **kwargs: object) -> Iterable["IgnoreItem"]:
-        session = db_session()
-        return session.query(cls).filter_by(**kwargs)
+        with db_session() as session:
+            return session.query(cls).filter_by(**kwargs)
 
 
 class FilterRule(Base):
@@ -105,7 +107,9 @@ class MovieRecommendationRecord(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    recommended_imdb_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    recommended_imdb_id: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True
+    )
     recommended_title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     recommended_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
@@ -144,33 +148,31 @@ class MovieRecommendationRecord(Base):
         reason: Optional[str],
         source: Optional[str],
     ) -> "MovieRecommendationRecord":
-        session = db_session()
-        record = cls(
-            prompt=prompt,
-            recommended_imdb_id=imdb_id,
-            recommended_title=title,
-            recommended_reason=reason,
-            source=source,
-            created_at=int(datetime.utcnow().timestamp()),
-        )
-        session.add(record)
-        session.commit()
-        session.refresh(record)
-        return record
+        with db_session() as session:
+            record = cls(
+                prompt=prompt,
+                recommended_imdb_id=imdb_id,
+                recommended_title=title,
+                recommended_reason=reason,
+                source=source,
+                created_at=int(datetime.utcnow().timestamp()),
+            )
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return record
 
     @classmethod
     def get_by_id(cls, record_id: int) -> Optional["MovieRecommendationRecord"]:
-        session = db_session()
-        return session.query(cls).get(record_id)
+        with db_session() as session:
+            return session.query(cls).get(record_id)
 
     @classmethod
-    def recent_history(
-        cls, limit: int = 10
-    ) -> Sequence["MovieRecommendationRecord"]:
-        session = db_session()
-        return (
-            session.query(cls)
-            .order_by(cls.created_at.desc(), cls.id.desc())
-            .limit(limit)
-            .all()
-        )
+    def recent_history(cls, limit: int = 10) -> Sequence["MovieRecommendationRecord"]:
+        with db_session() as session:
+            return (
+                session.query(cls)
+                .order_by(cls.created_at.desc(), cls.id.desc())
+                .limit(limit)
+                .all()
+            )
