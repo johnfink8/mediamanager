@@ -3,13 +3,14 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from decouple import config
+from openai import OpenAI
+
 from indexer_utils.tmdb import (
     get_movie_cast,
     get_movie_id,
     get_tv_cast,
     get_tv_id,
 )
-from openai import OpenAI
 
 from .models import IgnoreItem
 from .session import db_session
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 logger.addHandler(logging.StreamHandler())
 
-OPENAI_MODEL = config("OPENAI_MODEL", default="gpt-5-mini")
+OPENAI_MODEL = config("OPENAI_MODEL", default="gpt-5.2")
 
 SYNOPSIS_PROMPTS = {
     "mv": """
@@ -192,9 +193,7 @@ def annotate_with_ai(
     if item_type == "mv":
         attrs["tmdb_id"] = attrs.get("tmdb_id") or get_movie_id(uid)
         if attrs["tmdb_id"]:
-            attrs["cast"] = attrs.get("cast") or get_movie_cast(
-                attrs["tmdb_id"], n=10
-            )
+            attrs["cast"] = attrs.get("cast") or get_movie_cast(attrs["tmdb_id"], n=10)
     elif item_type == "tv":
         attrs["tmdb_id"] = attrs.get("tmdb_id") or get_tv_id(uid)
         if attrs["tmdb_id"]:
