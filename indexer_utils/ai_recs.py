@@ -1,5 +1,6 @@
 import json
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from decouple import config
@@ -23,7 +24,15 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 logger.addHandler(logging.StreamHandler())
 
+BASE_DIR = Path(__file__).parent
+PROMPTS_DIR = BASE_DIR / "prompts"
 OPENAI_MODEL = config("OPENAI_MODEL", default="gpt-5.2")
+
+
+def load_prompt(filename: str) -> str:
+    with open(PROMPTS_DIR / filename, "r") as f:
+        return f.read()
+
 
 SYNOPSIS_PROMPTS = {
     "mv": """
@@ -41,19 +50,11 @@ SYNOPSIS_PROMPTS = {
 }
 
 RECOMMENDATION_PROMPTS = {
-    "mv": """
-    You are a personal media curator. Based on the user's previously added movies,
-    decide if the new item matches their taste. Respond in compact JSON with fields:
-    recommend (boolean), score (0..1), reason (short sentence).
-    """,
-    "tv": """
-    You are a personal media curator. Based on the user's previously added TV shows,
-    decide if the new item matches their taste. Respond in compact JSON with fields:
-    recommend (boolean), score (0..1), reason (short sentence).
-    """,
+    "mv": load_prompt("mv_recommendation.md"),
+    "tv": load_prompt("tv_recommendation.md"),
 }
 
-N_NEIGHBORS = 20
+N_NEIGHBORS = 40
 _openai_client = None
 
 SIMILAR_ATTRIBUTE_KEYS = [
