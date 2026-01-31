@@ -30,6 +30,13 @@ def get_movie_cast(movie_id: int, n: int = 10) -> List[str]:
     return [cast["name"] for cast in response["cast"][:n]]
 
 
+def get_movie_release_count(movie_id: int) -> int:
+    url = f"https://api.themoviedb.org/3/movie/{movie_id}/release_dates?language=en-US"
+    response = requests.get(url, headers=_auth_headers())
+    response = response.json()
+    return len(response.get("results", []))
+
+
 def get_tv_id(tvdb_id: str) -> Optional[str]:
     url = f"https://api.themoviedb.org/3/find/{tvdb_id}?external_source=tvdb_id"
     response = requests.get(url, headers=_auth_headers())
