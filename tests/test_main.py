@@ -695,7 +695,9 @@ def test_check_shows_fetches_cast(monkeypatch):
 
     monkeypatch.setattr("indexer_utils.vid_utils.query_series", mock_query_series)
     monkeypatch.setattr("indexer_utils.vid_utils.reset_series", lambda: None)
-    monkeypatch.setattr("indexer_utils.vid_utils.should_ignore_by_rules", lambda item: False)
+    monkeypatch.setattr(
+        "indexer_utils.vid_utils.should_ignore_by_rules", lambda item: False
+    )
 
     def mock_get_tv_cast(tmdb_id, n=10):
         assert tmdb_id == "56789"
@@ -955,9 +957,7 @@ def test_movie_recommendation_query(run_graphql, monkeypatch):
         assert history[0]["preference"] == "NEVER"
         return {"imdb_id": "tt0000002", "reason": "Fits the space adventure vibe."}
 
-    monkeypatch.setattr(
-        "indexer_utils.recommendations.call_openai_json", fake_openai
-    )
+    monkeypatch.setattr("indexer_utils.recommendations.call_openai_json", fake_openai)
 
     query = """
     query MovieRecommendationQuery($prompt: String) {
@@ -994,7 +994,11 @@ def test_movie_recommendation_query(run_graphql, monkeypatch):
     assert data["preference"] is None
 
     session = db_session()
-    records = session.query(MovieRecommendationRecord).order_by(MovieRecommendationRecord.id).all()
+    records = (
+        session.query(MovieRecommendationRecord)
+        .order_by(MovieRecommendationRecord.id)
+        .all()
+    )
     assert len(records) == 2
     latest = records[-1]
     assert latest.recommended_title == "Space Adventure"
@@ -1004,9 +1008,7 @@ def test_movie_recommendation_query(run_graphql, monkeypatch):
     assert latest.source == "openai"
 
 
-def test_movie_recommendation_uses_radarr_base_for_posters(
-    run_graphql, monkeypatch
-):
+def test_movie_recommendation_uses_radarr_base_for_posters(run_graphql, monkeypatch):
     monkeypatch.setenv("RADARR_URL", "https://radarr.example.com/radarr/api/v3")
 
     sample_movies = [
@@ -1014,9 +1016,7 @@ def test_movie_recommendation_uses_radarr_base_for_posters(
             "imdbId": "tt0000003",
             "title": "Relative Poster",
             "hasFile": True,
-            "images": [
-                {"coverType": "poster", "url": "/MediaCover/3/poster.jpg"}
-            ],
+            "images": [{"coverType": "poster", "url": "/MediaCover/3/poster.jpg"}],
             "ratings": {"imdb": {"value": 7.5}},
         }
     ]

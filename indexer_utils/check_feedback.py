@@ -23,7 +23,9 @@ def _write_history(kind: str, entry: Dict[str, Any]) -> None:
 
     history: List[Dict[str, Any]] = redis_get_json(client, _history_key(kind)) or []
     updated_history = [entry] + history[:11]
-    redis_set_json(client, _history_key(kind), updated_history, CHECK_HISTORY_TTL_SECONDS)
+    redis_set_json(
+        client, _history_key(kind), updated_history, CHECK_HISTORY_TTL_SECONDS
+    )
 
 
 def record_check_result(

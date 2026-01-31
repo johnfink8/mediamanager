@@ -6,11 +6,10 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from indexer_utils.ai_recs import annotate_attributes_for_item
 from indexer_utils.models import IgnoreItem
+from indexer_utils.radarr_utils import radarr_query
 from indexer_utils.session import db_session
 from indexer_utils.sonarr_utils import query_series
-from indexer_utils.radarr_utils import radarr_query
 from indexer_utils.vid_utils import add_attr, get_ratings_attrs
-
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
