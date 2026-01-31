@@ -23,6 +23,11 @@ jobs:
 
       - name: Build Docker image
         run: |
+          python3.12 -m venv .venv
+          source .venv/bin/activate
+          pip install ruff
+          ruff format --check
+          ruff check --no-fix
           docker build -t builder:${{ github.sha }} --target build .
           docker run --rm builder:${{ github.sha }} npm run lint
           docker build -t mediamanager:${{ github.sha }} .
