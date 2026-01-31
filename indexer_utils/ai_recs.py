@@ -9,6 +9,7 @@ from openai import OpenAI
 from indexer_utils.tmdb import (
     get_movie_cast,
     get_movie_id,
+    get_movie_release_count,
     get_tv_cast,
     get_tv_id,
 )
@@ -94,6 +95,34 @@ def _year_from_attrs(attrs: Dict[str, Any]) -> Optional[int]:
     except Exception:
         return None
     return None
+
+
+def ensure_movie_release_count(
+    attrs: Dict[str, Any], uid: str
+) -> Tuple[Dict[str, Any], Optional[int], bool]:
+    ai = attrs.get("ai")
+    if not isinstance(ai, dict):
+        ai = {}
+    if "release_count" in ai:
+        return attrs, ai["release_count"], False
+    tmdb_id = attrs.get("tmdb_id") or ai.get("tmdb_id")
+    if not tmdb_id:
+        tmdb_id = get_movie_id(uid)
+        if tmdb_id:
+            attrs["tmdb_id"] = tmdb_id
+    if not tmdb_id:
+        release_count = None
+    else:
+        try:
+            release_count = get_movie_release_count(tmdb_id)
+        except Exception:
+            logger.exception(
+                "Failed to fetch movie release count", extra={"tmdb_id": tmdb_id}
+            )
+            release_count = None
+    ai["release_count"] = release_count
+    attrs["ai"] = ai
+    return attrs, release_count, True
 
 
 def get_openai_client():
@@ -195,6 +224,7 @@ def annotate_with_ai(
         attrs["tmdb_id"] = attrs.get("tmdb_id") or get_movie_id(uid)
         if attrs["tmdb_id"]:
             attrs["cast"] = attrs.get("cast") or get_movie_cast(attrs["tmdb_id"], n=10)
+        attrs, _, _ = ensure_movie_release_count(attrs, uid)
     elif item_type == "tv":
         attrs["tmdb_id"] = attrs.get("tmdb_id") or get_tv_id(uid)
         if attrs["tmdb_id"]:
@@ -219,27 +249,44 @@ def annotate_with_ai(
         for item_def in similar_defs.values()
     ]
 
-    similar_summary = [
-        {
-            "title": s.title,
-            "uid": s.uid,
-            "distance": round(distance, 3),
-            "genres": _to_list_of_str((s.attributes or {}).get("genres")),
-            "added": s.added,
-            "attributes": {
-                k: v
-                for k in SIMILAR_ATTRIBUTE_KEYS
-                if (v := (s.attributes or {}).get(k)) is not None
-            },
+    similar_summary = []
+    for (s, distance) in similar_pairs:
+        if s is None:
+            continue
+        item_attrs = s.attributes or {}
+        attributes = {
+            k: v for k in SIMILAR_ATTRIBUTE_KEYS if (v := item_attrs.get(k)) is not None
         }
-        for (s, distance) in similar_pairs
-        if s is not None
-    ]
+        if item_type == "mv":
+            item_attrs, release_count, updated = ensure_movie_release_count(
+                item_attrs, s.uid
+            )
+            attributes["release_count"] = release_count
+            if updated:
+                s.attributes = item_attrs
+                s.save()
+        similar_summary.append(
+            {
+                "title": s.title,
+                "uid": s.uid,
+                "distance": round(distance, 3),
+                "genres": _to_list_of_str(item_attrs.get("genres")),
+                "added": s.added,
+                "attributes": attributes,
+            }
+        )
 
     added_similar = [s for s in similar_summary if s.get("added")]
     ignored_similar = [s for s in similar_summary if not s.get("added")]
 
     system_prompt = RECOMMENDATION_PROMPTS.get(item_type)
+    candidate_attributes = {
+        k: v for k in SIMILAR_ATTRIBUTE_KEYS if (v := (attrs or {}).get(k)) is not None
+    }
+    if item_type == "mv":
+        candidate_attributes["release_count"] = (attrs.get("ai") or {}).get(
+            "release_count"
+        )
     user_payload = {
         "item_type": item_type,
         "candidate": {
@@ -249,11 +296,7 @@ def annotate_with_ai(
             "genres": genres,
             "language": lang,
             "synopsis": candidate_synopsis,
-            "attributes": {
-                k: v
-                for k in SIMILAR_ATTRIBUTE_KEYS
-                if (v := (attrs or {}).get(k)) is not None
-            },
+            "attributes": candidate_attributes,
         },
         "similar_items_added": added_similar or "No similar items added",
         "similar_items_ignored": ignored_similar or "No similar items ignored",
