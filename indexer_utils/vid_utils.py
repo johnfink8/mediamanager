@@ -425,7 +425,7 @@ def check_shows(days: int) -> None:
             else:
                 enriched_attrs = annotate_with_ai("tv", tvdb, title, attrs)
                 note = "Flagged for review"
-            created = IgnoreItem.create(
+            IgnoreItem.create(
                 title=title,
                 uid=tvdb,
                 ignore=ignore,
@@ -433,7 +433,9 @@ def check_shows(days: int) -> None:
                 attributes=enriched_attrs,
             )
             add_checked_show(note, ignored=bool(ignore))
-        summary = f"Checked {len(checked_shows)} show candidates from the last {days} days"
+        summary = (
+            f"Checked {len(checked_shows)} show candidates from the last {days} days"
+        )
         success = True
         logger.info(summary)
     except Exception as exc:
