@@ -4,14 +4,14 @@ import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
-
-from decouple import UndefinedValueError, config
 from urllib.parse import urljoin, urlparse
 
+from decouple import UndefinedValueError, config
+
 from .ai_recs import OPENAI_MODEL, call_openai_json
+from .models import MovieRecommendationRecord, RecommendationPreference
 from .plex_utils import get_recently_played_imdb_ids
 from .radarr_utils import radarr_query
-from .models import MovieRecommendationRecord, RecommendationPreference
 from .redis_client import get_redis_client, redis_get_json, redis_set_json
 
 logger = logging.getLogger(__name__)
@@ -22,6 +22,7 @@ HISTORY_PAYLOAD_LIMIT = 10
 CACHE_TTL_SECONDS = 60 * 60
 RADARR_MOVIES_CACHE_KEY = "recommend_movie:radarr_movies"
 RECENT_IDS_CACHE_KEY = "recommend_movie:recent_ids"
+
 
 def _safe_float(value: Any) -> float:
     try:
@@ -200,7 +201,9 @@ class MovieRecommendationResult:
     preference: Optional[RecommendationPreference]
 
 
-def _history_payload(limit: int = HISTORY_PAYLOAD_LIMIT) -> List[Dict[str, Optional[str]]]:
+def _history_payload(
+    limit: int = HISTORY_PAYLOAD_LIMIT,
+) -> List[Dict[str, Optional[str]]]:
     try:
         records = MovieRecommendationRecord.recent_history(limit=limit)
     except Exception:
@@ -219,7 +222,9 @@ def _history_payload(limit: int = HISTORY_PAYLOAD_LIMIT) -> List[Dict[str, Optio
     return history
 
 
-def _build_candidates(radarr_movies: Sequence[Dict[str, Any]], recent_ids: Set[str]) -> List[MovieCandidate]:
+def _build_candidates(
+    radarr_movies: Sequence[Dict[str, Any]], recent_ids: Set[str]
+) -> List[MovieCandidate]:
     candidates: List[MovieCandidate] = []
     for movie in radarr_movies:
         if movie.get("hasFile") is False:
@@ -275,9 +280,7 @@ def _choose_with_openai(
         "Always avoid suggesting movies that are flagged as recently watched. "
         "Respond using compact JSON with fields: imdb_id (string), title (string), reason (string)."
     )
-    logger.info(
-        "Sending OpenAI movie recommendation request with prompt: %s", prompt
-    )
+    logger.info("Sending OpenAI movie recommendation request with prompt: %s", prompt)
     logger.debug("OpenAI movie recommendation payload: %s", payload)
     try:
         result, failure = call_openai_json(system_prompt, json.dumps(payload))
@@ -314,7 +317,9 @@ def _resolve_openai_choice(
     return None
 
 
-def recommend_movie(prompt: Optional[str] = None) -> Optional[MovieRecommendationResult]:
+def recommend_movie(
+    prompt: Optional[str] = None,
+) -> Optional[MovieRecommendationResult]:
     redis_client = get_redis_client()
 
     cached_movies = redis_get_json(redis_client, RADARR_MOVIES_CACHE_KEY)
@@ -398,4 +403,3 @@ def recommend_movie(prompt: Optional[str] = None) -> Optional[MovieRecommendatio
         record_id=record.id if record else None,
         preference=record.preference if record else None,
     )
-
