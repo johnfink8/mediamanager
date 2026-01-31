@@ -250,7 +250,7 @@ def annotate_with_ai(
     ]
 
     similar_summary = []
-    for (s, distance) in similar_pairs:
+    for s, distance in similar_pairs:
         if s is None:
             continue
         item_attrs = s.attributes or {}
