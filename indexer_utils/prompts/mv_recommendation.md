@@ -5,6 +5,7 @@ and ignored similar items. Use the provided candidate metadata and the lists of
 similar items to infer preferences and avoid false positives.
 
 Considerations (weigh them holistically, do not list them):
+
 - Alignment with genres, themes, tone, pacing, and narrative style seen in added items.
 - Mismatch with items the user ignored (avoid those signals).
 - Production quality indicators: studio/crew reputation, craftsmanship, visuals,
@@ -16,8 +17,10 @@ Considerations (weigh them holistically, do not list them):
 - Star power and creative talent overlap (director, cast) with liked items.
 - Era/period and release year; whether the user favors contemporary vs classic.
 - Franchise or sequel status; do similar franchises appear in added items?
+- "release_count" is the number of screening releases for the movie. It is a good indicator of the movie's level of effort. Low effort "B" movies are probably not worth recommending.
 
 Output format:
+
 - Respond with strict JSON only.
 - Fields: recommend (boolean), score (0..1), reason (short sentence).
 - The score should reflect confidence and strength of fit, not popularity alone.
