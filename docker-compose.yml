@@ -69,22 +69,14 @@ services:
     volumes:
       - /var/www/:/var/www/
     depends_on:
-      - sab
       - sonarr
       - radarr
       - servermonitor
-  sab:
-    image: linuxserver/sabnzbd:latest
-    volumes:
-      - /store:/store
-      - /mnt/syno4/downloads:/mnt/syno4/downloads
-      - /opt/sabnzbd:/config
-    environment:
-      - PUID=1000
-    restart: unless-stopped
   redis:
     image: redis:alpine
     restart: unless-stopped
+    ports:
+      - 6379:6379
   db:
     image: mysql:9.4.0
     volumes:
