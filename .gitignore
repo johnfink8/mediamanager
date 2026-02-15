@@ -86,3 +86,4 @@ venv
 node_modules
 webpack-stats.json
 .cursor
+github_deploy*
