@@ -43,7 +43,9 @@ def _year_from_attrs(attrs) -> Optional[int]:
     return None
 
 
-def backfill(item_type: str, limit: int, dry_run: bool, force: bool) -> None:
+def backfill(
+    item_type: str, limit: int, dry_run: bool, force: bool, reindex_all: bool
+) -> None:
     if not config("OPENAI_API_KEY", default=None):
         print(
             "WARNING: OPENAI_API_KEY is not set; backfill will not generate any data."
@@ -115,7 +117,8 @@ def backfill(item_type: str, limit: int, dry_run: bool, force: bool) -> None:
         query = query.filter(~or_(*disq_clauses))
 
     # Only backfill items not yet upserted to Weaviate
-    query = query.filter(IgnoreItem.attributes["ai"]["weaviate_uuid"].is_(None))
+    if not reindex_all:
+        query = query.filter(IgnoreItem.attributes["ai"]["weaviate_uuid"].is_(None))
     query = query.order_by(IgnoreItem.id.desc()).limit(limit)
     items = query.all()
     logger.info(f"Found {len(items)} items to process")
@@ -199,9 +202,14 @@ def main() -> None:
     parser.add_argument(
         "--force", action="store_true", help="Regenerate even if already present"
     )
+    parser.add_argument(
+        "--reindex-all",
+        action="store_true",
+        help="Reindex all items even if they already have a weaviate UUID",
+    )
     args = parser.parse_args()
 
-    backfill(args.type, args.limit, args.dry_run, args.force)
+    backfill(args.type, args.limit, args.dry_run, args.force, args.reindex_all)
 
 
 if __name__ == "__main__":
