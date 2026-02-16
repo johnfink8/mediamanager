@@ -8,12 +8,10 @@ from decouple import config
 from sqlalchemy import Integer, and_, func, or_
 from sqlalchemy.orm.attributes import flag_modified
 
+from indexer_utils.ai_recs import generate_synopsis_for_candidate
 from indexer_utils.filters import should_ignore_by_rules
 from indexer_utils.models import FilterRule, IgnoreItem
 from indexer_utils.session import db_session
-from indexer_utils.vid_utils import (
-    generate_synopsis_for_candidate,  # reuse existing helpers
-)
 from indexer_utils.weaviate_client import get_weaviate_client, upsert_item_attrs
 
 logger = logging.getLogger(__name__)
