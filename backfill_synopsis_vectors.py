@@ -2,6 +2,7 @@
 import argparse
 import json
 import logging
+from datetime import datetime
 from typing import List, Optional
 
 from decouple import config
@@ -42,7 +43,13 @@ def _year_from_attrs(attrs) -> Optional[int]:
 
 
 def backfill(
-    item_type: str, limit: int, dry_run: bool, force: bool, reindex_all: bool
+    item_type: str,
+    limit: int,
+    dry_run: bool,
+    force: bool,
+    reindex_all: bool,
+    query_rules: bool,
+    since: int,
 ) -> None:
     if not config("OPENAI_API_KEY", default=None):
         print(
@@ -59,65 +66,78 @@ def backfill(
     session = db_session()
     query = session.query(IgnoreItem)
     query = query.filter(IgnoreItem.item_type == item_type)
+    logger.info(f"Querying {item_type} items")
     if item_ids:
+        logger.info(
+            f"Excluding {len(item_ids)} items that already have a weaviate UUID"
+        )
         query = query.filter(~IgnoreItem.uid.in_(item_ids))
 
-    # Exclude items that would be disqualified by rules by pushing rules into SQL
-    rules_q = session.query(FilterRule).filter_by(enabled=True)
-    rules_q = rules_q.filter_by(item_type=item_type)
-    rules = rules_q.all()
+    if query_rules:
+        # Exclude items that would be disqualified by rules by pushing rules into SQL
+        rules_q = session.query(FilterRule).filter_by(enabled=True)
+        rules_q = rules_q.filter_by(item_type=item_type)
+        rules = rules_q.all()
 
-    disq_clauses = []
-    for r in rules:
-        # Map rule.attribute to column or JSON field
-        if r.attribute in [
-            "type",
-            "uid",
-            "title",
-            "checked_title",
-            "poster_url",
-            "added",
-            "ignore",
-        ]:
-            field = getattr(IgnoreItem, r.attribute)
-        else:
-            field = IgnoreItem.attributes[r.attribute]
-        op = r.operator
-        val = r.value
-        cond = None
-        if op == "eq":
-            cond = field.contains(val)
-        elif op == "neq":
-            cond = ~field.contains(val)
-        elif op == "in":
-            values = [v.strip() for v in val.split(",")]
-            cond = or_(*[field.contains(v) for v in values])
-        elif op == "not_in":
-            values = [v.strip() for v in val.split(",")]
-            cond = and_(*[~field.contains(v) for v in values])
-        elif op == "lt":
-            cond = func.cast(field[0], Integer) < int(val)
-        elif op == "gt":
-            cond = func.cast(field[0], Integer) > int(val)
-        elif op == "lte":
-            cond = func.cast(field[0], Integer) <= int(val)
-        elif op == "gte":
-            cond = func.cast(field[0], Integer) >= int(val)
-        elif op == "contains":
-            cond = field.contains(val)
-        elif op == "not_contains":
-            cond = ~field.contains(val)
-        else:
-            continue
-        disq_clauses.append(and_(IgnoreItem.item_type == r.item_type, cond))
+        disq_clauses = []
+        logger.info(f"Querying {len(rules)} FilterRules")
+        for r in rules:
+            # Map rule.attribute to column or JSON field
+            if r.attribute in [
+                "type",
+                "uid",
+                "title",
+                "checked_title",
+                "poster_url",
+                "added",
+                "ignore",
+            ]:
+                field = getattr(IgnoreItem, r.attribute)
+            else:
+                field = IgnoreItem.attributes[r.attribute]
+            op = r.operator
+            val = r.value
+            cond = None
+            if op == "eq":
+                cond = field.contains(val)
+            elif op == "neq":
+                cond = ~field.contains(val)
+            elif op == "in":
+                values = [v.strip() for v in val.split(",")]
+                cond = or_(*[field.contains(v) for v in values])
+            elif op == "not_in":
+                values = [v.strip() for v in val.split(",")]
+                cond = and_(*[~field.contains(v) for v in values])
+            elif op == "lt":
+                cond = func.cast(field[0], Integer) < int(val)
+            elif op == "gt":
+                cond = func.cast(field[0], Integer) > int(val)
+            elif op == "lte":
+                cond = func.cast(field[0], Integer) <= int(val)
+            elif op == "gte":
+                cond = func.cast(field[0], Integer) >= int(val)
+            elif op == "contains":
+                cond = field.contains(val)
+            elif op == "not_contains":
+                cond = ~field.contains(val)
+            else:
+                continue
+            disq_clauses.append(and_(IgnoreItem.item_type == r.item_type, cond))
 
-    if disq_clauses:
-        query = query.filter(~or_(*disq_clauses))
+        if disq_clauses:
+            query = query.filter(~or_(*disq_clauses))
+
+    if since:
+        query = query.filter(IgnoreItem.attributes["year"] >= since)
 
     # Only backfill items not yet upserted to Weaviate
     if not reindex_all:
+        logger.info("Excluding items that already have a weaviate UUID")
         query = query.filter(IgnoreItem.attributes["ai"]["weaviate_uuid"].is_(None))
-    query = query.order_by(IgnoreItem.id.desc()).limit(limit)
+    query = query.order_by(IgnoreItem.id.desc())
+    if limit:
+        logger.info(f"Limiting to {limit} items")
+        query = query.limit(limit)
     items = query.all()
     logger.info(f"Found {len(items)} items to process")
     updated_count = 0
@@ -127,7 +147,7 @@ def backfill(
         attrs = item.attributes or {}
         # Apply FilterRule logic: skip items disqualified by rules
         try:
-            if should_ignore_by_rules(item):
+            if query_rules and should_ignore_by_rules(item):
                 logger.info(
                     f"Skipping item {item.uid} because it's disqualified by rules"
                 )
@@ -193,7 +213,7 @@ def main() -> None:
     parser.add_argument(
         "--type", choices=["mv", "tv"], default="mv", help="Filter by item type"
     )
-    parser.add_argument("--limit", type=int, default=1, help="Max items to process")
+    parser.add_argument("--limit", type=int, default=0, help="Max items to process")
     parser.add_argument(
         "--dry-run", action="store_true", help="Preview changes without saving"
     )
@@ -205,9 +225,27 @@ def main() -> None:
         action="store_true",
         help="Reindex all items even if they already have a weaviate UUID",
     )
+    parser.add_argument(
+        "--skip-rules",
+        action="store_true",
+        help="Skip applying FilterRules to exclude items",
+    )
+    parser.add_argument(
+        "--since",
+        type=int,
+        help="Only process items since this year",
+    )
     args = parser.parse_args()
 
-    backfill(args.type, args.limit, args.dry_run, args.force, args.reindex_all)
+    backfill(
+        args.type,
+        args.limit,
+        args.dry_run,
+        args.force,
+        args.reindex_all,
+        not args.skip_rules,
+        int(args.since or datetime.now().year),
+    )
 
 
 if __name__ == "__main__":

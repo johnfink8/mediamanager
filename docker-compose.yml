@@ -1,5 +1,24 @@
-version: "2.1"
+secrets:
+  JWT_SECRET:
+    file: ./secrets/JWT_SECRET
+  SESSION_SECRET:
+    file: ./secrets/SESSION_SECRET
+  STORAGE_ENCRYPTION_KEY:
+    file: ./secrets/STORAGE_ENCRYPTION_KEY
 services:
+  authelia:
+    image: authelia/authelia:latest
+    container_name: authelia
+    secrets: ["JWT_SECRET", "SESSION_SECRET", "STORAGE_ENCRYPTION_KEY"]
+    environment:
+      AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE: "/run/secrets/JWT_SECRET"
+      AUTHELIA_SESSION_SECRET_FILE: "/run/secrets/SESSION_SECRET"
+      AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE: "/run/secrets/STORAGE_ENCRYPTION_KEY"
+    volumes:
+      - ./authelia_config:/config
+    expose: ["9091"]
+    networks: [proxy]
+    depends_on: [redis]
   sonarr:
     image: linuxserver/sonarr
     container_name: sonarr
@@ -13,6 +32,7 @@ services:
       - /store:/store
       - /mnt:/mnt
     restart: unless-stopped
+    networks: [proxy]
   radarr:
     image: linuxserver/radarr
     container_name: radarr
@@ -26,6 +46,7 @@ services:
       - /store:/store
       - /mnt:/mnt
     restart: unless-stopped
+    networks: [proxy]
   servermonitor:
     build:
       context: .
@@ -35,6 +56,7 @@ services:
       - redis
       - db
       - weaviate
+    networks: [proxy]
   builder:
     build:
       context: .
@@ -69,14 +91,17 @@ services:
     volumes:
       - /var/www/:/var/www/
     depends_on:
+      - authelia
       - sonarr
       - radarr
       - servermonitor
+    networks: [proxy]
   redis:
     image: redis:alpine
     restart: unless-stopped
     ports:
       - 6379:6379
+    networks: [proxy]
   db:
     image: mysql:9.4.0
     volumes:
@@ -90,27 +115,32 @@ services:
     ports:
       - 3306:3306
     restart: unless-stopped
+    networks: [proxy]
   weaviate:
     command:
-    - --host
-    - 0.0.0.0
-    - --port
-    - '8080'
-    - --scheme
-    - http
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --scheme
+      - http
     image: cr.weaviate.io/semitechnologies/weaviate:1.32.2
     ports:
-    - 8080:8080
-    - 50051:50051
+      - 8080:8080
+      - 50051:50051
     volumes:
-    - weaviate_data:/var/lib/weaviate
+      - ./data:/var/lib/weaviate
     restart: on-failure:0
     environment:
       QUERY_DEFAULTS_LIMIT: 25
-      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: 'true'
-      PERSISTENCE_DATA_PATH: '/var/lib/weaviate'
-      ENABLE_API_BASED_MODULES: 'true'
-      CLUSTER_HOSTNAME: 'node1'
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
+      ENABLE_API_BASED_MODULES: "true"
+      CLUSTER_HOSTNAME: "node1"
+    networks: [proxy]
 volumes:
-  weaviate_data:
   mysql_data:
+
+networks:
+  proxy:
+    driver: bridge
