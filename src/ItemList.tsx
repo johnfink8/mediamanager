@@ -62,20 +62,20 @@ export const SetItemAddedMutation = graphql`
     }
 `;
 
-
 const ItemList: FC<{
     menuItem: MenuItemType;
     queryRef: PreloadedQuery<ItemListQuery>;
     filters: Filter[];
 }> = ({ menuItem, queryRef }) => {
-    const queryItems = usePreloadedQuery(ItemListQueryGQL, queryRef).items.nodes;
+    const queryItems = usePreloadedQuery(ItemListQueryGQL, queryRef).items
+        .nodes;
     const items = queryItems.filter(Boolean);
     const { setAttributeKeys } = useFilterContext();
     React.useEffect(() => {
         // Collect all unique attribute keys from the items
         const keys = new Set<string>();
-        items.forEach(item => {
-            item.attributes?.forEach(attr => {
+        items.forEach((item) => {
+            item.attributes?.forEach((attr) => {
                 if (attr.key) keys.add(attr.key);
             });
         });
@@ -140,16 +140,17 @@ const ItemListLoading: FC = () => (
 
 const ItemListContainer: FC<{ menuItem: MenuItemType }> = ({ menuItem }) => {
     const { tempFilters } = useFilterContext();
-    const [queryRef, loadQuery, disposeQuery] = useQueryLoader<ItemListQuery>(ItemListQueryGQL);
+    const [queryRef, loadQuery, disposeQuery] =
+        useQueryLoader<ItemListQuery>(ItemListQueryGQL);
     // Always include the type filter, plus all temp filters mapped to Filter type
     const filters = useMemo<Filter[]>(
         () => [
             { type: menuItem.typeName },
-            ...tempFilters.map(f => ({
+            ...tempFilters.map((f) => ({
                 attribute: f.attribute,
                 operator: f.operator,
                 value: f.value,
-            }))
+            })),
         ],
         [menuItem, tempFilters]
     );

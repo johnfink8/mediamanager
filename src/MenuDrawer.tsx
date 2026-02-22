@@ -144,7 +144,7 @@ export default function PersistentDrawerLeft() {
             </Drawer>
             <Main open={open}>
                 <DrawerHeader />
-                <TemporaryFilterBar />
+                <TemporaryFilterBar selectedComponent={selectedComponent} />
                 {menuItems
                     .filter((e) => e.name === selectedComponent)
                     .map((e) => (

@@ -10,12 +10,19 @@ import {
 import React from "react";
 import { itemType } from "./types";
 import { itemLink } from "./util";
-import { useMutation } from "react-relay";
+import { graphql, useMutation } from "react-relay";
 import { AddItemMutation, DeleteItemMutation } from "./ItemList";
 import { ItemListAddItemMutation } from "./__generated__/ItemListAddItemMutation.graphql";
 import { ItemListDeleteItemMutation } from "./__generated__/ItemListDeleteItemMutation.graphql";
 import AttributeChips from "./AttributeChips";
 
+const DeferItemMutation = graphql`
+    mutation ItemDetailDeferItemMutation($input: DeferItemInput!) {
+        deferItem(data: $input) {
+            id @deleteRecord
+        }
+    }
+`;
 
 const ItemDetail: React.FC<{
     item: itemType;
@@ -23,6 +30,7 @@ const ItemDetail: React.FC<{
     const [addItem] = useMutation<ItemListAddItemMutation>(AddItemMutation);
     const [deleteItem] =
         useMutation<ItemListDeleteItemMutation>(DeleteItemMutation);
+    const [deferItem] = useMutation(DeferItemMutation);
     const handleAdd = (item: itemType) => {
         addItem({
             variables: {
@@ -42,6 +50,10 @@ const ItemDetail: React.FC<{
         });
     };
 
+    const handleDefer = (item: itemType) => {
+        deferItem({ variables: { input: { id: item.id } } });
+    };
+
     return (
         <Grid item xs={12} sm={12} md={6}>
             <Card sx={{ position: "relative" }}>
@@ -51,6 +63,7 @@ const ItemDetail: React.FC<{
                     </Typography>
                     <Button onClick={() => handleAdd(item)}>Add</Button>
                     <Button onClick={() => handleDelete(item)}>Ignore</Button>
+                    <Button onClick={() => handleDefer(item)}>Defer</Button>
                     <Link href={itemLink(item)} color="primary" target="_blank">
                         Details
                     </Link>
