@@ -50,7 +50,6 @@ const createEnvironment = () => {
     return new Environment({ store, network });
 };
 
-
 export default function App() {
     const environment = createEnvironment();
     return (

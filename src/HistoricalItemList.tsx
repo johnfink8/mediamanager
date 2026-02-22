@@ -7,12 +7,27 @@ import FormControlLabel from "@mui/material/FormControlLabel";
 import BreadCrumbs from "./BreadCrumbs";
 import HistoricalItemDetail from "./HistoricalItemDetail";
 import { MenuItemType } from "./types";
-import { graphql, useQueryLoader, usePreloadedQuery, PreloadedQuery } from "react-relay";
+import {
+    graphql,
+    useQueryLoader,
+    usePreloadedQuery,
+    PreloadedQuery,
+} from "react-relay";
 import { HistoricalItemListQuery } from "./__generated__/HistoricalItemListQuery.graphql";
 
 const HistoricalItemsQuery = graphql`
-    query HistoricalItemListQuery($type: String, $limit: Int!, $offset: Int!, $applyInvertedPermanentRules: Boolean!) {
-        historicalItems(filters: [{ type: $type }], limit: $limit, offset: $offset, applyInvertedPermanentRules: $applyInvertedPermanentRules) {
+    query HistoricalItemListQuery(
+        $type: String
+        $limit: Int!
+        $offset: Int!
+        $applyInvertedPermanentRules: Boolean!
+    ) {
+        historicalItems(
+            filters: [{ type: $type }]
+            limit: $limit
+            offset: $offset
+            applyInvertedPermanentRules: $applyInvertedPermanentRules
+        ) {
             nodes {
                 id
                 type
@@ -20,7 +35,11 @@ const HistoricalItemsQuery = graphql`
                 title
                 checkedTitle
                 posterUrl
-                attributes { key values details }
+                attributes {
+                    key
+                    values
+                    details
+                }
                 added
             }
             pageInfo {
@@ -45,8 +64,20 @@ const HistoricalItemListContent: FC<{
     setOffset: (o: number) => void;
     applyInvertedPermanentRules: boolean;
     setApplyInvertedPermanentRules: (v: boolean) => void;
-}> = ({ menuItem, queryRef, type, setType, offset, setOffset, applyInvertedPermanentRules, setApplyInvertedPermanentRules }) => {
-    const data = usePreloadedQuery<HistoricalItemListQuery>(HistoricalItemsQuery, queryRef);
+}> = ({
+    menuItem,
+    queryRef,
+    type,
+    setType,
+    offset,
+    setOffset,
+    applyInvertedPermanentRules,
+    setApplyInvertedPermanentRules,
+}) => {
+    const data = usePreloadedQuery<HistoricalItemListQuery>(
+        HistoricalItemsQuery,
+        queryRef
+    );
     const items = data.historicalItems.nodes;
     const pageInfo = data.historicalItems.pageInfo;
     const crumbs = useMemo(() => [menuItem], [menuItem]);
@@ -80,7 +111,9 @@ const HistoricalItemListContent: FC<{
                             color="primary"
                             checked={applyInvertedPermanentRules}
                             onChange={(e) => {
-                                setApplyInvertedPermanentRules(e.target.checked);
+                                setApplyInvertedPermanentRules(
+                                    e.target.checked
+                                );
                                 setOffset(0);
                             }}
                         />
@@ -101,7 +134,8 @@ const HistoricalItemListContent: FC<{
                     Previous
                 </Button>
                 <Box sx={{ mx: 2, alignSelf: "center" }}>
-                    {pageInfo.startOffset + 1} - {pageInfo.endOffset + 1} of {pageInfo.totalCount}
+                    {pageInfo.startOffset + 1} - {pageInfo.endOffset + 1} of{" "}
+                    {pageInfo.totalCount}
                 </Box>
                 <Button
                     onClick={() => setOffset(offset + PAGE_SIZE)}
@@ -117,11 +151,18 @@ const HistoricalItemListContent: FC<{
 const HistoricalItemList: FC<{ menuItem: MenuItemType }> = ({ menuItem }) => {
     const [offset, setOffset] = useState(0);
     const [type, setType] = useState(menuItem.typeName || "mv");
-    const [applyInvertedPermanentRules, setApplyInvertedPermanentRules] = useState(true);
-    const [queryRef, loadQuery, disposeQuery] = useQueryLoader<HistoricalItemListQuery>(HistoricalItemsQuery);
+    const [applyInvertedPermanentRules, setApplyInvertedPermanentRules] =
+        useState(true);
+    const [queryRef, loadQuery, disposeQuery] =
+        useQueryLoader<HistoricalItemListQuery>(HistoricalItemsQuery);
 
     useEffect(() => {
-        loadQuery({ type, limit: PAGE_SIZE, offset, applyInvertedPermanentRules });
+        loadQuery({
+            type,
+            limit: PAGE_SIZE,
+            offset,
+            applyInvertedPermanentRules,
+        });
         return () => {
             disposeQuery();
         };
@@ -141,4 +182,4 @@ const HistoricalItemList: FC<{ menuItem: MenuItemType }> = ({ menuItem }) => {
     ) : null;
 };
 
-export default HistoricalItemList; 
+export default HistoricalItemList;

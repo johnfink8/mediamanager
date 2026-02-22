@@ -1,5 +1,19 @@
-import React, { FC, Suspense, useCallback, useEffect, useMemo, useState, useTransition } from "react";
-import { graphql, useMutation, usePreloadedQuery, useQueryLoader, PreloadedQuery } from "react-relay";
+import React, {
+    FC,
+    Suspense,
+    useCallback,
+    useEffect,
+    useMemo,
+    useState,
+    useTransition,
+} from "react";
+import {
+    graphql,
+    useMutation,
+    usePreloadedQuery,
+    useQueryLoader,
+    PreloadedQuery,
+} from "react-relay";
 import Box from "@mui/material/Box";
 import Paper from "@mui/material/Paper";
 import TextField from "@mui/material/TextField";
@@ -66,7 +80,10 @@ const RecommendationContent: FC<{
     onRefresh: () => void;
     isLoading: boolean;
 }> = ({ menuItem, queryRef, onRefresh, isLoading }) => {
-    const data = usePreloadedQuery<MovieRecommendationQuery>(RecommendationQuery, queryRef);
+    const data = usePreloadedQuery<MovieRecommendationQuery>(
+        RecommendationQuery,
+        queryRef
+    );
     const recommendation = data.movieRecommendation;
     const crumbs = useMemo(() => [menuItem], [menuItem]);
     const [commitPreference, isPreferencePending] = useMutation<any>(
@@ -104,7 +121,9 @@ const RecommendationContent: FC<{
                 },
                 onError: () => {
                     setSelectedPreference(previous ?? null);
-                    snackbar.showMessage("We couldn't save your feedback. Please try again.");
+                    snackbar.showMessage(
+                        "We couldn't save your feedback. Please try again."
+                    );
                 },
                 onCompleted: () => {
                     if (shouldRefresh) {
@@ -113,7 +132,13 @@ const RecommendationContent: FC<{
                 },
             });
         },
-        [commitPreference, onRefresh, recommendation?.id, selectedPreference, snackbar]
+        [
+            commitPreference,
+            onRefresh,
+            recommendation?.id,
+            selectedPreference,
+            snackbar,
+        ]
     );
 
     return (
@@ -128,21 +153,36 @@ const RecommendationContent: FC<{
                                 component="img"
                                 image={recommendation.posterUrl}
                                 alt={`${recommendation.title} poster`}
-                                sx={{ width: { xs: "100%", sm: 260 }, maxHeight: 390 }}
+                                sx={{
+                                    width: { xs: "100%", sm: 260 },
+                                    maxHeight: 390,
+                                }}
                             />
                         ) : null}
                         <CardContent sx={{ flex: 1, minWidth: 260 }}>
-                            <Typography variant="h5" component="h2" gutterBottom>
+                            <Typography
+                                variant="h5"
+                                component="h2"
+                                gutterBottom
+                            >
                                 {recommendation.title}
-                                {recommendation.year ? ` (${recommendation.year})` : ""}
+                                {recommendation.year
+                                    ? ` (${recommendation.year})`
+                                    : ""}
                             </Typography>
                             {recommendation.reason ? (
-                                <Typography variant="subtitle1" color="text.secondary" gutterBottom>
+                                <Typography
+                                    variant="subtitle1"
+                                    color="text.secondary"
+                                    gutterBottom
+                                >
                                     {recommendation.reason}
                                 </Typography>
                             ) : null}
                             {recommendation.overview ? (
-                                <Typography paragraph>{recommendation.overview}</Typography>
+                                <Typography paragraph>
+                                    {recommendation.overview}
+                                </Typography>
                             ) : (
                                 <Typography paragraph color="text.secondary">
                                     We could not find a synopsis for this title.
@@ -150,56 +190,101 @@ const RecommendationContent: FC<{
                             )}
                             {recommendation.genres?.length ? (
                                 <Box sx={{ mb: 2 }}>
-                                    <Typography variant="subtitle2" color="text.secondary">
+                                    <Typography
+                                        variant="subtitle2"
+                                        color="text.secondary"
+                                    >
                                         Genres
                                     </Typography>
-                                    <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap" }}>
+                                    <Stack
+                                        direction="row"
+                                        spacing={1}
+                                        sx={{ flexWrap: "wrap" }}
+                                    >
                                         {recommendation.genres.map((genre) => (
-                                            <Chip key={genre} label={genre} color="primary" variant="outlined" />
+                                            <Chip
+                                                key={genre}
+                                                label={genre}
+                                                color="primary"
+                                                variant="outlined"
+                                            />
                                         ))}
                                     </Stack>
                                 </Box>
                             ) : null}
                             {recommendation.cast?.length ? (
                                 <Box>
-                                    <Typography variant="subtitle2" color="text.secondary">
+                                    <Typography
+                                        variant="subtitle2"
+                                        color="text.secondary"
+                                    >
                                         Cast
                                     </Typography>
-                                    <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap" }}>
+                                    <Stack
+                                        direction="row"
+                                        spacing={1}
+                                        sx={{ flexWrap: "wrap" }}
+                                    >
                                         {recommendation.cast.map((person) => (
-                                            <Chip key={person} label={person} variant="outlined" />
+                                            <Chip
+                                                key={person}
+                                                label={person}
+                                                variant="outlined"
+                                            />
                                         ))}
                                     </Stack>
                                 </Box>
                             ) : null}
                             <Divider sx={{ my: 2 }} />
-                            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-                                <Typography variant="subtitle2" color="text.secondary">
+                            <Stack
+                                direction="row"
+                                spacing={1}
+                                alignItems="center"
+                                flexWrap="wrap"
+                            >
+                                <Typography
+                                    variant="subtitle2"
+                                    color="text.secondary"
+                                >
                                     Is this a good pick?
                                 </Typography>
-                                {PREFERENCE_OPTIONS.map(({ value, label, Icon }) => {
-                                    const isActive = selectedPreference === value;
-                                    return (
-                                        <Tooltip key={value} title={label}>
-                                            <span>
-                                                <IconButton
-                                                    size="small"
-                                                    color={isActive ? "primary" : "default"}
-                                                    disabled={
-                                                        !recommendation?.id ||
-                                                        isPreferencePending ||
-                                                        isLoading
-                                                    }
-                                                    onClick={() => handlePreference(value)}
-                                                >
-                                                    <Icon fontSize="small" />
-                                                </IconButton>
-                                            </span>
-                                        </Tooltip>
-                                    );
-                                })}
+                                {PREFERENCE_OPTIONS.map(
+                                    ({ value, label, Icon }) => {
+                                        const isActive =
+                                            selectedPreference === value;
+                                        return (
+                                            <Tooltip key={value} title={label}>
+                                                <span>
+                                                    <IconButton
+                                                        size="small"
+                                                        color={
+                                                            isActive
+                                                                ? "primary"
+                                                                : "default"
+                                                        }
+                                                        disabled={
+                                                            !recommendation?.id ||
+                                                            isPreferencePending ||
+                                                            isLoading
+                                                        }
+                                                        onClick={() =>
+                                                            handlePreference(
+                                                                value
+                                                            )
+                                                        }
+                                                    >
+                                                        <Icon fontSize="small" />
+                                                    </IconButton>
+                                                </span>
+                                            </Tooltip>
+                                        );
+                                    }
+                                )}
                                 {selectedPreference ? (
-                                    <Typography variant="body2" color="text.secondary">
+                                    <Typography
+                                        variant="body2"
+                                        color="text.secondary"
+                                    >
                                         {selectedPreference === "LIKE"
                                             ? "Glad you liked it!"
                                             : selectedPreference === "NOT_NOW"
@@ -213,12 +298,18 @@ const RecommendationContent: FC<{
                 ) : (
                     <Paper elevation={0} sx={{ p: 4, textAlign: "center" }}>
                         <Typography variant="h6" gutterBottom>
-                            We couldn&apos;t generate a recommendation right now.
+                            We couldn&apos;t generate a recommendation right
+                            now.
                         </Typography>
                         <Typography variant="body2" color="text.secondary">
-                            Try refining your prompt or refreshing for another suggestion.
+                            Try refining your prompt or refreshing for another
+                            suggestion.
                         </Typography>
-                        <Button sx={{ mt: 2 }} variant="contained" onClick={onRefresh}>
+                        <Button
+                            sx={{ mt: 2 }}
+                            variant="contained"
+                            onClick={onRefresh}
+                        >
                             Try Again
                         </Button>
                     </Paper>
@@ -241,7 +332,8 @@ const RecommendationContent: FC<{
 
 const MovieRecommendation: FC<{ menuItem: MenuItemType }> = ({ menuItem }) => {
     const [prompt, setPrompt] = useState<string>("");
-    const [queryRef, loadQuery, disposeQuery] = useQueryLoader<MovieRecommendationQuery>(RecommendationQuery);
+    const [queryRef, loadQuery, disposeQuery] =
+        useQueryLoader<MovieRecommendationQuery>(RecommendationQuery);
     const [isPending, startTransition] = useTransition();
 
     const loadInitialRecommendation = useCallback(() => {
@@ -268,9 +360,12 @@ const MovieRecommendation: FC<{ menuItem: MenuItemType }> = ({ menuItem }) => {
         });
     }, [loadQuery, prompt, startTransition]);
 
-    const handlePromptChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
-        setPrompt(event.target.value);
-    }, []);
+    const handlePromptChange = useCallback(
+        (event: React.ChangeEvent<HTMLInputElement>) => {
+            setPrompt(event.target.value);
+        },
+        []
+    );
 
     const controls = (
         <Paper variant="outlined" sx={{ p: 2, mb: 3 }}>
@@ -288,11 +383,23 @@ const MovieRecommendation: FC<{ menuItem: MenuItemType }> = ({ menuItem }) => {
                     minRows={1}
                 />
                 <Stack direction="row" spacing={1} alignItems="center">
-                    <Button variant="contained" onClick={requestRecommendation} disabled={isPending}>
+                    <Button
+                        variant="contained"
+                        onClick={requestRecommendation}
+                        disabled={isPending}
+                    >
                         Recommend something
                     </Button>
-                    <Divider flexItem orientation="vertical" sx={{ display: { xs: "none", sm: "block" } }} />
-                    <Button variant="text" onClick={requestRecommendation} disabled={isPending}>
+                    <Divider
+                        flexItem
+                        orientation="vertical"
+                        sx={{ display: { xs: "none", sm: "block" } }}
+                    />
+                    <Button
+                        variant="text"
+                        onClick={requestRecommendation}
+                        disabled={isPending}
+                    >
                         Refresh
                     </Button>
                 </Stack>

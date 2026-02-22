@@ -27,7 +27,9 @@ const AttributeChips: React.FC<AttributeChipsProps> = ({ item }) => {
                 .map((attr, idx) => (
                     <AIAttributeChip
                         key={`ai:${idx}`}
-                        details={attr.details as unknown as Record<string, unknown>}
+                        details={
+                            attr.details as unknown as Record<string, unknown>
+                        }
                         itemId={item.id}
                     />
                 ))}
@@ -40,7 +42,12 @@ const AttributeChips: React.FC<AttributeChipsProps> = ({ item }) => {
                             name={attr.key}
                             value={v}
                             itemType={item.type}
-                            details={attr.details as unknown as Record<string, unknown> | null}
+                            details={
+                                attr.details as unknown as Record<
+                                    string,
+                                    unknown
+                                > | null
+                            }
                         />
                     ))
                 )}
@@ -48,4 +55,4 @@ const AttributeChips: React.FC<AttributeChipsProps> = ({ item }) => {
     );
 };
 
-export default AttributeChips; 
+export default AttributeChips;
