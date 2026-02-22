@@ -5,10 +5,12 @@ from typing import Iterable, List, Optional, Sequence, Type
 from sqlalchemy import (
     JSON,
     Boolean,
+    DateTime,
     Enum,
     Integer,
     String,
     Text,
+    or_,
 )
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
@@ -32,6 +34,8 @@ class IgnoreItem(Base):
     created_at: Mapped[Optional[int]] = mapped_column(
         Integer, nullable=True
     )  # Unix timestamp, default None
+    shown: Mapped[bool] = mapped_column(Boolean, default=False)
+    defer_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     def save(self) -> None:
         session = Session.object_session(self)
@@ -43,7 +47,11 @@ class IgnoreItem(Base):
     @classmethod
     def get_open(cls: Type["IgnoreItem"]) -> List["IgnoreItem"]:
         with db_session() as session:
-            items = session.query(cls).filter_by(ignore=False)
+            now = datetime.utcnow()
+            items = session.query(cls).filter(
+                cls.ignore.is_(False),
+                or_(cls.defer_until.is_(None), cls.defer_until <= now),
+            )
             return list(items)
 
     @classmethod

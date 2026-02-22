@@ -2,16 +2,30 @@ import React, { useState, useContext, useEffect } from "react";
 import { TempFilterContext } from "./TempFilterContext";
 import { Box, TextField, Select, MenuItem, Button, List, ListItem, ListItemText, IconButton, Typography } from "@mui/material";
 import DeleteIcon from "@mui/icons-material/Delete";
+import { graphql, useMutation } from "react-relay";
 
 const operators = ["eq", "neq", "lt", "lte", "gt", "gte", "contains", "not_contains", "in", "notin"];
 
-const TemporaryFilterBar:React.FC = () => {
+const RecheckVisibleMutation = graphql`
+  mutation TemporaryFilterBarRecheckVisibleMutation($itemType: String!) {
+    recheckVisible(itemType: $itemType) {
+      id
+      attributes {
+        key
+        values
+        details
+      }
+    }
+  }
+`;
+
+const TemporaryFilterBar:React.FC<{selectedComponent: string}> = ({ selectedComponent }) => {
   const { tempFilters, setTempFilters, attributeKeys } = useContext(TempFilterContext);
   const [attribute, setAttribute] = useState("");
   const [operator, setOperator] = useState(operators[0]);
   const [value, setValue] = useState("");
+  const [recheckVisible, isRechecking] = useMutation(RecheckVisibleMutation);
 
-  // Default attribute to first key if available
   useEffect(() => {
     if (attributeKeys.length > 0 && !attribute) {
       setAttribute(attributeKeys[0]);
@@ -30,10 +44,15 @@ const TemporaryFilterBar:React.FC = () => {
     setTempFilters(tempFilters.filter((_, i) => i !== idx));
   };
 
+  const handleRecheck = () => {
+    const itemType = selectedComponent === "Movies" ? "mv" : "tv";
+    recheckVisible({ variables: { itemType } });
+  };
+
   return (
     <Box mb={2}>
       <Typography variant="h6" gutterBottom>Temporary Filters</Typography>
-      <Box display="flex" gap={2} mb={2} alignItems="center">
+      <Box display="flex" gap={2} mb={2} alignItems="center" flexWrap="wrap">
         {attributeKeys.length > 0 ? (
           <Select
             value={attribute}
@@ -69,6 +88,9 @@ const TemporaryFilterBar:React.FC = () => {
         />
         <Button variant="contained" color="primary" onClick={addFilter} sx={{ minWidth: 100 }}>
           Add
+        </Button>
+        <Button variant="outlined" onClick={handleRecheck} disabled={isRechecking}>
+          Recheck
         </Button>
       </Box>
       <List dense>
