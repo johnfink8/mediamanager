@@ -2,7 +2,7 @@ FROM node:19 as build
 WORKDIR /usr/src/app    
 COPY package.json package-lock.json ./
 RUN npm install
-COPY .eslintrc.json webpack.config.js tsconfig.json ./
+COPY .eslintrc.json webpack.config.js tsconfig.json .prettierignore ./editorconfig ./
 COPY src ./src
 COPY relay.config.js ./
 RUN npm run build
