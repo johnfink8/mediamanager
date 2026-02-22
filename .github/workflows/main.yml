@@ -19,6 +19,7 @@ jobs:
           cp "$SRC/ssh.conf" .
           cp "$SRC/auth.conf" .
           cp "$SRC/auth.users" .
+          cp "$SRC/authelia.conf" .
           cp -r "$SRC/ssl" ./ssl
 
       - name: Build Docker image
