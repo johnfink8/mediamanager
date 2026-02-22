@@ -87,3 +87,6 @@ node_modules
 webpack-stats.json
 .cursor
 github_deploy*
+secrets
+authelia_config
+weaviate_data
