@@ -14,4 +14,4 @@ export const OPERATORS: Operator[] = [
     { value: "gte", label: "Greater than or equal" },
     { value: "contains", label: "Contains" },
     { value: "not_contains", label: "Does NOT contain" },
-]; 
+];

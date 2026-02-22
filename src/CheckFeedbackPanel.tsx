@@ -67,7 +67,8 @@ const formatDate = (timestamp?: string | null): string => {
     return isNaN(date.getTime()) ? timestamp : date.toLocaleString();
 };
 
-type RunType = CheckFeedbackPanelQuery["response"]["checkRuns"]["movies"][number];
+type RunType =
+    CheckFeedbackPanelQuery["response"]["checkRuns"]["movies"][number];
 
 const RunCard: React.FC<{ run: RunType }> = ({ run }) => (
     <Accordion disableGutters square>
@@ -80,8 +81,14 @@ const RunCard: React.FC<{ run: RunType }> = ({ run }) => (
                     gap: 0.5,
                 }}
             >
-                <Box display="flex" justifyContent="space-between" alignItems="center">
-                    <Typography variant="h6">{formatDate(run.timestamp)}</Typography>
+                <Box
+                    display="flex"
+                    justifyContent="space-between"
+                    alignItems="center"
+                >
+                    <Typography variant="h6">
+                        {formatDate(run.timestamp)}
+                    </Typography>
                     <Chip
                         label={run.success ? "Success" : "Error"}
                         color={run.success ? "success" : "error"}
@@ -92,7 +99,8 @@ const RunCard: React.FC<{ run: RunType }> = ({ run }) => (
                     {run.message}
                 </Typography>
                 <Typography variant="body2" color="text.secondary">
-                    Duration: {run.durationMs} ms · Items processed: {run.checkedCount}
+                    Duration: {run.durationMs} ms · Items processed:{" "}
+                    {run.checkedCount}
                 </Typography>
             </Box>
         </AccordionSummary>
@@ -111,7 +119,9 @@ const RunCard: React.FC<{ run: RunType }> = ({ run }) => (
                 )}
                 {run.checkedItems.map((item) => (
                     <Box key={`${run.timestamp}-${item.uid}`}>
-                        <Typography variant="subtitle2">{item.title}</Typography>
+                        <Typography variant="subtitle2">
+                            {item.title}
+                        </Typography>
                         <Typography variant="body2" color="text.secondary">
                             {item.uid} · {item.note || "Processed"}
                             {item.ignored ? " · Ignored" : ""}
@@ -123,7 +133,10 @@ const RunCard: React.FC<{ run: RunType }> = ({ run }) => (
     </Accordion>
 );
 
-const RunList: React.FC<{ title: string; runs: readonly RunType[] }> = ({ title, runs }) => (
+const RunList: React.FC<{ title: string; runs: readonly RunType[] }> = ({
+    title,
+    runs,
+}) => (
     <Box sx={{ mt: 2 }}>
         <Typography variant="h5" gutterBottom>
             {title}
@@ -161,9 +174,8 @@ const CheckFeedbackContent: React.FC<{
 };
 
 const CheckFeedbackPanel: React.FC<{ menuItem: MenuItemType }> = () => {
-    const [queryRef, loadQuery, disposeQuery] = useQueryLoader<CheckFeedbackPanelQuery>(
-        CheckFeedbackQueryNode,
-    );
+    const [queryRef, loadQuery, disposeQuery] =
+        useQueryLoader<CheckFeedbackPanelQuery>(CheckFeedbackQueryNode);
 
     React.useEffect(() => {
         loadQuery({});
@@ -176,7 +188,10 @@ const CheckFeedbackPanel: React.FC<{ menuItem: MenuItemType }> = () => {
 
     return (
         <React.Suspense fallback={<Loader open />}>
-            <CheckFeedbackContent queryRef={queryRef} onRefresh={() => loadQuery({}, { fetchPolicy: "network-only" })} />
+            <CheckFeedbackContent
+                queryRef={queryRef}
+                onRefresh={() => loadQuery({}, { fetchPolicy: "network-only" })}
+            />
         </React.Suspense>
     );
 };

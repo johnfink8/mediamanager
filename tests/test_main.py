@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timedelta
 
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 os.environ.setdefault("TMDB_API_KEY", "test-tmdb-key")
@@ -721,6 +722,7 @@ def test_check_shows_fetches_cast(monkeypatch):
     assert item.attributes is not None
     assert item.attributes.get("cast") == ["Actor One", "Actor Two"]
     assert item.attributes.get("tmdb_id") == "56789"
+    assert item.shown is True
 
 
 def test_temporary_filtering(run_graphql):
@@ -818,6 +820,43 @@ def test_temporary_filtering(run_graphql):
     assert "Action Movie" in titles
     assert "Comedy Movie" in titles
     assert "Drama Movie" not in titles
+
+
+def test_get_open_excludes_deferred_items():
+    session = db_session()
+    session.query(IgnoreItem).delete()
+    session.commit()
+
+    session.add_all(
+        [
+            IgnoreItem(
+                item_type="mv", uid="1", title="Visible", ignore=False, shown=True
+            ),
+            IgnoreItem(
+                item_type="mv",
+                uid="2",
+                title="Deferred",
+                ignore=False,
+                shown=True,
+                defer_until=datetime.utcnow() + timedelta(days=2),
+            ),
+            IgnoreItem(
+                item_type="mv",
+                uid="3",
+                title="Due",
+                ignore=False,
+                shown=True,
+                defer_until=datetime.utcnow() - timedelta(days=1),
+            ),
+        ]
+    )
+    session.commit()
+
+    open_items = IgnoreItem.get_open()
+    titles = {item.title for item in open_items}
+    assert "Visible" in titles
+    assert "Due" in titles
+    assert "Deferred" not in titles
 
 
 def test_apply_filters_lt_year():
