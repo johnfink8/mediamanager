@@ -267,6 +267,7 @@ def annotate_with_ai(
     item_type: str, uid: str, title: str, attrs: Dict[str, Any]
 ) -> Dict[str, Any]:
     # Basic item facts for the prompt / candidate context
+    logger.info(f"Annotating {item_type} {uid} {title}")
     genres = _to_list_of_str(attrs.get("genres"))
     lang = _to_list_of_str(attrs.get("originalLanguage"))
     year = _year_from_attrs(attrs)
@@ -302,6 +303,8 @@ def annotate_with_ai(
     similar_summary = []
     for s, distance in similar_pairs:
         if s is None:
+            continue
+        if s.uid == uid:
             continue
         item_attrs = s.attributes or {}
         attributes = {
