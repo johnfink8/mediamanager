@@ -198,6 +198,7 @@ def check_movies(days: int) -> None:
                     title=normalized_title,
                     uid=imdb_id,
                     ignore=ignore,
+                    shown=not ignore,
                     item_type="mv",
                     attributes=enriched_attrs,
                     poster_url=poster,
@@ -209,6 +210,7 @@ def check_movies(days: int) -> None:
                         title=normalized_title,
                         uid=imdb_id,
                         ignore=ignore,
+                        shown=not ignore,
                         item_type="mv",
                         attributes=enriched_attrs,
                         poster_url=poster,
@@ -429,6 +431,7 @@ def check_shows(days: int) -> None:
                 title=title,
                 uid=tvdb,
                 ignore=ignore,
+                shown=not ignore,
                 item_type="tv",
                 attributes=enriched_attrs,
             )

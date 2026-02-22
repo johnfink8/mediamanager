@@ -16,6 +16,8 @@ from indexer_utils.tmdb import (
 
 from .models import IgnoreItem
 from .session import db_session
+from .radarr_utils import radarr_query
+from .sonarr_utils import query_series
 from .weaviate_client import (
     get_nearest_neighbors,
     upsert_item_attrs,
@@ -212,6 +214,55 @@ def generate_synopsis_for_candidate(
         }
     return synopsis, synopsis_failure
 
+
+
+
+def _add_attr(attrs: Dict[str, Any], show: Dict[str, Any], key: str) -> None:
+    val = show.get(key)
+    if not val:
+        return
+    if isinstance(val, list):
+        attrs[key] = [str(x) for x in val]
+    elif isinstance(val, dict):
+        if "name" in val:
+            attrs[key] = [str(val["name"])]
+        else:
+            attrs[key] = [str(x) for x in val.values()]
+    else:
+        attrs[key] = [str(val)]
+
+
+def refresh_visible_item_attributes(item: IgnoreItem) -> Dict[str, Any]:
+    attrs = dict(item.attributes or {})
+    if item.item_type == "mv":
+        try:
+            result = radarr_query("movie/lookup", term="imdb:" + item.uid)[0]
+            _add_attr(attrs, result, "genres")
+            _add_attr(attrs, result, "originalLanguage")
+            attrs["year"] = result.get("year")
+            ratings = result.get("ratings")
+            if ratings:
+                attrs["rating_votes"] = ratings.get("votes")
+                attrs["rating_value"] = ratings.get("value")
+        except Exception:
+            logger.exception("Failed to refresh movie attributes for %s", item.uid)
+    else:
+        try:
+            show = query_series(item.uid)
+            attrs["year"] = show.get("year")
+            tmdb_id = show.get("tmdbId") or get_tv_id(item.uid)
+            if tmdb_id:
+                attrs["tmdb_id"] = str(tmdb_id)
+                attrs["cast"] = get_tv_cast(tmdb_id, n=10)
+            ratings = show.get("ratings")
+            if ratings:
+                attrs["rating_votes"] = ratings.get("votes")
+                attrs["rating_value"] = ratings.get("value")
+            for key in ("network", "genres", "status", "seriesType", "certification"):
+                _add_attr(attrs, show, key)
+        except Exception:
+            logger.exception("Failed to refresh show attributes for %s", item.uid)
+    return attrs
 
 def annotate_with_ai(
     item_type: str, uid: str, title: str, attrs: Dict[str, Any]
