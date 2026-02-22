@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, AsyncIterator, Dict, List, Optional, Type, Union
 
 import strawberry
@@ -12,7 +12,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from strawberry.relay import GlobalID
 from strawberry.scalars import ID, JSON
 
-from indexer_utils.ai_recs import annotate_with_ai
+from indexer_utils.ai_recs import annotate_with_ai, refresh_visible_item_attributes
 from indexer_utils.check_feedback import get_check_history
 from indexer_utils.session import db_session
 from indexer_utils.sonarr_utils import add_series
@@ -323,7 +323,13 @@ class IgnoreItemType:
         filters: Optional[List[Filter]] = None,
     ) -> List["IgnoreItemType"]:
         with db_session() as session:
-            query = session.query(IgnoreItem).where(IgnoreItem.ignore.is_(False))
+            query = session.query(IgnoreItem).where(
+                IgnoreItem.ignore.is_(False),
+                or_(
+                    IgnoreItem.defer_until.is_(None),
+                    IgnoreItem.defer_until <= datetime.utcnow(),
+                ),
+            )
             query = cls.apply_filters(filters, query)
 
             # Only apply temporary rules from filters argument
@@ -617,6 +623,11 @@ class RetryAiInput:
     id: GlobalID
 
 
+@strawberry.input
+class DeferItemInput:
+    id: GlobalID
+
+
 @strawberry.type
 class RecommendationFeedbackType:
     id: ID
@@ -701,6 +712,47 @@ class Mutation:
             session.add(item)
             session.commit()
             session.refresh(item)
+            return IgnoreItemType.from_sqlalchemy(item)
+
+    @strawberry.mutation
+    def recheck_visible(self: "Mutation", item_type: str) -> List[IgnoreItemType]:
+        with db_session() as session:
+            now = datetime.utcnow()
+            items = (
+                session.query(IgnoreItem)
+                .filter(
+                    IgnoreItem.item_type == item_type,
+                    IgnoreItem.ignore.is_(False),
+                    or_(
+                        IgnoreItem.defer_until.is_(None), IgnoreItem.defer_until <= now
+                    ),
+                )
+                .all()
+            )
+            for item in items:
+                attrs = refresh_visible_item_attributes(item)
+                attrs.pop("ai", None)
+                attrs.pop("_synopsis_vector_tmp", None)
+                refreshed_attrs = annotate_with_ai(
+                    item.item_type, item.uid, item.title, attrs
+                )
+                item.attributes = refreshed_attrs
+                flag_modified(item, "attributes")
+                session.add(item)
+            session.commit()
+            for item in items:
+                session.refresh(item)
+            return [IgnoreItemType.from_sqlalchemy(item) for item in items]
+
+    @strawberry.mutation
+    def defer_item(self: "Mutation", data: DeferItemInput) -> IgnoreItemType:
+        with db_session() as session:
+            item = session.query(IgnoreItem).get(data.id.node_id)
+            if not item:
+                raise Exception("Item not found")
+            item.defer_until = datetime.utcnow() + timedelta(days=3)
+            session.add(item)
+            session.commit()
             return IgnoreItemType.from_sqlalchemy(item)
 
     @strawberry.mutation
