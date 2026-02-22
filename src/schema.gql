@@ -93,6 +93,7 @@ The `JSON` scalar type represents JSON values as specified by [ECMA-404](https:/
 """
 scalar JSON @specifiedBy(url: "https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf")
 
+
 enum RecommendationPreference {
   LIKE
   NOT_NOW
@@ -107,6 +108,8 @@ type Mutation {
   setItemAdded(data: SetItemAddedInput!): IgnoreItem!
   setRecommendationPreference(data: SetRecommendationPreferenceInput!): RecommendationFeedback!
   retryAi(data: RetryAiInput!): IgnoreItem!
+  recheckVisible(itemType: String!): [IgnoreItem!]!
+  deferItem(data: DeferItemInput!): IgnoreItem!
 }
 
 type MutationReturn {
@@ -120,6 +123,10 @@ input SetItemAddedInput {
 }
 
 input RetryAiInput {
+  id: ID!
+}
+
+input DeferItemInput {
   id: ID!
 }
 
