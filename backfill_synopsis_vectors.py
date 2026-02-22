@@ -48,6 +48,7 @@ def backfill(
     dry_run: bool,
     force: bool,
     reindex_all: bool,
+    check_weaviate: bool,
     query_rules: bool,
     since: int,
 ) -> None:
@@ -67,7 +68,7 @@ def backfill(
     query = session.query(IgnoreItem)
     query = query.filter(IgnoreItem.item_type == item_type)
     logger.info(f"Querying {item_type} items")
-    if item_ids:
+    if item_ids and not check_weaviate:
         logger.info(
             f"Excluding {len(item_ids)} items that already have a weaviate UUID"
         )
@@ -130,8 +131,11 @@ def backfill(
     if since:
         query = query.filter(IgnoreItem.attributes["year"] >= since)
 
-    # Only backfill items not yet upserted to Weaviate
-    if not reindex_all:
+    # Only backfill items not yet upserted to Weaviate unless check mode is enabled.
+    if check_weaviate:
+        logger.info("Checking items that already have a weaviate UUID")
+        query = query.filter(IgnoreItem.attributes["ai"]["weaviate_uuid"].isnot(None))
+    elif not reindex_all:
         logger.info("Excluding items that already have a weaviate UUID")
         query = query.filter(IgnoreItem.attributes["ai"]["weaviate_uuid"].is_(None))
     query = query.order_by(IgnoreItem.id.desc())
@@ -141,6 +145,13 @@ def backfill(
     items = query.all()
     logger.info(f"Found {len(items)} items to process")
     updated_count = 0
+    check_client = None
+    check_coll = None
+
+    if check_weaviate:
+        check_client = get_weaviate_client()
+        check_coll_name = "IgnoreItemMV" if item_type == "mv" else "IgnoreItemTV"
+        check_coll = check_client.collections.get(check_coll_name)
 
     for item in items:
         logger.info(f"Processing item {item.uid}")
@@ -163,6 +174,23 @@ def backfill(
         language = _to_list_of_str((attrs).get("originalLanguage"))
 
         synopsis = attrs.get("ai", {}).get("synopsis")
+
+        if check_weaviate:
+            weaviate_uuid = attrs.get("ai", {}).get("weaviate_uuid")
+            if not weaviate_uuid:
+                logger.info(
+                    f"Skipping item {item.uid}: missing weaviate UUID in check mode"
+                )
+                continue
+            if check_coll and check_coll.data.exists(uuid=weaviate_uuid):
+                logger.info(
+                    f"Skipping item {item.uid}: Weaviate object {weaviate_uuid} exists"
+                )
+                continue
+            logger.info(
+                f"Weaviate object {weaviate_uuid} for item {item.uid} does not exist; reindexing"
+            )
+
         if force or synopsis is None:
             logger.info(f"Generating synopsis for {item.uid}")
             synopsis, _synopsis_failure = generate_synopsis_for_candidate(
@@ -203,6 +231,9 @@ def backfill(
             session.commit()
             updated_count += 1
 
+    if check_client:
+        check_client.close()
+
     print(f"Backfill complete. Updated {updated_count} item(s).")
 
 
@@ -226,6 +257,11 @@ def main() -> None:
         help="Reindex all items even if they already have a weaviate UUID",
     )
     parser.add_argument(
+        "--check-weaviate",
+        action="store_true",
+        help="Validate existing weaviate UUIDs and reindex missing objects",
+    )
+    parser.add_argument(
         "--skip-rules",
         action="store_true",
         help="Skip applying FilterRules to exclude items",
@@ -243,6 +279,7 @@ def main() -> None:
         args.dry_run,
         args.force,
         args.reindex_all,
+        args.check_weaviate,
         not args.skip_rules,
         int(args.since or datetime.now().year),
     )
