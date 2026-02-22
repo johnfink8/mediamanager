@@ -15,8 +15,8 @@ from indexer_utils.tmdb import (
 )
 
 from .models import IgnoreItem
-from .session import db_session
 from .radarr_utils import radarr_query
+from .session import db_session
 from .sonarr_utils import query_series
 from .weaviate_client import (
     get_nearest_neighbors,
