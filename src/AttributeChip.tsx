@@ -54,9 +54,18 @@ interface AttributeChipProps {
     details: Record<string, unknown> | null;
 }
 
-const AttributeChip: React.FC<AttributeChipProps> = ({ name, value, itemType, details }) => {
+const AttributeChip: React.FC<AttributeChipProps> = ({
+    name,
+    value,
+    itemType,
+    details,
+}) => {
     const [open, setOpen] = useState(false);
-    const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: "success" | "error" }>({ open: false, message: "", severity: "success" });
+    const [snackbar, setSnackbar] = useState<{
+        open: boolean;
+        message: string;
+        severity: "success" | "error";
+    }>({ open: false, message: "", severity: "success" });
     const chipRef = useRef<HTMLDivElement | null>(null);
     const [operator, setOperator] = useState<string>(OPERATORS[0].value);
 
@@ -66,7 +75,9 @@ const AttributeChip: React.FC<AttributeChipProps> = ({ name, value, itemType, de
     // Remove handleIgnore and mutation logic
 
     // Assign a custom background color based on the attribute key
-    const bgColor = ATTRIBUTE_KEY_COLORS[name] || CHIP_COLORS[hashStringToColorIndex(name, CHIP_COLORS.length)];
+    const bgColor =
+        ATTRIBUTE_KEY_COLORS[name] ||
+        CHIP_COLORS[hashStringToColorIndex(name, CHIP_COLORS.length)];
     const textColor = getContrastYIQ(bgColor);
 
     return (
@@ -99,7 +110,11 @@ const AttributeChip: React.FC<AttributeChipProps> = ({ name, value, itemType, de
                 onClose={() => setSnackbar({ ...snackbar, open: false })}
                 anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
             >
-                <Alert onClose={() => setSnackbar({ ...snackbar, open: false })} severity={snackbar.severity} sx={{ width: '100%' }}>
+                <Alert
+                    onClose={() => setSnackbar({ ...snackbar, open: false })}
+                    severity={snackbar.severity}
+                    sx={{ width: "100%" }}
+                >
                     {snackbar.message}
                 </Alert>
             </Snackbar>
@@ -107,4 +122,4 @@ const AttributeChip: React.FC<AttributeChipProps> = ({ name, value, itemType, de
     );
 };
 
-export default AttributeChip; 
+export default AttributeChip;

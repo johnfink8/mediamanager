@@ -736,9 +736,6 @@ class Mutation:
                 refreshed_attrs = annotate_with_ai(
                     item.item_type, item.uid, item.title, attrs
                 )
-                ai_value = (refreshed_attrs.get("ai") or {}).get("value")
-                if isinstance(ai_value, bool):
-                    item.ignore = not ai_value
                 item.attributes = refreshed_attrs
                 flag_modified(item, "attributes")
                 session.add(item)

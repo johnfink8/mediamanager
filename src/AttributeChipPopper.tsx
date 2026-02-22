@@ -1,5 +1,18 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Popper, Paper, FormControl, InputLabel, Select, MenuItem, Button, ClickAwayListener, Snackbar, Alert, TextField, Box } from "@mui/material";
+import {
+    Popper,
+    Paper,
+    FormControl,
+    InputLabel,
+    Select,
+    MenuItem,
+    Button,
+    ClickAwayListener,
+    Snackbar,
+    Alert,
+    TextField,
+    Box,
+} from "@mui/material";
 import type { SelectProps } from "@mui/material/Select";
 import { graphql, useMutation } from "react-relay";
 import { AttributeChipPopperCreateFilterRuleMutation } from "./__generated__/AttributeChipPopperCreateFilterRuleMutation.graphql";
@@ -18,7 +31,9 @@ interface AttributeChipPopperProps {
 }
 
 const CreateFilterRuleMutation = graphql`
-    mutation AttributeChipPopperCreateFilterRuleMutation($input: FilterRuleInput!) {
+    mutation AttributeChipPopperCreateFilterRuleMutation(
+        $input: FilterRuleInput!
+    ) {
         createFilterRule(data: $input) {
             ignoreItems {
                 id
@@ -61,8 +76,15 @@ const AttributeChipPopper: React.FC<AttributeChipPopperProps> = ({
     itemType,
     details,
 }) => {
-    const [commit, isInFlight] = useMutation<AttributeChipPopperCreateFilterRuleMutation>(CreateFilterRuleMutation);
-    const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: "success" | "error" }>({ open: false, message: "", severity: "success" });
+    const [commit, isInFlight] =
+        useMutation<AttributeChipPopperCreateFilterRuleMutation>(
+            CreateFilterRuleMutation
+        );
+    const [snackbar, setSnackbar] = useState<{
+        open: boolean;
+        message: string;
+        severity: "success" | "error";
+    }>({ open: false, message: "", severity: "success" });
     const [ignoreNextClickAway, setIgnoreNextClickAway] = useState(false);
     const [localValue, setLocalValue] = useState(value);
     const valueInputRef = useRef<HTMLInputElement>(null);
@@ -114,16 +136,27 @@ const AttributeChipPopper: React.FC<AttributeChipPopperProps> = ({
                 }
             },
             onCompleted: () => {
-                setSnackbar({ open: true, message: `Rule added: ${name} ${OPERATORS.find(o => o.value === operator)?.label || operator} ${localValue}` , severity: "success" });
+                setSnackbar({
+                    open: true,
+                    message: `Rule added: ${name} ${
+                        OPERATORS.find((o) => o.value === operator)?.label ||
+                        operator
+                    } ${localValue}`,
+                    severity: "success",
+                });
                 onClose();
             },
             onError: (err) => {
-                setSnackbar({ open: true, message: err.message, severity: "error" });
+                setSnackbar({
+                    open: true,
+                    message: err.message,
+                    severity: "error",
+                });
             },
         });
     };
 
-    const handleOperatorChange:SelectProps["onChange"] = (event) => {
+    const handleOperatorChange: SelectProps["onChange"] = (event) => {
         setOperator(event.target.value as string);
     };
     const ops = OPERATORS;
@@ -136,8 +169,8 @@ const AttributeChipPopper: React.FC<AttributeChipPopperProps> = ({
         }
         const target = event.target as HTMLElement;
         if (
-            target.closest('.MuiPopover-root') ||
-            target.closest('.MuiMenu-root')
+            target.closest(".MuiPopover-root") ||
+            target.closest(".MuiMenu-root")
         ) {
             return;
         }
@@ -152,32 +185,55 @@ const AttributeChipPopper: React.FC<AttributeChipPopperProps> = ({
 
     return (
         <>
-            <Popper open={open} anchorEl={anchorEl} placement="bottom-start" style={{ zIndex: 1300 }}>
+            <Popper
+                open={open}
+                anchorEl={anchorEl}
+                placement="bottom-start"
+                style={{ zIndex: 1300 }}
+            >
                 <ClickAwayListener onClickAway={handleClickAway}>
                     <Paper
                         sx={{
                             p: 2,
                             borderRadius: 2,
-                            border: '2px solid #1976d2',
-                            color: '#222',
+                            border: "2px solid #1976d2",
+                            color: "#222",
                             boxShadow: 3,
                             minWidth: 260,
                             maxWidth: 340,
-                            bgcolor: '#fff',
+                            bgcolor: "#fff",
                         }}
                         elevation={4}
                     >
                         <Box display="flex" flexDirection="column" gap={2}>
                             {details ? (
-                                <Box sx={{ p: 1, bgcolor: '#f9f9f9', borderRadius: 1, border: '1px solid #eee' }}>
-                                    <Box sx={{ fontWeight: 600, mb: 0.5 }}>Details</Box>
-                                    <Box component="pre" sx={{ whiteSpace: 'pre-wrap', m: 0, fontSize: 12 }}>
+                                <Box
+                                    sx={{
+                                        p: 1,
+                                        bgcolor: "#f9f9f9",
+                                        borderRadius: 1,
+                                        border: "1px solid #eee",
+                                    }}
+                                >
+                                    <Box sx={{ fontWeight: 600, mb: 0.5 }}>
+                                        Details
+                                    </Box>
+                                    <Box
+                                        component="pre"
+                                        sx={{
+                                            whiteSpace: "pre-wrap",
+                                            m: 0,
+                                            fontSize: 12,
+                                        }}
+                                    >
                                         {JSON.stringify(details, null, 2)}
                                     </Box>
                                 </Box>
                             ) : null}
                             <FormControl fullWidth size="small">
-                                <InputLabel id="operator-select-label">Operator</InputLabel>
+                                <InputLabel id="operator-select-label">
+                                    Operator
+                                </InputLabel>
                                 <Select
                                     labelId="operator-select-label"
                                     value={operator}
@@ -187,29 +243,40 @@ const AttributeChipPopper: React.FC<AttributeChipPopperProps> = ({
                                     onOpen={() => setIgnoreNextClickAway(true)}
                                 >
                                     {ops.map((op: Operator) => (
-                                        <MenuItem key={op.value} value={op.value}>{op.label}</MenuItem>
+                                        <MenuItem
+                                            key={op.value}
+                                            value={op.value}
+                                        >
+                                            {op.label}
+                                        </MenuItem>
                                     ))}
                                 </Select>
                             </FormControl>
                             <TextField
                                 label="Value"
                                 value={localValue}
-                                onChange={e => setLocalValue(e.target.value)}
+                                onChange={(e) => setLocalValue(e.target.value)}
                                 onKeyDown={handleValueKeyDown}
                                 inputRef={valueInputRef}
                                 size="small"
                                 disabled={isInFlight}
-                                sx={{ bgcolor: '#fff' }}
+                                sx={{ bgcolor: "#fff" }}
                             />
                             <Button
                                 onClick={handleIgnore}
                                 color="secondary"
                                 size="small"
-                                disabled={isInFlight || localValue.trim() === ""}
+                                disabled={
+                                    isInFlight || localValue.trim() === ""
+                                }
                                 variant="contained"
-                                sx={{ alignSelf: 'flex-end', mt: 1 }}
+                                sx={{ alignSelf: "flex-end", mt: 1 }}
                             >
-                                Add rule: {name} {ops.find((o: Operator) => o.value === operator)?.label.toLowerCase() || operator} {localValue}
+                                Add rule: {name}{" "}
+                                {ops
+                                    .find((o: Operator) => o.value === operator)
+                                    ?.label.toLowerCase() || operator}{" "}
+                                {localValue}
                             </Button>
                         </Box>
                     </Paper>
@@ -221,7 +288,11 @@ const AttributeChipPopper: React.FC<AttributeChipPopperProps> = ({
                 onClose={() => setSnackbar({ ...snackbar, open: false })}
                 anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
             >
-                <Alert onClose={() => setSnackbar({ ...snackbar, open: false })} severity={snackbar.severity} sx={{ width: '100%' }}>
+                <Alert
+                    onClose={() => setSnackbar({ ...snackbar, open: false })}
+                    severity={snackbar.severity}
+                    sx={{ width: "100%" }}
+                >
                     {snackbar.message}
                 </Alert>
             </Snackbar>
@@ -229,4 +300,4 @@ const AttributeChipPopper: React.FC<AttributeChipPopperProps> = ({
     );
 };
 
-export default AttributeChipPopper; 
+export default AttributeChipPopper;

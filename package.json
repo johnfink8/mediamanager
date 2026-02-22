@@ -4,7 +4,7 @@
     "build": "relay-compiler && webpack --config webpack.config.js --mode production",
     "format": "prettier --write \"src/**/*.{js,jsx,ts,tsx,less}\"",
     "relay": "relay-compiler",
-    "lint": "relay-compiler && tsc --noEmit && eslint \"src/**/*.{js,jsx,ts,tsx}\""
+    "lint": "relay-compiler && tsc --noEmit && prettier --check \"src/**/*.{js,jsx,ts,tsx,less}\" && eslint \"src/**/*.{js,jsx,ts,tsx}\""
   },
   "dependencies": {
     "@emotion/react": "^11.10.6",
