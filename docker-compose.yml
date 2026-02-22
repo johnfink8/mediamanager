@@ -19,6 +19,7 @@ services:
     expose: ["9091"]
     networks: [proxy]
     depends_on: [redis]
+    restart: unless-stopped
   sonarr:
     image: linuxserver/sonarr
     container_name: sonarr
@@ -80,6 +81,7 @@ services:
       - ./dev_server.sh
     environment:
       - DEBUG=1
+    networks: [proxy]
   nginx:
     build:
       context: .
@@ -129,7 +131,7 @@ services:
       - 8080:8080
       - 50051:50051
     volumes:
-      - ./data:/var/lib/weaviate
+      - ./weaviate_data:/var/lib/weaviate
     restart: on-failure:0
     environment:
       QUERY_DEFAULTS_LIMIT: 25
