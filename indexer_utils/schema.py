@@ -325,7 +325,10 @@ class IgnoreItemType:
         with db_session() as session:
             query = session.query(IgnoreItem).where(
                 IgnoreItem.ignore.is_(False),
-                or_(IgnoreItem.defer_until.is_(None), IgnoreItem.defer_until <= datetime.utcnow()),
+                or_(
+                    IgnoreItem.defer_until.is_(None),
+                    IgnoreItem.defer_until <= datetime.utcnow(),
+                ),
             )
             query = cls.apply_filters(filters, query)
 
@@ -620,11 +623,10 @@ class RetryAiInput:
     id: GlobalID
 
 
-
-
 @strawberry.input
 class DeferItemInput:
     id: GlobalID
+
 
 @strawberry.type
 class RecommendationFeedbackType:
@@ -642,10 +644,6 @@ class SetRecommendationPreferenceInput:
 class MutationReturn:
     ignore_items: IgnoreItemList
     filter_rules: FilterRuleList
-
-
-
-
 
 
 @strawberry.type
@@ -716,7 +714,6 @@ class Mutation:
             session.refresh(item)
             return IgnoreItemType.from_sqlalchemy(item)
 
-
     @strawberry.mutation
     def recheck_visible(self: "Mutation", item_type: str) -> List[IgnoreItemType]:
         with db_session() as session:
@@ -726,7 +723,9 @@ class Mutation:
                 .filter(
                     IgnoreItem.item_type == item_type,
                     IgnoreItem.ignore.is_(False),
-                    or_(IgnoreItem.defer_until.is_(None), IgnoreItem.defer_until <= now),
+                    or_(
+                        IgnoreItem.defer_until.is_(None), IgnoreItem.defer_until <= now
+                    ),
                 )
                 .all()
             )
@@ -734,7 +733,9 @@ class Mutation:
                 attrs = refresh_visible_item_attributes(item)
                 attrs.pop("ai", None)
                 attrs.pop("_synopsis_vector_tmp", None)
-                refreshed_attrs = annotate_with_ai(item.item_type, item.uid, item.title, attrs)
+                refreshed_attrs = annotate_with_ai(
+                    item.item_type, item.uid, item.title, attrs
+                )
                 ai_value = (refreshed_attrs.get("ai") or {}).get("value")
                 if isinstance(ai_value, bool):
                     item.ignore = not ai_value

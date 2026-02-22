@@ -822,32 +822,34 @@ def test_temporary_filtering(run_graphql):
     assert "Drama Movie" not in titles
 
 
-
-
 def test_get_open_excludes_deferred_items():
     session = db_session()
     session.query(IgnoreItem).delete()
     session.commit()
 
-    session.add_all([
-        IgnoreItem(item_type="mv", uid="1", title="Visible", ignore=False, shown=True),
-        IgnoreItem(
-            item_type="mv",
-            uid="2",
-            title="Deferred",
-            ignore=False,
-            shown=True,
-            defer_until=datetime.utcnow() + timedelta(days=2),
-        ),
-        IgnoreItem(
-            item_type="mv",
-            uid="3",
-            title="Due",
-            ignore=False,
-            shown=True,
-            defer_until=datetime.utcnow() - timedelta(days=1),
-        ),
-    ])
+    session.add_all(
+        [
+            IgnoreItem(
+                item_type="mv", uid="1", title="Visible", ignore=False, shown=True
+            ),
+            IgnoreItem(
+                item_type="mv",
+                uid="2",
+                title="Deferred",
+                ignore=False,
+                shown=True,
+                defer_until=datetime.utcnow() + timedelta(days=2),
+            ),
+            IgnoreItem(
+                item_type="mv",
+                uid="3",
+                title="Due",
+                ignore=False,
+                shown=True,
+                defer_until=datetime.utcnow() - timedelta(days=1),
+            ),
+        ]
+    )
     session.commit()
 
     open_items = IgnoreItem.get_open()
@@ -855,6 +857,7 @@ def test_get_open_excludes_deferred_items():
     assert "Visible" in titles
     assert "Due" in titles
     assert "Deferred" not in titles
+
 
 def test_apply_filters_lt_year():
     from indexer_utils.schema import FilterSpec, apply_filters

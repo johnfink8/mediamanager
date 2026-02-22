@@ -215,8 +215,6 @@ def generate_synopsis_for_candidate(
     return synopsis, synopsis_failure
 
 
-
-
 def _add_attr(attrs: Dict[str, Any], show: Dict[str, Any], key: str) -> None:
     val = show.get(key)
     if not val:
@@ -263,6 +261,7 @@ def refresh_visible_item_attributes(item: IgnoreItem) -> Dict[str, Any]:
         except Exception:
             logger.exception("Failed to refresh show attributes for %s", item.uid)
     return attrs
+
 
 def annotate_with_ai(
     item_type: str, uid: str, title: str, attrs: Dict[str, Any]
