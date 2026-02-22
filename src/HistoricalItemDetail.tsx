@@ -1,11 +1,22 @@
 import React from "react";
-import { Button, Card, CardMedia, CardContent, Typography, Grid, Chip, Stack } from "@mui/material";
+import {
+    Button,
+    Card,
+    CardMedia,
+    CardContent,
+    Typography,
+    Grid,
+    Chip,
+    Stack,
+} from "@mui/material";
 import { graphql, useMutation } from "react-relay";
 import AttributeChips from "./AttributeChips";
 import { itemType } from "./types";
 
 export const SetItemAddedMutation = graphql`
-    mutation HistoricalItemDetailSetItemAddedMutation($input: SetItemAddedInput!) {
+    mutation HistoricalItemDetailSetItemAddedMutation(
+        $input: SetItemAddedInput!
+    ) {
         setItemAdded(data: $input) {
             id
             added
@@ -29,7 +40,12 @@ const HistoricalItemDetail: React.FC<{ item: itemType }> = ({ item }) => {
         <Grid item xs={12} sm={12} md={6}>
             <Card sx={{ position: "relative" }}>
                 <CardContent>
-                    <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+                    <Stack
+                        direction="row"
+                        spacing={1}
+                        alignItems="center"
+                        sx={{ mb: 1 }}
+                    >
                         <Typography variant="h6" sx={{ flex: 1 }}>
                             {item.checkedTitle ? item.checkedTitle : item.title}
                         </Typography>
@@ -67,5 +83,3 @@ const HistoricalItemDetail: React.FC<{ item: itemType }> = ({ item }) => {
 };
 
 export default React.memo(HistoricalItemDetail);
-
-

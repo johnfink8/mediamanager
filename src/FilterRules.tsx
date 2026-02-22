@@ -1,5 +1,11 @@
 import React, { useState, useEffect } from "react";
-import { graphql, useQueryLoader, usePreloadedQuery, useMutation, PreloadedQuery } from "react-relay";
+import {
+    graphql,
+    useQueryLoader,
+    usePreloadedQuery,
+    useMutation,
+    PreloadedQuery,
+} from "react-relay";
 import {
     Table,
     TableBody,
@@ -16,14 +22,14 @@ import {
     CircularProgress,
 } from "@mui/material";
 import DeleteIcon from "@mui/icons-material/Delete";
-import { FilterRulesQuery as FilterRulesQueryType} from "./__generated__/FilterRulesQuery.graphql";
+import { FilterRulesQuery as FilterRulesQueryType } from "./__generated__/FilterRulesQuery.graphql";
 import { FilterRulesDeleteMutation } from "./__generated__/FilterRulesDeleteMutation.graphql";
 import { FilterRulesCreateMutation } from "./__generated__/FilterRulesCreateMutation.graphql";
 
 const FilterRulesQuery = graphql`
     query FilterRulesQuery {
         filterRules {
-            id 
+            id
             nodes {
                 id
                 itemType
@@ -102,12 +108,30 @@ const DeleteFilterRuleMutation = graphql`
     }
 `;
 
-const OPERATORS = ["eq", "neq", "lt", "gt", "in", "not_in", "contains", "not_contains"];
+const OPERATORS = [
+    "eq",
+    "neq",
+    "lt",
+    "gt",
+    "in",
+    "not_in",
+    "contains",
+    "not_contains",
+];
 
-const FilterRulesTable: React.FC<{ queryRef: PreloadedQuery<FilterRulesQueryType> }> = ({ queryRef }) => {
-    const data = usePreloadedQuery<FilterRulesQueryType>(FilterRulesQuery, queryRef);
-    const [createRule, _creating] = useMutation<FilterRulesCreateMutation>(CreateFilterRuleMutation);
-    const [deleteRule, _deleting] = useMutation<FilterRulesDeleteMutation>(DeleteFilterRuleMutation);
+const FilterRulesTable: React.FC<{
+    queryRef: PreloadedQuery<FilterRulesQueryType>;
+}> = ({ queryRef }) => {
+    const data = usePreloadedQuery<FilterRulesQueryType>(
+        FilterRulesQuery,
+        queryRef
+    );
+    const [createRule, _creating] = useMutation<FilterRulesCreateMutation>(
+        CreateFilterRuleMutation
+    );
+    const [deleteRule, _deleting] = useMutation<FilterRulesDeleteMutation>(
+        DeleteFilterRuleMutation
+    );
     const [form, setForm] = useState({
         attribute: "",
         operator: "eq",
@@ -116,7 +140,9 @@ const FilterRulesTable: React.FC<{ queryRef: PreloadedQuery<FilterRulesQueryType
         itemType: "mv",
     });
 
-    const handleFormChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    const handleFormChange = (
+        e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>
+    ) => {
         setForm({ ...form, [e.target.name]: e.target.value });
     };
 
@@ -151,7 +177,14 @@ const FilterRulesTable: React.FC<{ queryRef: PreloadedQuery<FilterRulesQueryType
                     }
                 }
             },
-            onCompleted: () => setForm({ attribute: "", operator: "eq", value: "", enabled: true, itemType: "mv" }),
+            onCompleted: () =>
+                setForm({
+                    attribute: "",
+                    operator: "eq",
+                    value: "",
+                    enabled: true,
+                    itemType: "mv",
+                }),
         });
     };
 
@@ -210,7 +243,9 @@ const FilterRulesTable: React.FC<{ queryRef: PreloadedQuery<FilterRulesQueryType
                     size="small"
                 >
                     {OPERATORS.map((op) => (
-                        <option key={op} value={op}>{op}</option>
+                        <option key={op} value={op}>
+                            {op}
+                        </option>
                     ))}
                 </TextField>
                 <TextField
@@ -220,7 +255,11 @@ const FilterRulesTable: React.FC<{ queryRef: PreloadedQuery<FilterRulesQueryType
                     onChange={handleFormChange}
                     size="small"
                 />
-                <Button variant="contained" onClick={handleAdd} disabled={!form.attribute || !form.value}>
+                <Button
+                    variant="contained"
+                    onClick={handleAdd}
+                    disabled={!form.attribute || !form.value}
+                >
                     Add Rule
                 </Button>
             </Box>
@@ -242,10 +281,17 @@ const FilterRulesTable: React.FC<{ queryRef: PreloadedQuery<FilterRulesQueryType
                                 <TableCell>{rule.operator}</TableCell>
                                 <TableCell>{rule.value}</TableCell>
                                 <TableCell>
-                                    <Switch checked={rule.enabled} disabled color="primary" />
+                                    <Switch
+                                        checked={rule.enabled}
+                                        disabled
+                                        color="primary"
+                                    />
                                 </TableCell>
                                 <TableCell>
-                                    <IconButton onClick={() => handleDelete(rule.id)} size="small">
+                                    <IconButton
+                                        onClick={() => handleDelete(rule.id)}
+                                        size="small"
+                                    >
                                         <DeleteIcon />
                                     </IconButton>
                                 </TableCell>
@@ -259,15 +305,20 @@ const FilterRulesTable: React.FC<{ queryRef: PreloadedQuery<FilterRulesQueryType
 };
 
 const FilterRules: React.FC = () => {
-    const [queryRef, loadQuery] = useQueryLoader<FilterRulesQueryType>(FilterRulesQuery);
+    const [queryRef, loadQuery] =
+        useQueryLoader<FilterRulesQueryType>(FilterRulesQuery);
     useEffect(() => {
         loadQuery({});
     }, [loadQuery]);
 
     if (!queryRef) {
-        return <Box sx={{ display: "flex", justifyContent: "center", mt: 4 }}><CircularProgress /></Box>;
+        return (
+            <Box sx={{ display: "flex", justifyContent: "center", mt: 4 }}>
+                <CircularProgress />
+            </Box>
+        );
     }
     return <FilterRulesTable queryRef={queryRef} />;
 };
 
-export default FilterRules; 
+export default FilterRules;

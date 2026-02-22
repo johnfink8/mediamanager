@@ -1,6 +1,12 @@
 import React, { useState, useCallback } from "react";
 import { useSnackbar } from "material-ui-snackbar-provider";
-import { LiveTv, Movie, FilterList, LocalMovies, FactCheck } from "@mui/icons-material";
+import {
+    LiveTv,
+    Movie,
+    FilterList,
+    LocalMovies,
+    FactCheck,
+} from "@mui/icons-material";
 import HistoryIcon from "@mui/icons-material/History";
 import { itemType, MenuItemType } from "./types";
 import ItemList from "./ItemList";

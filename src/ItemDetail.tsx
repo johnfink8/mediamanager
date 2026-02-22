@@ -16,7 +16,6 @@ import { ItemListAddItemMutation } from "./__generated__/ItemListAddItemMutation
 import { ItemListDeleteItemMutation } from "./__generated__/ItemListDeleteItemMutation.graphql";
 import AttributeChips from "./AttributeChips";
 
-
 const DeferItemMutation = graphql`
     mutation ItemDetailDeferItemMutation($input: DeferItemInput!) {
         deferItem(data: $input) {
