@@ -22,6 +22,7 @@ CMD alembic upgrade head && ./gunicorn_start
 FROM nginx as host
 COPY --from=build /usr/src/app/frontend/static /data
 COPY nginx.conf /etc/nginx/nginx.conf
+COPY authelia.conf /etc/nginx/authelia.conf
 COPY ssh.conf /etc/nginx/ssh.conf
 COPY auth.conf /etc/nginx/auth.conf
 COPY auth.users /etc/nginx/auth.users
