@@ -17,7 +17,7 @@ jobs:
           pip install ruff
           ruff format --check
           ruff check --no-fix
-          
+
       - name: Build frontend image and lint JS/TS
         run: |
           docker build -t builder:${{ github.sha }} --target build .
@@ -33,7 +33,7 @@ jobs:
           cp "$SRC/auth.users" .
           cp "$SRC/authelia.conf" .
           cp -r "$SRC/ssl" ./ssl
-          docker build -t mediamanager:${{ github.sha }} .
+          docker build -t mediamanager:${{ github.sha }} --target host .
 
       - name: Run E2E tests
         run: |
