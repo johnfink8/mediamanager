@@ -1,0 +1,11 @@
+FROM mcr.microsoft.com/playwright:v1.52.0-jammy
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm install
+
+COPY playwright.config.ts ./
+COPY e2e/ ./e2e/
+
+CMD ["npx", "playwright", "test"]

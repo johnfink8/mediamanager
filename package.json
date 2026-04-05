@@ -4,7 +4,8 @@
     "build": "relay-compiler && webpack --config webpack.config.js --mode production",
     "format": "prettier --write \"src/**/*.{js,jsx,ts,tsx,less}\"",
     "relay": "relay-compiler",
-    "lint": "relay-compiler && tsc --noEmit && prettier --check \"src/**/*.{js,jsx,ts,tsx,less}\" && eslint \"src/**/*.{js,jsx,ts,tsx}\""
+    "lint": "relay-compiler && tsc --noEmit && prettier --check \"src/**/*.{js,jsx,ts,tsx,less}\" && eslint \"src/**/*.{js,jsx,ts,tsx}\"",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@emotion/react": "^11.10.6",
@@ -42,6 +43,7 @@
     "typescript": "^5.0.2",
     "webpack": "^5.76.2",
     "webpack-bundle-tracker": "^1.8.1",
-    "webpack-cli": "^5.0.1"
+    "webpack-cli": "^5.0.1",
+    "@playwright/test": "1.52.0"
   }
 }
