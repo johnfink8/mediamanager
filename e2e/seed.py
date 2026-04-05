@@ -3,7 +3,6 @@
 from indexer_utils.models import IgnoreItem
 from indexer_utils.session import db_session
 
-
 TEST_UID_PREFIX = "playwright-test-"
 
 
