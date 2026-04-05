@@ -501,9 +501,7 @@ class MovieRecommendationType:
 @strawberry.type
 class SchemaQuery:
     @strawberry.field
-    def items(
-        self: "SchemaQuery", item_type: Optional[str] = None
-    ) -> IgnoreItemList:
+    def items(self: "SchemaQuery", item_type: Optional[str] = None) -> IgnoreItemList:
         return IgnoreItemList(item_type=item_type)
 
     @strawberry.field
