@@ -1,7 +1,6 @@
 import React from "react";
 import { SnackbarProvider } from "material-ui-snackbar-provider";
 import MenuDrawer from "./MenuDrawer";
-import { TempFilterContextProvider } from "./TempFilterContext";
 import {
     Environment,
     Network,
@@ -53,12 +52,10 @@ const createEnvironment = () => {
 export default function App() {
     const environment = createEnvironment();
     return (
-        <TempFilterContextProvider>
-            <RelayEnvironmentProvider environment={environment}>
-                <SnackbarProvider SnackbarProps={{ autoHideDuration: 4000 }}>
-                    <MenuDrawer />
-                </SnackbarProvider>
-            </RelayEnvironmentProvider>
-        </TempFilterContextProvider>
+        <RelayEnvironmentProvider environment={environment}>
+            <SnackbarProvider SnackbarProps={{ autoHideDuration: 4000 }}>
+                <MenuDrawer />
+            </SnackbarProvider>
+        </RelayEnvironmentProvider>
     );
 }
