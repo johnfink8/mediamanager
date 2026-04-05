@@ -79,18 +79,28 @@ const ItemList: FC<{
     menuItem: MenuItemType;
     queryRef: PreloadedQuery<ItemListQuery>;
 }> = ({ menuItem, queryRef }) => {
-    const items = usePreloadedQuery(ItemListQueryGQL, queryRef).items.nodes.filter(Boolean);
+    const items = usePreloadedQuery(
+        ItemListQueryGQL,
+        queryRef
+    ).items.nodes.filter(Boolean);
     const [recheckVisible, isRechecking] = useMutation(RecheckVisibleMutation);
-    const canRecheck = (menuItem.typeName === "mv" || menuItem.typeName === "tv") && items.length > 0;
+    const recheckItemType =
+        menuItem.typeName === "mv" || menuItem.typeName === "tv"
+            ? menuItem.typeName
+            : null;
 
     return (
         <Box sx={{ position: "relative" }}>
             <BreadCrumbs crumbs={[menuItem]} />
-            {canRecheck && (
+            {recheckItemType && items.length > 0 && (
                 <Box mb={2}>
                     <Button
                         variant="outlined"
-                        onClick={() => recheckVisible({ variables: { itemType: menuItem.typeName! } })}
+                        onClick={() =>
+                            recheckVisible({
+                                variables: { itemType: recheckItemType },
+                            })
+                        }
                         disabled={isRechecking}
                     >
                         Recheck
