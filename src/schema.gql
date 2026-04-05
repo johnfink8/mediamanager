@@ -149,7 +149,7 @@ type PageInfo {
 }
 
 type SchemaQuery {
-  items(filters: [Filter!] = null): IgnoreItemList!
+  items(itemType: String = null): IgnoreItemList!
   filterRules: FilterRuleList!
   checkRuns: CheckRunHistory!
   historicalItems(filters: [Filter!] = null, limit: Int! = 20, offset: Int! = 0, applyInvertedPermanentRules: Boolean! = false): HistoricalIgnoreItemList!
@@ -157,7 +157,7 @@ type SchemaQuery {
 }
 
 type Subscription {
-  items(filters: [Filter!]): IgnoreItemList!
+  items(itemType: String): IgnoreItemList!
 }
 
 type MovieRecommendation {
