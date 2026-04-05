@@ -10,11 +10,14 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Lint Python (ruff via docker)
+      - name: Lint Python 
         run: |
-          docker run --rm -v "$PWD:/src" -w /src ghcr.io/astral-sh/ruff:latest format --check
-          docker run --rm -v "$PWD:/src" -w /src ghcr.io/astral-sh/ruff:latest check --no-fix
-
+          python3.12 -m venv .venv
+          source .venv/bin/activate
+          pip install ruff
+          ruff format --check
+          ruff check --no-fix
+          
       - name: Build frontend image and lint JS/TS
         run: |
           docker build -t builder:${{ github.sha }} --target build .
