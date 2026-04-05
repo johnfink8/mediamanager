@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -302,25 +301,10 @@ class IgnoreItemType:
             attributes=attribute_entries,
         )
 
-    @staticmethod
-    def apply_filter(filter: Filter, query: Query, cls=IgnoreItem) -> Query:
-        if filter.type:
-            query = query.where(cls.item_type == filter.type)
-        return query
-
-    @staticmethod
-    def apply_filters(
-        filters: Optional[List[Filter]], query: Query, cls=IgnoreItem
-    ) -> Query:
-        if filters:
-            for filter in filters:
-                query = IgnoreItemType.apply_filter(filter, query, cls=cls)
-        return query
-
     @classmethod
     def get_open(
         cls: Type["IgnoreItemType"],
-        filters: Optional[List[Filter]] = None,
+        item_type: Optional[str] = None,
     ) -> List["IgnoreItemType"]:
         with db_session() as session:
             query = session.query(IgnoreItem).where(
@@ -330,61 +314,23 @@ class IgnoreItemType:
                     IgnoreItem.defer_until <= datetime.utcnow(),
                 ),
             )
-            query = cls.apply_filters(filters, query)
-
-            # Only apply temporary rules from filters argument
-            temp_rules = []
-            if filters:
-                for f in filters:
-                    if f.attribute and f.operator and f.value:
-                        temp_rules.append(f)
-
-            filter_specs = []
-            # Add temporary rules
-            for f in temp_rules:
-                if f.attribute in [
-                    "type",
-                    "uid",
-                    "title",
-                    "checked_title",
-                    "poster_url",
-                    "added",
-                    "ignore",
-                ]:
-                    field = f.attribute
-                else:
-                    field = f"attributes.{f.attribute}"
-                filter_specs.append(
-                    FilterSpec(
-                        model=IgnoreItem,
-                        field=field,
-                        op=f.operator,
-                        value=f.value,
-                    )
-                )
-            for spec in filter_specs:
-                query = apply_filters(query, spec)
-
-            print(
-                "query", query.statement.compile(compile_kwargs={"literal_binds": True})
-            )
+            if item_type:
+                query = query.where(IgnoreItem.item_type == item_type)
             items = query.all()
             return [cls.from_sqlalchemy(item) for item in items]
 
 
 @strawberry.type
 class IgnoreItemList:
-    filters: strawberry.Private[Optional[List[Filter]]] = None
+    item_type: strawberry.Private[Optional[str]] = None
 
     @strawberry.field
     def id(self: "IgnoreItemList") -> GlobalID:
-        items = [strawberry.asdict(f) for f in (self.filters or [])]
-        filter_string = json.dumps(items)
-        return GlobalID("ignoreitemlist", filter_string)
+        return GlobalID("ignoreitemlist", self.item_type or "")
 
     @strawberry.field
     def nodes(self: "IgnoreItemList") -> List[IgnoreItemType]:
-        return IgnoreItemType.get_open(filters=self.filters)
+        return IgnoreItemType.get_open(item_type=self.item_type)
 
 
 @strawberry.type(name="FilterRule")
@@ -458,14 +404,15 @@ class HistoricalIgnoreItemList:
     ) -> "HistoricalIgnoreItemList":
         with db_session() as session:
             query = session.query(IgnoreItem).where(IgnoreItem.ignore.is_(True))
-            query = IgnoreItemType.apply_filters(filters, query)
+            item_type_filter = next(
+                (f.type for f in (filters or []) if f.type is not None),
+                None,
+            )
+            if item_type_filter:
+                query = query.where(IgnoreItem.item_type == item_type_filter)
 
             # Optionally apply the inverted permanent rules for this type
             if apply_inverted_permanent_rules:
-                item_type_filter = next(
-                    (f.type for f in (filters or []) if f.type is not None),
-                    None,
-                )
                 if item_type_filter:
                     rules = (
                         session.query(FilterRule)
@@ -553,10 +500,8 @@ class MovieRecommendationType:
 @strawberry.type
 class SchemaQuery:
     @strawberry.field
-    def items(
-        self: "SchemaQuery", filters: Optional[List[Filter]] = None
-    ) -> IgnoreItemList:
-        return IgnoreItemList(filters=filters)
+    def items(self: "SchemaQuery", item_type: Optional[str] = None) -> IgnoreItemList:
+        return IgnoreItemList(item_type=item_type)
 
     @strawberry.field
     def filter_rules(self) -> FilterRuleList:
@@ -600,16 +545,15 @@ class SchemaQuery:
 class Subscription:
     @strawberry.subscription
     async def items(
-        self: "Subscription", filters: Optional[List[Filter]]
+        self: "Subscription", item_type: Optional[str] = None
     ) -> AsyncIterator[IgnoreItemList]:
-        event_type = next((f.type for f in (filters or []) if f.type is not None), "tv")
-        event = events.get(event_type or "tv")
+        event = events.get(item_type or "tv")
         while True:
             if event is None:
                 await asyncio.sleep(1)
                 continue
             await event.wait()
-            yield IgnoreItemList(filters=filters)
+            yield IgnoreItemList(item_type=item_type)
             event.clear()
 
 
@@ -821,7 +765,7 @@ class Mutation:
                 session.add(item)
             session.commit()
 
-            ignore_items = IgnoreItemList(filters=[Filter(type=data.item_type)])
+            ignore_items = IgnoreItemList(item_type=data.item_type)
             filter_rules = FilterRuleList()
             return MutationReturn(ignore_items=ignore_items, filter_rules=filter_rules)
 
@@ -835,7 +779,7 @@ class Mutation:
             item_type = rule.item_type
             session.delete(rule)
             session.commit()
-            ignore_items = IgnoreItemList(filters=[Filter(type=item_type)])
+            ignore_items = IgnoreItemList(item_type=item_type)
             filter_rules = FilterRuleList()
             return MutationReturn(ignore_items=ignore_items, filter_rules=filter_rules)
 
