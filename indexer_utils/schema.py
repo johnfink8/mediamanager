@@ -332,39 +332,6 @@ class IgnoreItemType:
             )
             query = cls.apply_filters(filters, query)
 
-            # Only apply temporary rules from filters argument
-            temp_rules = []
-            if filters:
-                for f in filters:
-                    if f.attribute and f.operator and f.value:
-                        temp_rules.append(f)
-
-            filter_specs = []
-            # Add temporary rules
-            for f in temp_rules:
-                if f.attribute in [
-                    "type",
-                    "uid",
-                    "title",
-                    "checked_title",
-                    "poster_url",
-                    "added",
-                    "ignore",
-                ]:
-                    field = f.attribute
-                else:
-                    field = f"attributes.{f.attribute}"
-                filter_specs.append(
-                    FilterSpec(
-                        model=IgnoreItem,
-                        field=field,
-                        op=f.operator,
-                        value=f.value,
-                    )
-                )
-            for spec in filter_specs:
-                query = apply_filters(query, spec)
-
             print(
                 "query", query.statement.compile(compile_kwargs={"literal_binds": True})
             )
