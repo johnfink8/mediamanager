@@ -18,8 +18,6 @@ import ListItemButton from "@mui/material/ListItemButton";
 import ListItemIcon from "@mui/material/ListItemIcon";
 import ListItemText from "@mui/material/ListItemText";
 import { menuItems } from "./util";
-import TemporaryFilterBar from "./TemporaryFilterBar";
-
 const drawerWidth = 240;
 
 const Main = styled("main", { shouldForwardProp: (prop) => prop !== "open" })<{
@@ -144,7 +142,6 @@ export default function PersistentDrawerLeft() {
             </Drawer>
             <Main open={open}>
                 <DrawerHeader />
-                <TemporaryFilterBar selectedComponent={selectedComponent} />
                 {menuItems
                     .filter((e) => e.name === selectedComponent)
                     .map((e) => (
