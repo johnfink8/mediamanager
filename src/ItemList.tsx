@@ -1,4 +1,4 @@
-import React, { FC, useEffect, useMemo } from "react";
+import React, { FC, useEffect } from "react";
 import Grid from "@mui/material/Grid";
 import Box from "@mui/material/Box";
 
@@ -10,10 +10,10 @@ import {
     PreloadedQuery,
     usePreloadedQuery,
     useQueryLoader,
+    useMutation,
 } from "react-relay";
-import { Filter, ItemListQuery } from "./__generated__/ItemListQuery.graphql";
-import { Backdrop, Card, CardContent, Typography } from "@mui/material";
-import { useFilterContext } from "./TempFilterContext";
+import { ItemListQuery } from "./__generated__/ItemListQuery.graphql";
+import { Backdrop, Button, Card, CardContent, Typography } from "@mui/material";
 
 const ItemListQueryGQL = graphql`
     query ItemListQuery($filters: [Filter!]) {
@@ -62,29 +62,41 @@ export const SetItemAddedMutation = graphql`
     }
 `;
 
+const RecheckVisibleMutation = graphql`
+    mutation ItemListRecheckVisibleMutation($itemType: String!) {
+        recheckVisible(itemType: $itemType) {
+            id
+            attributes {
+                key
+                values
+                details
+            }
+        }
+    }
+`;
+
 const ItemList: FC<{
     menuItem: MenuItemType;
     queryRef: PreloadedQuery<ItemListQuery>;
-    filters: Filter[];
 }> = ({ menuItem, queryRef }) => {
-    const queryItems = usePreloadedQuery(ItemListQueryGQL, queryRef).items
-        .nodes;
-    const items = queryItems.filter(Boolean);
-    const { setAttributeKeys } = useFilterContext();
-    React.useEffect(() => {
-        // Collect all unique attribute keys from the items
-        const keys = new Set<string>();
-        items.forEach((item) => {
-            item.attributes?.forEach((attr) => {
-                if (attr.key) keys.add(attr.key);
-            });
-        });
-        setAttributeKeys(Array.from(keys));
-    }, [items, setAttributeKeys]);
-    // No need to filter by type here; backend handles it
+    const items = usePreloadedQuery(ItemListQueryGQL, queryRef).items.nodes.filter(Boolean);
+    const [recheckVisible, isRechecking] = useMutation(RecheckVisibleMutation);
+    const canRecheck = (menuItem.typeName === "mv" || menuItem.typeName === "tv") && items.length > 0;
+
     return (
         <Box sx={{ position: "relative" }}>
             <BreadCrumbs crumbs={[menuItem]} />
+            {canRecheck && (
+                <Box mb={2}>
+                    <Button
+                        variant="outlined"
+                        onClick={() => recheckVisible({ variables: { itemType: menuItem.typeName! } })}
+                        disabled={isRechecking}
+                    >
+                        Recheck
+                    </Button>
+                </Box>
+            )}
             <Grid container spacing={2}>
                 {items.map((item) => (
                     <ItemDetail key={item.uid} item={item} />
@@ -139,29 +151,16 @@ const ItemListLoading: FC = () => (
 );
 
 const ItemListContainer: FC<{ menuItem: MenuItemType }> = ({ menuItem }) => {
-    const { tempFilters } = useFilterContext();
     const [queryRef, loadQuery, disposeQuery] =
         useQueryLoader<ItemListQuery>(ItemListQueryGQL);
-    // Always include the type filter, plus all temp filters mapped to Filter type
-    const filters = useMemo<Filter[]>(
-        () => [
-            { type: menuItem.typeName },
-            ...tempFilters.map((f) => ({
-                attribute: f.attribute,
-                operator: f.operator,
-                value: f.value,
-            })),
-        ],
-        [menuItem, tempFilters]
-    );
     useEffect(() => {
-        loadQuery({ filters });
+        loadQuery({ filters: [{ type: menuItem.typeName }] });
         return () => {
             disposeQuery();
         };
-    }, [filters, loadQuery, disposeQuery]);
+    }, [menuItem, loadQuery, disposeQuery]);
     return queryRef ? (
-        <ItemList menuItem={menuItem} queryRef={queryRef} filters={filters} />
+        <ItemList menuItem={menuItem} queryRef={queryRef} />
     ) : (
         <ItemListLoading />
     );
