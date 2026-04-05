@@ -10,28 +10,36 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Copy server configuration into workspace
+      - name: Lint Python (ruff via docker)
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src ghcr.io/astral-sh/ruff:latest format --check
+          docker run --rm -v "$PWD:/src" -w /src ghcr.io/astral-sh/ruff:latest check --no-fix
+
+      - name: Build frontend image and lint JS/TS
+        run: |
+          docker build -t builder:${{ github.sha }} --target build .
+          docker run --rm builder:${{ github.sha }} npm run lint
+
+      - name: Build production image
         run: |
           SRC=/opt/servermonitor
-
-          cp "$SRC/.env" .
+          cp .env.sample .env
           cp "$SRC/nginx.conf" .
           cp "$SRC/ssh.conf" .
           cp "$SRC/auth.conf" .
           cp "$SRC/auth.users" .
           cp "$SRC/authelia.conf" .
           cp -r "$SRC/ssl" ./ssl
-
-      - name: Build Docker image
-        run: |
-          python3.12 -m venv .venv
-          source .venv/bin/activate
-          pip install ruff
-          ruff format --check
-          ruff check --no-fix
-          docker build -t builder:${{ github.sha }} --target build .
-          docker run --rm builder:${{ github.sha }} npm run lint
           docker build -t mediamanager:${{ github.sha }} .
+
+      - name: Run E2E tests
+        run: |
+          cp .env.sample .env.test
+          docker compose -f docker-compose.test.yml run --build --rm playwright
+
+      - name: Cleanup test containers
+        if: always()
+        run: docker compose -f docker-compose.test.yml down -v
 
   deploy:
     if: github.ref == 'refs/heads/main'
