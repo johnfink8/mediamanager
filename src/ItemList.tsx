@@ -16,8 +16,8 @@ import { ItemListQuery } from "./__generated__/ItemListQuery.graphql";
 import { Backdrop, Button, Card, CardContent, Typography } from "@mui/material";
 
 const ItemListQueryGQL = graphql`
-    query ItemListQuery($filters: [Filter!]) {
-        items(filters: $filters) {
+    query ItemListQuery($itemType: String) {
+        items(itemType: $itemType) {
             id
             nodes {
                 id
@@ -164,7 +164,7 @@ const ItemListContainer: FC<{ menuItem: MenuItemType }> = ({ menuItem }) => {
     const [queryRef, loadQuery, disposeQuery] =
         useQueryLoader<ItemListQuery>(ItemListQueryGQL);
     useEffect(() => {
-        loadQuery({ filters: [{ type: menuItem.typeName }] });
+        loadQuery({ itemType: menuItem.typeName });
         return () => {
             disposeQuery();
         };
