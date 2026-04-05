@@ -27,3 +27,7 @@ COPY ssh.conf /etc/nginx/ssh.conf
 COPY auth.conf /etc/nginx/auth.conf
 COPY auth.users /etc/nginx/auth.users
 COPY ssl /etc/ssl
+
+FROM nginx as testhost
+COPY --from=build /usr/src/app/frontend/static /data
+COPY nginx.test.conf /etc/nginx/nginx.conf

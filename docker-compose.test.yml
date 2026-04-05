@@ -1,0 +1,98 @@
+services:
+  db:
+    image: mysql:9.4.0
+    environment:
+      MYSQL_ROOT_PASSWORD: passw0rd
+      MYSQL_DATABASE: indexer_utils
+      MYSQL_USER: indexer_utils
+      MYSQL_PASSWORD: passw0rd
+    volumes:
+      - ./my.cnf:/etc/my.cnf
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-ppassw0rd"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  redis:
+    image: redis:alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  weaviate:
+    image: cr.weaviate.io/semitechnologies/weaviate:1.32.2
+    command: ["--host", "0.0.0.0", "--port", "8080", "--scheme", "http"]
+    environment:
+      QUERY_DEFAULTS_LIMIT: 25
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
+      ENABLE_API_BASED_MODULES: "true"
+      CLUSTER_HOSTNAME: "node1"
+
+  db_init:
+    build:
+      context: .
+      target: runner
+    env_file: .env.test
+    volumes:
+      - ./e2e/init_db.py:/opt/servermonitor/init_db.py
+    command: ["python", "init_db.py"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  app:
+    build:
+      context: .
+      target: runner
+    env_file: .env.test
+    command: ["./gunicorn_start"]
+    depends_on:
+      db_init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      weaviate:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  web:
+    build:
+      context: .
+      target: testhost
+    depends_on:
+      app:
+        condition: service_healthy
+
+  seeder:
+    build:
+      context: .
+      target: runner
+    env_file: .env.test
+    volumes:
+      - ./e2e/seed.py:/opt/servermonitor/seed.py
+    command: ["python", "seed.py"]
+    depends_on:
+      app:
+        condition: service_healthy
+
+  playwright:
+    build:
+      context: .
+      dockerfile: Dockerfile.playwright
+    depends_on:
+      seeder:
+        condition: service_completed_successfully
+      web:
+        condition: service_started
+    environment:
+      BASE_URL: http://web
