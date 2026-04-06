@@ -1,5 +1,36 @@
 # mediamanager — Claude Code Guide
 
+## ⚠️ Session Start Checklist
+
+Before doing any work, always run this to orient yourself:
+
+```bash
+pwd && ls venv/bin/ruff 2>/dev/null && echo "venv OK" || echo "venv MISSING — see Worktree Setup below"
+```
+
+**If running inside a git worktree** (i.e. `pwd` shows a path like `.git/worktrees/...` or a sibling directory, and `venv/` is missing), symlink the shared artifacts from the main project rather than reinstalling:
+
+```bash
+# Find the main project root (adjust path if needed)
+MAIN=$(git worktree list | head -1 | awk '{print $1}')
+
+ln -s "$MAIN/venv" ./venv
+ln -s "$MAIN/node_modules" ./node_modules
+```
+
+After symlinking, verify: `./venv/bin/ruff --version && npx relay-compiler --version`
+
+## ⚠️ Homebrew — PATH Issue
+
+`gh` and other helper apps are installed but not on Claude Code's default PATH. Use the `./claude-exec` wrapper for any Homebrew-installed tool:
+
+```bash
+./claude-exec gh run list --limit 5
+./claude-exec gh pr create --title "..." --body "..."
+```
+
+`claude-exec` prepends the Homebrew bin directories before executing, so `gh`, `node`, and any other Homebrew tools are always found. It is safe to use for any command, not just `gh`.
+
 ## Project Overview
 
 Full-stack media manager app: **FastAPI + Strawberry GraphQL** backend (Python), **React + Relay + TypeScript** frontend. The backend manages Plex/Radarr/Sonarr integrations, AI-powered recommendations, and Weaviate vector search.
