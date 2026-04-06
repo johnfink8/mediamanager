@@ -1,0 +1,16 @@
+#!/bin/bash
+# claude-exec: run a command with a full macOS PATH so tools like gh,
+# node, and Homebrew-installed binaries are always discoverable.
+#
+# Usage: ./claude-exec <command> [args...]
+#   e.g. ./claude-exec gh run list --limit 5
+#        ./claude-exec npx relay-compiler
+
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:$PATH"
+
+if [ $# -eq 0 ]; then
+  echo "Usage: ./claude-exec <command> [args...]" >&2
+  exit 1
+fi
+
+exec "$@"
