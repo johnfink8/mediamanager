@@ -628,13 +628,16 @@ class Mutation:
     ) -> AcceptAllRecommendedResult:
         added_count = 0
         ignored_count = 0
-        with db_session() as session:
-            for gid in data.ids:
-                item = session.query(IgnoreItem).get(gid.node_id)
-                if not item:
-                    continue
-                ai = (item.attributes or {}).get("ai", {})
-                if ai.get("value") is True:
+        for gid in data.ids:
+            try:
+                with db_session() as session:
+                    item = session.query(IgnoreItem).get(gid.node_id)
+                    if not item:
+                        continue
+                    ai = (item.attributes or {}).get("ai", {})
+                    if ai.get("value") is not True:
+                        ignored_count += 1
+                        continue
                     if item.item_type == "mv":
                         addMovie(item.uid)
                     else:
@@ -642,10 +645,10 @@ class Mutation:
                     item.added = True
                     item.ignore = True
                     session.add(item)
+                    session.commit()
                     added_count += 1
-                else:
-                    ignored_count += 1
-            session.commit()
+            except Exception:
+                logger.exception("Failed to add item %s", gid)
         return AcceptAllRecommendedResult(
             added_count=added_count,
             ignored_count=ignored_count,
