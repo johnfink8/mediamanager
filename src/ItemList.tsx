@@ -1,4 +1,4 @@
-import React, { FC, useEffect } from "react";
+import React, { FC, useEffect, useState } from "react";
 import Grid from "@mui/material/Grid";
 import Box from "@mui/material/Box";
 
@@ -13,7 +13,16 @@ import {
     useMutation,
 } from "react-relay";
 import { ItemListQuery } from "./__generated__/ItemListQuery.graphql";
-import { Backdrop, Button, Card, CardContent, Typography } from "@mui/material";
+import { ItemListAcceptAllRecommendedMutation } from "./__generated__/ItemListAcceptAllRecommendedMutation.graphql";
+import {
+    Alert,
+    Backdrop,
+    Button,
+    Card,
+    CardContent,
+    Snackbar,
+    Typography,
+} from "@mui/material";
 
 const ItemListQueryGQL = graphql`
     query ItemListQuery($itemType: String) {
@@ -62,6 +71,34 @@ export const SetItemAddedMutation = graphql`
     }
 `;
 
+const AcceptAllRecommendedMutation = graphql`
+    mutation ItemListAcceptAllRecommendedMutation(
+        $input: AcceptAllRecommendedInput!
+    ) {
+        acceptAllRecommended(data: $input) {
+            addedCount
+            ignoredCount
+            items {
+                id
+                nodes {
+                    id
+                    type
+                    uid
+                    title
+                    added
+                    checkedTitle
+                    posterUrl
+                    attributes {
+                        key
+                        values
+                        details
+                    }
+                }
+            }
+        }
+    }
+`;
+
 const RecheckVisibleMutation = graphql`
     mutation ItemListRecheckVisibleMutation($itemType: String!) {
         recheckVisible(itemType: $itemType) {
@@ -84,6 +121,14 @@ const ItemList: FC<{
         queryRef
     ).items.nodes.filter(Boolean);
     const [recheckVisible, isRechecking] = useMutation(RecheckVisibleMutation);
+    const [acceptAllRecommended, isAccepting] =
+        useMutation<ItemListAcceptAllRecommendedMutation>(
+            AcceptAllRecommendedMutation
+        );
+    const [acceptResult, setAcceptResult] = useState<{
+        addedCount: number;
+        ignoredCount: number;
+    } | null>(null);
     const recheckItemType =
         menuItem.typeName === "mv" || menuItem.typeName === "tv"
             ? menuItem.typeName
@@ -93,7 +138,7 @@ const ItemList: FC<{
         <Box sx={{ position: "relative" }}>
             <BreadCrumbs crumbs={[menuItem]} />
             {recheckItemType && items.length > 0 && (
-                <Box mb={2}>
+                <Box mb={2} sx={{ display: "flex", gap: 1 }}>
                     <Button
                         variant="outlined"
                         onClick={() =>
@@ -105,8 +150,44 @@ const ItemList: FC<{
                     >
                         Recheck
                     </Button>
+                    <Button
+                        variant="outlined"
+                        onClick={() =>
+                            acceptAllRecommended({
+                                variables: {
+                                    input: {
+                                        ids: items.map((item) => item.id),
+                                        itemType: recheckItemType,
+                                    },
+                                },
+                                onCompleted(response) {
+                                    const { addedCount, ignoredCount } =
+                                        response.acceptAllRecommended;
+                                    setAcceptResult({ addedCount, ignoredCount });
+                                },
+                            })
+                        }
+                        disabled={isAccepting}
+                    >
+                        Accept All Recommended
+                    </Button>
                 </Box>
             )}
+            <Snackbar
+                open={acceptResult !== null}
+                autoHideDuration={6000}
+                onClose={() => setAcceptResult(null)}
+            >
+                <Alert
+                    onClose={() => setAcceptResult(null)}
+                    severity="info"
+                    sx={{ width: "100%" }}
+                >
+                    {acceptResult
+                        ? `Added ${acceptResult.addedCount}, skipped ${acceptResult.ignoredCount}`
+                        : ""}
+                </Alert>
+            </Snackbar>
             <Grid container spacing={2}>
                 {items.map((item) => (
                     <ItemDetail key={item.uid} item={item} />
