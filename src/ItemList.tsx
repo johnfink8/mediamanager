@@ -163,7 +163,10 @@ const ItemList: FC<{
                                 onCompleted(response) {
                                     const { addedCount, ignoredCount } =
                                         response.acceptAllRecommended;
-                                    setAcceptResult({ addedCount, ignoredCount });
+                                    setAcceptResult({
+                                        addedCount,
+                                        ignoredCount,
+                                    });
                                 },
                             })
                         }
