@@ -4,6 +4,17 @@ schema {
   subscription: Subscription
 }
 
+input AcceptAllRecommendedInput {
+  ids: [ID!]!
+  itemType: String!
+}
+
+type AcceptAllRecommendedResult {
+  addedCount: Int!
+  ignoredCount: Int!
+  items: IgnoreItemList!
+}
+
 input AddItemInput {
   id: ID!
 }
@@ -14,18 +25,9 @@ type AttributeEntry {
   details: JSON
 }
 
-input Filter {
-  type: String = null
-  attribute: String = null
-  operator: String = null
-  value: String = null
-}
-
-type CheckedItemType {
-  title: String!
-  uid: String!
-  ignored: Boolean
-  note: String
+type CheckRunHistory {
+  movies: [CheckRunType!]!
+  shows: [CheckRunType!]!
 }
 
 type CheckRunType {
@@ -39,9 +41,22 @@ type CheckRunType {
   checkedItems: [CheckedItemType!]!
 }
 
-type CheckRunHistory {
-  movies: [CheckRunType!]!
-  shows: [CheckRunType!]!
+type CheckedItemType {
+  title: String!
+  uid: String!
+  ignored: Boolean
+  note: String
+}
+
+input DeferItemInput {
+  id: ID!
+}
+
+input Filter {
+  type: String = null
+  attribute: String = null
+  operator: String = null
+  value: String = null
 }
 
 type FilterRule {
@@ -93,74 +108,7 @@ The `JSON` scalar type represents JSON values as specified by [ECMA-404](https:/
 """
 scalar JSON @specifiedBy(url: "https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf")
 
-
-enum RecommendationPreference {
-  LIKE
-  NOT_NOW
-  NEVER
-}
-
-type Mutation {
-  addItem(data: AddItemInput!): IgnoreItem!
-  deleteItem(data: AddItemInput!): IgnoreItem!
-  createFilterRule(data: FilterRuleInput!): MutationReturn!
-  deleteFilterRule(id: ID!): MutationReturn!
-  setItemAdded(data: SetItemAddedInput!): IgnoreItem!
-  setRecommendationPreference(data: SetRecommendationPreferenceInput!): RecommendationFeedback!
-  retryAi(data: RetryAiInput!): IgnoreItem!
-  recheckVisible(itemType: String!): [IgnoreItem!]!
-  deferItem(data: DeferItemInput!): IgnoreItem!
-}
-
-type MutationReturn {
-  ignoreItems: IgnoreItemList!
-  filterRules: FilterRuleList!
-}
-
-input SetItemAddedInput {
-  id: ID!
-  added: Boolean!
-}
-
-input RetryAiInput {
-  id: ID!
-}
-
-input DeferItemInput {
-  id: ID!
-}
-
-input SetRecommendationPreferenceInput {
-  recommendationId: ID!
-  preference: RecommendationPreference!
-}
-
-type RecommendationFeedback {
-  id: ID!
-  preference: RecommendationPreference!
-}
-
-type PageInfo {
-  hasNextPage: Boolean!
-  hasPreviousPage: Boolean!
-  startOffset: Int!
-  endOffset: Int!
-  totalCount: Int!
-}
-
-type SchemaQuery {
-  items(itemType: String = null): IgnoreItemList!
-  filterRules: FilterRuleList!
-  checkRuns: CheckRunHistory!
-  historicalItems(filters: [Filter!] = null, limit: Int! = 20, offset: Int! = 0, applyInvertedPermanentRules: Boolean! = false): HistoricalIgnoreItemList!
-  movieRecommendation(prompt: String = null): MovieRecommendation
-}
-
-type Subscription {
-  items(itemType: String): IgnoreItemList!
-}
-
-type MovieRecommendation {
+type MovieRecommendationType {
   id: ID
   imdbId: String!
   title: String!
@@ -174,4 +122,67 @@ type MovieRecommendation {
   prompt: String
   excludedRecent: [String!]!
   preference: RecommendationPreference
+}
+
+type Mutation {
+  addItem(data: AddItemInput!): IgnoreItem!
+  acceptAllRecommended(data: AcceptAllRecommendedInput!): AcceptAllRecommendedResult!
+  deleteItem(data: AddItemInput!): IgnoreItem!
+  setItemAdded(data: SetItemAddedInput!): IgnoreItem!
+  retryAi(data: RetryAiInput!): IgnoreItem!
+  recheckVisible(itemType: String!): [IgnoreItem!]!
+  deferItem(data: DeferItemInput!): IgnoreItem!
+  setRecommendationPreference(data: SetRecommendationPreferenceInput!): RecommendationFeedbackType!
+  createFilterRule(data: FilterRuleInput!): MutationReturn!
+  deleteFilterRule(id: ID!): MutationReturn!
+}
+
+type MutationReturn {
+  ignoreItems: IgnoreItemList!
+  filterRules: FilterRuleList!
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startOffset: Int!
+  endOffset: Int!
+  totalCount: Int!
+}
+
+type RecommendationFeedbackType {
+  id: ID!
+  preference: RecommendationPreference!
+}
+
+enum RecommendationPreference {
+  LIKE
+  NOT_NOW
+  NEVER
+}
+
+input RetryAiInput {
+  id: ID!
+}
+
+type SchemaQuery {
+  items(itemType: String = null): IgnoreItemList!
+  filterRules: FilterRuleList!
+  checkRuns: CheckRunHistory!
+  historicalItems(filters: [Filter!] = null, limit: Int! = 20, offset: Int! = 0, applyInvertedPermanentRules: Boolean! = false): HistoricalIgnoreItemList!
+  movieRecommendation(prompt: String = null): MovieRecommendationType
+}
+
+input SetItemAddedInput {
+  id: ID!
+  added: Boolean!
+}
+
+input SetRecommendationPreferenceInput {
+  recommendationId: ID!
+  preference: RecommendationPreference!
+}
+
+type Subscription {
+  items(itemType: String = null): IgnoreItemList!
 }
