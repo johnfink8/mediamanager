@@ -563,6 +563,12 @@ class AddItemInput:
 
 
 @strawberry.input
+class AcceptAllRecommendedInput:
+    ids: List[GlobalID]
+    item_type: str
+
+
+@strawberry.input
 class RetryAiInput:
     id: GlobalID
 
@@ -582,6 +588,13 @@ class RecommendationFeedbackType:
 class SetRecommendationPreferenceInput:
     recommendation_id: ID
     preference: RecommendationPreferenceEnum
+
+
+@strawberry.type
+class AcceptAllRecommendedResult:
+    added_count: int
+    ignored_count: int
+    items: IgnoreItemList
 
 
 @strawberry.type
@@ -608,6 +621,36 @@ class Mutation:
             session.add(item)
             session.commit()
             return IgnoreItemType.from_sqlalchemy(item)
+
+    @strawberry.mutation
+    def accept_all_recommended(
+        self: "Mutation", data: AcceptAllRecommendedInput
+    ) -> AcceptAllRecommendedResult:
+        added_count = 0
+        ignored_count = 0
+        with db_session() as session:
+            for gid in data.ids:
+                item = session.query(IgnoreItem).get(gid.node_id)
+                if not item:
+                    continue
+                ai = (item.attributes or {}).get("ai", {})
+                if ai.get("value") is True:
+                    if item.item_type == "mv":
+                        addMovie(item.uid)
+                    else:
+                        add_series(item.uid)
+                    item.added = True
+                    item.ignore = True
+                    session.add(item)
+                    added_count += 1
+                else:
+                    ignored_count += 1
+            session.commit()
+        return AcceptAllRecommendedResult(
+            added_count=added_count,
+            ignored_count=ignored_count,
+            items=IgnoreItemList(item_type=data.item_type),
+        )
 
     @strawberry.mutation
     def delete_item(self: "Mutation", data: AddItemInput) -> IgnoreItemType:
