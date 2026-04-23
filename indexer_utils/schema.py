@@ -636,6 +636,9 @@ class Mutation:
                         continue
                     ai = (item.attributes or {}).get("ai", {})
                     if ai.get("value") is not True:
+                        item.ignore = True
+                        session.add(item)
+                        session.commit()
                         ignored_count += 1
                         continue
                     if item.item_type == "mv":
