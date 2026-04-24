@@ -317,6 +317,21 @@ class IgnoreItemType:
             if item_type:
                 query = query.where(IgnoreItem.item_type == item_type)
             items = query.all()
+
+            def sort_key(item: IgnoreItem) -> "tuple[int, float, float]":
+                attrs = item.attributes if isinstance(item.attributes, dict) else {}
+                ai_obj = attrs.get("ai")
+                score = ai_obj.get("score") if isinstance(ai_obj, dict) else None
+                has_score = isinstance(score, (int, float))
+                neg_score = -(float(score) if has_score and score is not None else 0.0)
+                created = (
+                    float(item.created_at)
+                    if item.created_at is not None
+                    else float("inf")
+                )
+                return (0 if has_score else 1, neg_score, created)
+
+            items.sort(key=sort_key)
             return [cls.from_sqlalchemy(item) for item in items]
 
 
