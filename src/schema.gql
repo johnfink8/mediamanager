@@ -96,6 +96,7 @@ type IgnoreItem {
   posterUrl: String
   attributes: [AttributeEntry!]!
   id: ID!
+  createdAt: Int
 }
 
 type IgnoreItemList {

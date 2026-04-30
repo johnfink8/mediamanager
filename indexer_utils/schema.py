@@ -233,6 +233,7 @@ class IgnoreItemType:
     checked_title: Optional[str]
     poster_url: Optional[str]
     attributes: List[AttributeEntry]
+    created_at: Optional[int]
 
     @strawberry.field
     def id(self: "IgnoreItemType") -> GlobalID:
@@ -299,6 +300,7 @@ class IgnoreItemType:
             ),
             poster_url=str(item.poster_url) if item.poster_url is not None else None,
             attributes=attribute_entries,
+            created_at=int(item.created_at) if item.created_at is not None else None,
         )
 
     @classmethod
