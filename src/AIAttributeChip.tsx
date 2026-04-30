@@ -28,7 +28,7 @@ function formatJson(value: unknown): string {
     }
 }
 
-const RetryAIMutation = graphql`
+export const RetryAIMutation = graphql`
     mutation AIAttributeChipRetryAiMutation($input: RetryAiInput!) {
         retryAi(data: $input) {
             id
