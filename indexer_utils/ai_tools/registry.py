@@ -54,6 +54,13 @@ def _clip_list_of_strings(value: Any, n: int) -> Any:
     return value
 
 
+def _json_size(value: Any) -> int:
+    try:
+        return len(json.dumps(value, default=str))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _enforce_result_budget(
     output: Any, tool_name: str, candidate_uid: Optional[str]
 ) -> Any:
@@ -61,34 +68,58 @@ def _enforce_result_budget(
     heaviest fields and add a ``_clipped`` marker so the model knows context
     was trimmed. Best-effort safety net for unexpectedly bloated DB rows.
     """
-    try:
-        size = len(json.dumps(output, default=str))
-    except (TypeError, ValueError):
-        return output
+    size = _json_size(output)
     if size <= TOOL_RESULT_BUDGET_BYTES:
         return output
+
+    if not isinstance(output, dict):
+        return output
+
+    original_size = size
+    clipped: Dict[str, Any] = dict(output)
+
+    # Pass 1: drop the heaviest known offenders.
+    if "plex_extras" in clipped and isinstance(clipped["plex_extras"], dict):
+        extras = dict(clipped["plex_extras"])
+        extras.pop("summary", None)
+        clipped["plex_extras"] = extras
+    if isinstance(clipped.get("synopsis"), str):
+        clipped["synopsis"] = _clip(clipped["synopsis"], 200)
+    for list_field in ("results", "recently_watched", "recent_recommendations"):
+        seq = clipped.get(list_field)
+        if not isinstance(seq, list):
+            continue
+        for entry in seq:
+            if not isinstance(entry, dict):
+                continue
+            if isinstance(entry.get("synopsis"), str):
+                entry["synopsis"] = _clip(entry["synopsis"], 160)
+            if isinstance(entry.get("reason"), str):
+                entry["reason"] = _clip(entry["reason"], 160)
+
+    # Pass 2: if still over budget, halve the longest list field repeatedly.
+    while _json_size(clipped) > TOOL_RESULT_BUDGET_BYTES:
+        list_fields = [(k, v) for k, v in clipped.items() if isinstance(v, list) and v]
+        if not list_fields:
+            break
+        longest_key, longest_seq = max(list_fields, key=lambda kv: len(kv[1]))
+        new_len = max(1, len(longest_seq) // 2)
+        clipped[longest_key] = longest_seq[:new_len]
+        if new_len == 1 and _json_size(clipped) > TOOL_RESULT_BUDGET_BYTES:
+            # Even one-entry lists are too big; bail out.
+            break
+
+    clipped["_clipped"] = True
+    final_size = _json_size(clipped)
     logger.warning(
-        "tool=%s candidate=%s result %d bytes exceeds %d budget; clipping",
+        "tool=%s candidate=%s result %d bytes exceeds %d budget; clipped to %d",
         tool_name,
         candidate_uid,
-        size,
+        original_size,
         TOOL_RESULT_BUDGET_BYTES,
+        final_size,
     )
-    if isinstance(output, dict):
-        clipped: Dict[str, Any] = dict(output)
-        if "plex_extras" in clipped and isinstance(clipped["plex_extras"], dict):
-            extras = dict(clipped["plex_extras"])
-            extras.pop("summary", None)
-            clipped["plex_extras"] = extras
-        if isinstance(clipped.get("synopsis"), str):
-            clipped["synopsis"] = _clip(clipped["synopsis"], 200)
-        if isinstance(clipped.get("results"), list):
-            for entry in clipped["results"]:
-                if isinstance(entry, dict) and isinstance(entry.get("synopsis"), str):
-                    entry["synopsis"] = _clip(entry["synopsis"], 160)
-        clipped["_clipped"] = True
-        return clipped
-    return output
+    return clipped
 
 
 def _attrs_get_genres(attrs: Optional[Dict[str, Any]]) -> List[str]:
@@ -384,8 +415,11 @@ async def _t_get_history(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult
 
     plex_history: List[Dict[str, Any]] = []
     try:
+        # Plex's /status/sessions/history/all ignores ``maxResults`` and
+        # returns the full history — slice client-side or we drown in
+        # thousands of entries.
         plays = await aget_recently_played(limit)
-        for entry in plays:
+        for entry in plays[:limit]:
             plex_history.append(
                 {
                     "title": entry.get("title"),
@@ -400,7 +434,7 @@ async def _t_get_history(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult
     rec_history: List[Dict[str, Any]] = []
     try:
         records = MovieRecommendationRecord.recent_history(limit)
-        for r in records:
+        for r in list(records)[:limit]:
             rec_history.append(
                 {
                     "title": r.recommended_title,
