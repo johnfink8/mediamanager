@@ -171,7 +171,45 @@ def _build_get_movie(recorder: SimulationRecorder) -> Callable:
 def _build_find_movie(recorder: SimulationRecorder) -> Callable:
     def _fake(title: str, year: Optional[int] = None) -> Optional[Dict[str, Any]]:
         recorder.plex_lookups.append({"title": title, "year": year})
+        # Candidates from the indexer feed are always treated as not-yet-in-Plex.
         return None
+
+    return _fake
+
+
+def _seed_plex_index() -> Dict[str, Dict[str, Any]]:
+    """Build a (lower-cased title, year) -> plex-stub index from SEED_MOVIES.
+
+    Items without a ``plex`` key simulate a movie that's no longer in the
+    library (e.g. deleted), surfacing ``plex_status='missing_from_library'``
+    on details lookups for added items.
+    """
+    index: Dict[str, Dict[str, Any]] = {}
+    for movie in fx.SEED_MOVIES:
+        plex = movie.get("plex")
+        if not plex:
+            continue
+        title = str(movie["title"]).lower()
+        index[title] = dict(plex)
+        year = movie.get("attributes", {}).get("year")
+        if year is not None:
+            index[f"{title}|{year}"] = dict(plex)
+    return index
+
+
+def _build_seed_plex_details(
+    recorder: SimulationRecorder,
+) -> Callable[..., Optional[Dict[str, Any]]]:
+    index = _seed_plex_index()
+
+    def _fake(title: str, year: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        recorder.plex_lookups.append({"call": "details", "title": title, "year": year})
+        if not title:
+            return None
+        key_with_year = f"{title.lower()}|{year}" if year is not None else None
+        if key_with_year and key_with_year in index:
+            return dict(index[key_with_year])
+        return dict(index[title.lower()]) if title.lower() in index else None
 
     return _fake
 
@@ -467,6 +505,7 @@ def simulate_environment(
     fake_get_movie = _build_get_movie(recorder)
     fake_find_movie = _build_find_movie(recorder)
     fake_recently_played = _build_get_recently_played(recorder)
+    fake_seed_plex_details = _build_seed_plex_details(recorder)
     fake_upsert = _build_upsert(recorder)
     fake_create = _build_create(recorder)
 
@@ -509,8 +548,10 @@ def simulate_environment(
         patch.object(
             tool_registry, "aget_recently_played", _async_wrap(fake_recently_played)
         ),
+        # Seeded movies with a ``plex`` key surface as in_library; added items
+        # without one surface as missing_from_library.
         patch.object(
-            tool_registry, "aget_plex_details", _async_wrap(lambda *a, **kw: None)
+            tool_registry, "aget_plex_details", _async_wrap(fake_seed_plex_details)
         ),
         # Weaviate: read-only against _sim classes; do not touch real index.
         patch.object(weaviate_client, "_class_name", fake_class_name),

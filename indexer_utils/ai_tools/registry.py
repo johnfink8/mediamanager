@@ -224,10 +224,12 @@ async def _t_get_details(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult
             )
         attrs = row.attributes or {}
         ai = attrs.get("ai") or {}
+        added_flag = bool(row.added)
+        title_for_plex = row.title
         details: Dict[str, Any] = {
             "uid": row.uid,
             "title": row.title,
-            "added": bool(row.added),
+            "added": added_flag,
             "ignored": bool(row.ignore),
             "genres": _attrs_get_genres(attrs),
             "year": attrs.get("year"),
@@ -237,17 +239,43 @@ async def _t_get_details(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult
             "rating_value": attrs.get("rating_value"),
             "rating_votes": attrs.get("rating_votes"),
             "synopsis": ai.get("synopsis"),
+            # Plex signals — promoted to top level because view_count is one
+            # of the strongest indicators of real engagement.
+            "view_count": None,
+            "last_viewed_at": None,
+            "audience_rating": None,
+            "user_rating": None,
+            "plex_status": "unknown",
         }
 
-    if ctx.item_type == "mv" and row.title:
+    if ctx.item_type == "mv" and title_for_plex:
         year = attrs.get("year")
         try:
             year_int = int(year) if year is not None else None
         except (TypeError, ValueError):
             year_int = None
-        plex = await aget_plex_details(row.title, year_int)
+        plex = await aget_plex_details(title_for_plex, year_int)
         if plex:
-            details["plex"] = plex
+            details["view_count"] = plex.get("viewCount", 0)
+            details["last_viewed_at"] = plex.get("lastViewedAt")
+            details["audience_rating"] = plex.get("audienceRating")
+            details["user_rating"] = plex.get("userRating")
+            details["plex_status"] = "in_library"
+            extras = {
+                k: v
+                for k, v in plex.items()
+                if k
+                not in {"viewCount", "lastViewedAt", "audienceRating", "userRating"}
+            }
+            if extras:
+                details["plex_extras"] = extras
+        else:
+            # Item not currently in Plex. If the user previously added it,
+            # the most likely explanation is deletion — a strong negative
+            # signal. If they never added it, absence carries no signal.
+            details["plex_status"] = (
+                "missing_from_library" if added_flag else "not_in_library"
+            )
 
     return ToolResult(output=details)
 
@@ -380,8 +408,15 @@ def build_registry() -> Dict[str, Tool]:
             name="get_item_details",
             description=(
                 "Look up full details for one item by uid: synopsis, cast, "
-                "ratings, language, plus user-watch metrics (view count, last "
-                "viewed, audience rating) when available. Use after a search "
+                "ratings, language. For movies, also returns user-watch "
+                "metrics (view_count, last_viewed_at, audience_rating, "
+                "user_rating) and plex_status. plex_status values: "
+                "'in_library' (currently in Plex; check view_count for real "
+                "engagement — high count = strong like), "
+                "'missing_from_library' (added in DB but no longer in Plex; "
+                "likely deleted — strong negative signal), "
+                "'not_in_library' (never added; absence carries no signal), "
+                "'unknown' (not queried, e.g. shows). Use after a search "
                 "tool surfaces a uid you want to dig into."
             ),
             input_schema=GET_DETAILS_SCHEMA,

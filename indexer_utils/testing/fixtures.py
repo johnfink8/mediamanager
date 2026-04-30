@@ -111,7 +111,7 @@ RADARR_LOOKUPS: Dict[str, Dict[str, Any]] = {
 # ---------------------------------------------------------------------------
 
 SEED_MOVIES: List[Dict[str, Any]] = [
-    # --- ADDED (positive signal) ---
+    # --- ADDED + IN PLEX with engagement (strongest positive signal) ---
     {
         "uid": "tt8000001",
         "title": "Glacier Point",
@@ -130,6 +130,13 @@ SEED_MOVIES: List[Dict[str, Any]] = [
             "stakes during an Arctic ice-storm rescue when the survivors turn "
             "out to be carrying a stolen weapons cache."
         ),
+        "plex": {
+            "viewCount": 3,
+            "lastViewedAt": 1744675200,  # 2026-04-15
+            "audienceRating": 8.2,
+            "userRating": 9.0,
+            "addedAt": 1727740800,  # 2025-10-01
+        },
     },
     {
         "uid": "tt8000002",
@@ -149,6 +156,13 @@ SEED_MOVIES: List[Dict[str, Any]] = [
             "father's estate and confronts the truth behind a decades-old "
             "disappearance, told through quiet domestic detail."
         ),
+        "plex": {
+            "viewCount": 1,
+            "lastViewedAt": 1740787200,  # 2026-03-01
+            "audienceRating": 7.8,
+            "userRating": 8.0,
+            "addedAt": 1735689600,  # 2026-01-01
+        },
     },
     {
         "uid": "tt8000003",
@@ -168,7 +182,15 @@ SEED_MOVIES: List[Dict[str, Any]] = [
             "corporate conspiracy threatening their mining colony. Cerebral, "
             "character-led hard sci-fi with practical effects."
         ),
+        "plex": {
+            "viewCount": 2,
+            "lastViewedAt": 1746057600,  # 2026-05-01
+            "audienceRating": 8.0,
+            "userRating": 8.5,
+            "addedAt": 1740787200,
+        },
     },
+    # --- ADDED but NOT in Plex (likely deleted — strong negative signal) ---
     {
         "uid": "tt8000004",
         "title": "Bistro Galaxia",
@@ -186,6 +208,8 @@ SEED_MOVIES: List[Dict[str, Any]] = [
             "and accidentally ends up catering a galactic peace summit. Warm, "
             "low-stakes ensemble comedy."
         ),
+        # No `plex` field — simulates deletion: the user added the item at
+        # some point but it is no longer in Plex.
     },
     {
         "uid": "tt8000005",
@@ -203,6 +227,13 @@ SEED_MOVIES: List[Dict[str, Any]] = [
             "A reclusive cartographer realises the hand-drawn maps she sells "
             "to estate agents seem to predict tragedies before they occur."
         ),
+        "plex": {
+            "viewCount": 4,
+            "lastViewedAt": 1743033600,  # 2026-03-27
+            "audienceRating": 8.4,
+            "userRating": 9.5,
+            "addedAt": 1719792000,  # 2025-07-01
+        },
     },
     # --- IGNORED (negative signal) ---
     {
