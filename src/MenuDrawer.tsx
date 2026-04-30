@@ -1,153 +1,217 @@
-import React, { useState } from "react";
-import { styled, useTheme } from "@mui/material/styles";
-import Box from "@mui/material/Box";
-import Drawer from "@mui/material/Drawer";
-import CssBaseline from "@mui/material/CssBaseline";
-//eslint-disable-next-line
-import MuiAppBar, { AppBarProps as MuiAppBarProps } from "@mui/material/AppBar";
-import Toolbar from "@mui/material/Toolbar";
-import List from "@mui/material/List";
-import Typography from "@mui/material/Typography";
-import Divider from "@mui/material/Divider";
-import IconButton from "@mui/material/IconButton";
-import MenuIcon from "@mui/icons-material/Menu";
-import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
-import ChevronRightIcon from "@mui/icons-material/ChevronRight";
-import ListItem from "@mui/material/ListItem";
-import ListItemButton from "@mui/material/ListItemButton";
-import ListItemIcon from "@mui/material/ListItemIcon";
-import ListItemText from "@mui/material/ListItemText";
+import React from "react";
+import {
+    Navigate,
+    Route,
+    Routes,
+    useNavigate,
+    useLocation,
+} from "react-router-dom";
 import { menuItems } from "./util";
-const drawerWidth = 240;
 
-const Main = styled("main", { shouldForwardProp: (prop) => prop !== "open" })<{
-    open?: boolean;
-}>(({ theme, open }) => ({
-    flexGrow: 1,
-    padding: theme.spacing(3),
-    transition: theme.transitions.create("margin", {
-        easing: theme.transitions.easing.sharp,
-        duration: theme.transitions.duration.leavingScreen,
-    }),
-    marginLeft: `-${drawerWidth}px`,
-    ...(open && {
-        transition: theme.transitions.create("margin", {
-            easing: theme.transitions.easing.easeOut,
-            duration: theme.transitions.duration.enteringScreen,
-        }),
-        marginLeft: 0,
-    }),
-}));
+const slugToName: Record<string, string> = {
+    movies: "Movies",
+    tv: "TV",
+    history: "Item History",
+    feedback: "Check Feedback",
+};
 
-interface AppBarProps extends MuiAppBarProps {
-    open?: boolean;
-}
+const nameToSlug: Record<string, string> = Object.fromEntries(
+    Object.entries(slugToName).map(([k, v]) => [v, k])
+);
 
-const AppBar = styled(MuiAppBar, {
-    shouldForwardProp: (prop) => prop !== "open",
-})<AppBarProps>(({ theme, open }) => ({
-    transition: theme.transitions.create(["margin", "width"], {
-        easing: theme.transitions.easing.sharp,
-        duration: theme.transitions.duration.leavingScreen,
-    }),
-    ...(open && {
-        width: `calc(100% - ${drawerWidth}px)`,
-        marginLeft: `${drawerWidth}px`,
-        transition: theme.transitions.create(["margin", "width"], {
-            easing: theme.transitions.easing.easeOut,
-            duration: theme.transitions.duration.enteringScreen,
-        }),
-    }),
-}));
+const FilmIcon = () => (
+    <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={1.5}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+    >
+        <rect x="3" y="3" width="18" height="18" rx="2" />
+        <path d="M7 3v18M17 3v18M3 8h4M3 16h4M17 8h4M17 16h4M3 12h18" />
+    </svg>
+);
 
-const DrawerHeader = styled("div")(({ theme }) => ({
-    display: "flex",
-    alignItems: "center",
-    padding: theme.spacing(0, 1),
-    // necessary for content to be below app bar
-    ...theme.mixins.toolbar,
-    justifyContent: "flex-end",
-}));
+const TVIcon = () => (
+    <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={1.5}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+    >
+        <rect x="3" y="5" width="18" height="13" rx="2" />
+        <path d="M8 21h8M12 18v3" />
+    </svg>
+);
 
-export default function PersistentDrawerLeft() {
-    const theme = useTheme();
-    const [open, setOpen] = useState(true);
-    const [selectedComponent, setSelectedComponent] =
-        useState<string>("Movies");
+const HistoryIcon = () => (
+    <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={1.5}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+    >
+        <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+        <path d="M3 3v5h5" />
+        <path d="M12 7v5l3 2" />
+    </svg>
+);
 
-    const handleDrawerOpen = () => {
-        setOpen(true);
-    };
+const ToolIcon = () => (
+    <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={1.5}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+    >
+        <circle cx="12" cy="12" r="3" />
+        <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
+    </svg>
+);
 
-    const handleDrawerClose = () => {
-        setOpen(false);
-    };
+const navIconMap: Record<string, React.ReactElement> = {
+    Movies: <FilmIcon />,
+    TV: <TVIcon />,
+    "Item History": <HistoryIcon />,
+    "Check Feedback": <ToolIcon />,
+};
+
+const queueItems = ["Movies", "TV"];
+const archiveItems = ["Item History"];
+const toolItems = ["Check Feedback"];
+
+export default function AppShell() {
+    const navigate = useNavigate();
+    const { pathname } = useLocation();
+
+    const slug = pathname.replace(/^\//, "") || "movies";
+    const selectedComponent = slugToName[slug] ?? "Movies";
 
     return (
-        <Box sx={{ display: "flex" }}>
-            <CssBaseline />
-            <AppBar position="fixed" open={open}>
-                <Toolbar>
-                    <IconButton
-                        color="inherit"
-                        aria-label="open drawer"
-                        onClick={handleDrawerOpen}
-                        edge="start"
-                        sx={{ mr: 2, ...(open && { display: "none" }) }}
-                    >
-                        <MenuIcon />
-                    </IconButton>
-                    <Typography variant="h6" noWrap component="div">
-                        AutoDownloader
-                    </Typography>
-                </Toolbar>
-            </AppBar>
-            <Drawer
-                sx={{
-                    width: drawerWidth,
-                    flexShrink: 0,
-                    "& .MuiDrawer-paper": {
-                        width: drawerWidth,
-                        boxSizing: "border-box",
-                    },
-                }}
-                variant="persistent"
-                anchor="left"
-                open={open}
-            >
-                <DrawerHeader>
-                    <IconButton onClick={handleDrawerClose}>
-                        {theme.direction === "ltr" ? (
-                            <ChevronLeftIcon />
-                        ) : (
-                            <ChevronRightIcon />
-                        )}
-                    </IconButton>
-                </DrawerHeader>
-                <Divider />
-                <List>
-                    {menuItems.map((entry) => (
-                        <ListItem
-                            key={entry.name}
-                            disablePadding
-                            onClick={() => setSelectedComponent(entry.name)}
-                        >
-                            <ListItemButton>
-                                <ListItemIcon>{entry.icon}</ListItemIcon>
-                                <ListItemText primary={entry.name} />
-                            </ListItemButton>
-                        </ListItem>
-                    ))}
-                </List>
-            </Drawer>
-            <Main open={open}>
-                <DrawerHeader />
+        <div className="app">
+            <aside className="sidebar">
+                <div className="brand">
+                    <div className="brand-mark">A</div>
+                    <div className="brand-name">
+                        auto<em>·</em>dl
+                    </div>
+                </div>
+
+                <div className="nav-label">Review queue</div>
                 {menuItems
-                    .filter((e) => e.name === selectedComponent)
-                    .map((e) => (
-                        <e.component key="only-one" menuItem={e} />
+                    .filter((e) => queueItems.includes(e.name))
+                    .map((entry) => (
+                        <button
+                            key={entry.name}
+                            className={`nav-item${
+                                selectedComponent === entry.name
+                                    ? " active"
+                                    : ""
+                            }`}
+                            onClick={() =>
+                                navigate(`/${nameToSlug[entry.name]}`)
+                            }
+                        >
+                            <span className="nav-icon">
+                                {navIconMap[entry.name] ?? null}
+                            </span>
+                            <span>{entry.name}</span>
+                        </button>
                     ))}
-            </Main>
-        </Box>
+
+                <div className="nav-label">Archive</div>
+                {menuItems
+                    .filter((e) => archiveItems.includes(e.name))
+                    .map((entry) => (
+                        <button
+                            key={entry.name}
+                            className={`nav-item${
+                                selectedComponent === entry.name
+                                    ? " active"
+                                    : ""
+                            }`}
+                            onClick={() =>
+                                navigate(`/${nameToSlug[entry.name]}`)
+                            }
+                        >
+                            <span className="nav-icon">
+                                {navIconMap[entry.name] ?? null}
+                            </span>
+                            <span>{entry.name}</span>
+                        </button>
+                    ))}
+
+                <div className="nav-label">Tools</div>
+                {menuItems
+                    .filter((e) => toolItems.includes(e.name))
+                    .map((entry) => (
+                        <button
+                            key={entry.name}
+                            className={`nav-item${
+                                selectedComponent === entry.name
+                                    ? " active"
+                                    : ""
+                            }`}
+                            onClick={() =>
+                                navigate(`/${nameToSlug[entry.name]}`)
+                            }
+                        >
+                            <span className="nav-icon">
+                                {navIconMap[entry.name] ?? null}
+                            </span>
+                            <span>{entry.name}</span>
+                        </button>
+                    ))}
+
+                <div className="sidebar-footer">
+                    <span className="status-dot" />
+                    <div>
+                        <div style={{ color: "var(--fg-dim)", fontSize: 11.5 }}>
+                            AutoDownloader
+                        </div>
+                        <div
+                            style={{
+                                fontFamily: "JetBrains Mono, monospace",
+                                fontSize: 11,
+                                color: "var(--fg-mute)",
+                            }}
+                        >
+                            connected
+                        </div>
+                    </div>
+                </div>
+            </aside>
+
+            <main className="main">
+                <div className="topbar">
+                    <div className="crumbs">
+                        <span>AutoDownloader</span>
+                        <span>/</span>
+                        <strong>{selectedComponent}</strong>
+                    </div>
+                </div>
+
+                <Routes>
+                    <Route
+                        path="/"
+                        element={<Navigate to="/movies" replace />}
+                    />
+                    {menuItems.map((entry) => (
+                        <Route
+                            key={entry.name}
+                            path={`/${nameToSlug[entry.name]}`}
+                            element={<entry.component menuItem={entry} />}
+                        />
+                    ))}
+                </Routes>
+            </main>
+        </div>
     );
 }

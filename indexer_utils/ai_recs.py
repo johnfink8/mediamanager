@@ -29,7 +29,7 @@ logger.addHandler(logging.StreamHandler())
 
 BASE_DIR = Path(__file__).parent
 PROMPTS_DIR = BASE_DIR / "prompts"
-OPENAI_MODEL = config("OPENAI_MODEL", default="gpt-5.2")
+OPENAI_MODEL = config("OPENAI_MODEL", default="gpt-5.5")
 
 
 def load_prompt(filename: str) -> str:
