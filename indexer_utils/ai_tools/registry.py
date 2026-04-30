@@ -15,6 +15,7 @@ Tools are kept opaque to data source (the model doesn't know what's Plex vs
 Weaviate vs Radarr) so we can expand the surface without retraining prompts.
 """
 
+import json
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -25,6 +26,69 @@ from ..weaviate_client import asearch_by_synopsis
 from .base import TerminalToolResult, Tool, ToolContext, ToolResult
 
 logger = logging.getLogger(__name__)
+
+
+# Defensive caps. Every text field the model sees is clipped here so a single
+# bloated DB row (an old verbose synopsis, a runaway recommendation reason,
+# a 4 KB Plex summary, etc.) can't push the conversation past the model's
+# context limit.
+SYNOPSIS_CLIP = 480
+REASON_CLIP = 240
+PLEX_SUMMARY_CLIP = 320
+CAST_LIMIT = 10
+TOOL_RESULT_BUDGET_BYTES = 24_000
+
+
+def _clip(text: Optional[str], n: int) -> Optional[str]:
+    if text is None:
+        return None
+    s = str(text)
+    if len(s) <= n:
+        return s
+    return s[:n].rstrip() + " …"
+
+
+def _clip_list_of_strings(value: Any, n: int) -> Any:
+    if isinstance(value, list):
+        return [str(v) for v in value[:n]]
+    return value
+
+
+def _enforce_result_budget(
+    output: Any, tool_name: str, candidate_uid: Optional[str]
+) -> Any:
+    """If a tool's JSON output exceeds the budget, drop or further-clip the
+    heaviest fields and add a ``_clipped`` marker so the model knows context
+    was trimmed. Best-effort safety net for unexpectedly bloated DB rows.
+    """
+    try:
+        size = len(json.dumps(output, default=str))
+    except (TypeError, ValueError):
+        return output
+    if size <= TOOL_RESULT_BUDGET_BYTES:
+        return output
+    logger.warning(
+        "tool=%s candidate=%s result %d bytes exceeds %d budget; clipping",
+        tool_name,
+        candidate_uid,
+        size,
+        TOOL_RESULT_BUDGET_BYTES,
+    )
+    if isinstance(output, dict):
+        clipped: Dict[str, Any] = dict(output)
+        if "plex_extras" in clipped and isinstance(clipped["plex_extras"], dict):
+            extras = dict(clipped["plex_extras"])
+            extras.pop("summary", None)
+            clipped["plex_extras"] = extras
+        if isinstance(clipped.get("synopsis"), str):
+            clipped["synopsis"] = _clip(clipped["synopsis"], 200)
+        if isinstance(clipped.get("results"), list):
+            for entry in clipped["results"]:
+                if isinstance(entry, dict) and isinstance(entry.get("synopsis"), str):
+                    entry["synopsis"] = _clip(entry["synopsis"], 160)
+        clipped["_clipped"] = True
+        return clipped
+    return output
 
 
 def _attrs_get_genres(attrs: Optional[Dict[str, Any]]) -> List[str]:
@@ -126,7 +190,12 @@ async def _t_search_synopsis(input_: Dict[str, Any], ctx: ToolContext) -> ToolRe
                 }
             )
         results.append(item)
-    return ToolResult(output={"results": results})
+    output = {"results": results}
+    return ToolResult(
+        output=_enforce_result_budget(
+            output, "search_similar_by_synopsis", candidate_uid
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +253,10 @@ async def _t_search_genre(input_: Dict[str, Any], ctx: ToolContext) -> ToolResul
             matches.append(_summarize_item(row))
             if len(matches) >= limit:
                 break
-    return ToolResult(output={"results": matches, "count": len(matches)})
+    output = {"results": matches, "count": len(matches)}
+    return ToolResult(
+        output=_enforce_result_budget(output, "search_by_genre", candidate_uid)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -233,12 +305,12 @@ async def _t_get_details(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult
             "ignored": bool(row.ignore),
             "genres": _attrs_get_genres(attrs),
             "year": attrs.get("year"),
-            "cast": attrs.get("cast"),
+            "cast": _clip_list_of_strings(attrs.get("cast"), CAST_LIMIT),
             "network": attrs.get("network"),
             "language": attrs.get("originalLanguage"),
             "rating_value": attrs.get("rating_value"),
             "rating_votes": attrs.get("rating_votes"),
-            "synopsis": ai.get("synopsis"),
+            "synopsis": _clip(ai.get("synopsis"), SYNOPSIS_CLIP),
             # Plex signals — promoted to top level because view_count is one
             # of the strongest indicators of real engagement.
             "view_count": None,
@@ -267,6 +339,10 @@ async def _t_get_details(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult
                 if k
                 not in {"viewCount", "lastViewedAt", "audienceRating", "userRating"}
             }
+            # Plex summary fields can be a few KB each. Clip aggressively
+            # so a handful of get_item_details calls can't fill the context.
+            if "summary" in extras:
+                extras["summary"] = _clip(extras["summary"], PLEX_SUMMARY_CLIP)
             if extras:
                 details["plex_extras"] = extras
         else:
@@ -277,7 +353,11 @@ async def _t_get_details(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult
                 "missing_from_library" if added_flag else "not_in_library"
             )
 
-    return ToolResult(output=details)
+    return ToolResult(
+        output=_enforce_result_budget(
+            details, "get_item_details", ctx.candidate.get("uid")
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -326,17 +406,20 @@ async def _t_get_history(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult
                     "title": r.recommended_title,
                     "uid": r.recommended_imdb_id,
                     "preference": r.preference.value if r.preference else None,
-                    "reason": r.recommended_reason,
+                    "reason": _clip(r.recommended_reason, REASON_CLIP),
                 }
             )
     except Exception:
         logger.exception("get_user_history: recommendation history fetch failed")
 
+    output = {
+        "recently_watched": plex_history,
+        "recent_recommendations": rec_history,
+    }
     return ToolResult(
-        output={
-            "recently_watched": plex_history,
-            "recent_recommendations": rec_history,
-        }
+        output=_enforce_result_budget(
+            output, "get_user_history", ctx.candidate.get("uid")
+        )
     )
 
 
