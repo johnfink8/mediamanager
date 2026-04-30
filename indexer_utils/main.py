@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -82,13 +83,16 @@ async def index() -> HTMLResponse:
 
 @app.get("/check_new/")
 async def check_new() -> Dict[str, str]:
+    # check_movies / check_shows internally use asyncio.run, which would
+    # collide with the running FastAPI event loop. Offload to a worker
+    # thread so each invocation gets its own asyncio context.
     logger.info("Checking movies")
     for i in (1, 4, 30):
-        check_movies(i)
+        await asyncio.to_thread(check_movies, i)
     events.get("mv").set()
     logger.info("Checking shows")
     for i in (1, 4, 30):
-        check_shows(i)
+        await asyncio.to_thread(check_shows, i)
     logger.info("Shows done")
     events.get("tv").set()
     return {"status": "done"}
