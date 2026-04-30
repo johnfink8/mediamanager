@@ -1,8 +1,9 @@
+import asyncio
 import logging
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from time import sleep
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib import parse as urlparse
 from urllib.parse import urlencode
 
@@ -11,7 +12,7 @@ import tvdb_v4_official
 from decouple import config
 from imdb import Cinemagoer
 
-from .ai_recs import annotate_with_ai
+from .ai_recs import annotate_with_ai_async
 from .check_feedback import record_check_result
 from .filters import should_ignore_by_rules
 from .models import IgnoreItem
@@ -19,6 +20,8 @@ from .plex_utils import find_movie
 from .radarr_utils import get_movie, radarr_query, reset_movies
 from .sonarr_utils import query_series, reset_series
 from .tmdb import get_tv_cast, get_tv_id
+
+AI_ANNOTATE_CONCURRENCY = int(config("AI_ANNOTATE_CONCURRENCY", default=4))
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -61,9 +64,103 @@ def clean_radarr() -> None:
             radarr_query("movie", method="put", **movie)
 
 
+async def _afinish_movie_candidate(
+    candidate: Dict[str, Any], semaphore: asyncio.Semaphore
+) -> Tuple[str, Optional[bool]]:
+    """Run AI annotation, Plex check, and DB write for one candidate.
+
+    Returns ``(note, ignored)`` for the caller's check-result log.
+    """
+    imdb_id: str = candidate["imdb_id"]
+    normalized_title: str = candidate["normalized_title"]
+    attrs: Dict[str, Any] = candidate["attrs"]
+    result: Dict[str, Any] = candidate["result"]
+    poster = result.get("remotePoster")
+    annotation_title = result.get("title", normalized_title)
+
+    async with semaphore:
+        enriched_attrs = await annotate_with_ai_async(
+            "mv", imdb_id, annotation_title, attrs
+        )
+
+    note = "Flagged for review"
+    try:
+        plex_movie = await asyncio.to_thread(
+            find_movie, result["title"], result["year"]
+        )
+    except Exception:
+        logger.exception(
+            'Exception getting plex info for "%s" "%s"',
+            result.get("year"),
+            result.get("title"),
+        )
+        plex_movie = None
+        plex_lookup_failed = True
+    else:
+        plex_lookup_failed = False
+
+    if plex_movie:
+        note = f"{note} (already in Plex)"
+        return note, False
+
+    logger.info("New movie found %s", normalized_title)
+
+    def _create_and_attach() -> None:
+        created = IgnoreItem.create(
+            title=normalized_title,
+            uid=imdb_id,
+            ignore=False,
+            shown=True,
+            item_type="mv",
+            attributes=enriched_attrs,
+            poster_url=poster,
+        )
+        if not plex_lookup_failed:
+            vec = enriched_attrs.pop("_synopsis_vector_tmp", None)
+            if vec is not None:
+                created.synopsis_vector = vec
+                created.save()
+
+    await asyncio.to_thread(_create_and_attach)
+    return note, False
+
+
+async def _arun_movie_candidates(
+    pending: List[Dict[str, Any]],
+) -> List[Tuple[str, str, Optional[bool]]]:
+    """Run all pending movie candidates in parallel.
+
+    Returns a list of ``(imdb_id, note, ignored)`` tuples for the caller to
+    pipe into ``add_checked_item``.
+    """
+    if not pending:
+        return []
+    semaphore = asyncio.Semaphore(AI_ANNOTATE_CONCURRENCY)
+
+    async def wrap(c: Dict[str, Any]) -> Tuple[str, str, Optional[bool]]:
+        try:
+            note, ignored = await _afinish_movie_candidate(c, semaphore)
+            return c["imdb_id"], note, ignored
+        except Exception:
+            logger.exception("AI annotation failed for %s", c["imdb_id"])
+            return c["imdb_id"], "AI annotation failed", None
+
+    logger.info(
+        "Running async AI annotation over %d movie candidates (concurrency=%d)",
+        len(pending),
+        AI_ANNOTATE_CONCURRENCY,
+    )
+    try:
+        return await asyncio.gather(*(wrap(c) for c in pending))
+    finally:
+        from .ai_recs import aclose_openai_clients
+
+        await aclose_openai_clients()
+
+
 def check_movies(days: int) -> None:
     started_at = datetime.utcnow()
-    checked_movies = []
+    checked_movies: List[Dict[str, Any]] = []
     success = False
     summary = "Movie check did not complete"
     error_details = None
@@ -88,9 +185,10 @@ def check_movies(days: int) -> None:
             sleep(0.2)
     else:
         raise Exception("SSL attempts exhausted")
-    movies = []
-    checked_movie_ids = set()
-    already = []
+    movies: List[Dict[str, Any]] = []
+    checked_movie_ids: Set[str] = set()
+    already: List[str] = []
+    pending_async: List[Dict[str, Any]] = []
 
     def already_have(imdb_id: str) -> bool:
         for movie in movies:
@@ -101,8 +199,27 @@ def check_movies(days: int) -> None:
     def already_searched(imdb_id: str) -> bool:
         return imdb_id in already
 
+    def add_checked_item(
+        imdb_id: str,
+        normalized_title: str,
+        note: str,
+        *,
+        ignored: Optional[bool] = None,
+    ) -> None:
+        if imdb_id in checked_movie_ids:
+            return
+        checked_movie_ids.add(imdb_id)
+        checked_movies.append(
+            {
+                "title": normalized_title,
+                "uid": imdb_id,
+                "ignored": ignored,
+                "note": note,
+            }
+        )
+
     reset_movies()
-    seen = set()
+    seen: Set[str] = set()
     try:
         for item in root.iter("item"):
             title = item.find("title").text  # type: ignore
@@ -114,56 +231,60 @@ def check_movies(days: int) -> None:
                 logger.info("IMDB not found for %s", title)
                 continue
             if imdb in seen:
-                # we get a ton of duplicates now
                 continue
             seen.add(imdb)
             imdb_id = "tt%07i" % int(imdb)
 
-            def add_checked_item(note: str, *, ignored: Optional[bool] = None) -> None:
-                if imdb_id in checked_movie_ids:
-                    return
-                checked_movie_ids.add(imdb_id)
-                checked_movies.append(
-                    {
-                        "title": normalized_title,
-                        "uid": imdb_id,
-                        "ignored": ignored,
-                        "note": note,
-                    }
-                )
-
             if IgnoreItem.exists("mv", imdb_id):
-                add_checked_item("Already recorded in ignore list")
+                add_checked_item(
+                    imdb_id, normalized_title, "Already recorded in ignore list"
+                )
                 continue
             if already_have(imdb_id):
                 logger.info("Ignore movie already have %s", title)
-                add_checked_item("Duplicate in current feed")
+                add_checked_item(imdb_id, normalized_title, "Duplicate in current feed")
                 continue
             try:
                 radarr_movie = get_movie(imdb_id)
                 if radarr_movie:
                     logger.info("Ignore movie in radarr %s", title)
-                    add_checked_item("Already present in Radarr")
+                    add_checked_item(
+                        imdb_id, normalized_title, "Already present in Radarr"
+                    )
                     continue
             except KeyError:
                 pass
             if already_searched(imdb_id):
-                add_checked_item("Already queried during this run")
+                add_checked_item(
+                    imdb_id, normalized_title, "Already queried during this run"
+                )
                 continue
             already.append(imdb_id)
             try:
                 result = radarr_query("movie/lookup", term="imdb:" + imdb_id)[0]
             except ValueError:
                 logger.exception("Unable to search %s", title)
-                add_checked_item("Radarr lookup failed", ignored=None)
+                add_checked_item(
+                    imdb_id, normalized_title, "Radarr lookup failed", ignored=None
+                )
                 continue
             except IndexError:
                 logger.exception("Unable to search %s", title)
-                add_checked_item("No search results from Radarr", ignored=None)
+                add_checked_item(
+                    imdb_id,
+                    normalized_title,
+                    "No search results from Radarr",
+                    ignored=None,
+                )
                 continue
             except KeyError:
-                logger.exception("Unable to search", title)
-                add_checked_item("Malformed search results from Radarr", ignored=None)
+                logger.exception("Unable to search %s", title)
+                add_checked_item(
+                    imdb_id,
+                    normalized_title,
+                    "Malformed search results from Radarr",
+                    ignored=None,
+                )
                 continue
             add_attr(attrs, result, "originalLanguage")
             add_attr(attrs, result, "status")
@@ -172,58 +293,51 @@ def check_movies(days: int) -> None:
             ratings = result.get("ratings")
             if ratings:
                 attrs.update(get_ratings_attrs(ratings))
-            # Use filter logic
+
             temp_item = IgnoreItem(item_type="mv", uid=imdb_id, attributes=attrs)
             ignore = should_ignore_by_rules(temp_item)
             poster = result.get("remotePoster")
-            vec = None
+
             if ignore:
-                enriched_attrs = attrs
-                note = "Ignored by filter rules"
-            else:
-                enriched_attrs = annotate_with_ai(
-                    "mv", imdb_id, result.get("title", normalized_title), attrs
-                )
-                note = "Flagged for review"
-            try:
-                plex_movie = find_movie(result["title"], result["year"])
-            except Exception:
-                logger.exception(
-                    'Exception getting plex info for "%s" "%s"',
-                    result["year"],
-                    result["title"],
-                )
-                logger.info("New movie found %s", normalized_title)
-                created = IgnoreItem.create(
+                # Filter rules short-circuit AI; create the ignore record now.
+                IgnoreItem.create(
                     title=normalized_title,
                     uid=imdb_id,
-                    ignore=ignore,
-                    shown=not ignore,
+                    ignore=True,
+                    shown=False,
                     item_type="mv",
-                    attributes=enriched_attrs,
+                    attributes=attrs,
                     poster_url=poster,
                 )
-            else:
-                if not plex_movie:
-                    logger.info("New movie found %s", normalized_title)
-                    created = IgnoreItem.create(
-                        title=normalized_title,
-                        uid=imdb_id,
-                        ignore=ignore,
-                        shown=not ignore,
-                        item_type="mv",
-                        attributes=enriched_attrs,
-                        poster_url=poster,
-                    )
-                    vec = enriched_attrs.pop("_synopsis_vector_tmp", None)
-                    if vec is not None:
-                        created.synopsis_vector = vec
-                        created.save()
-                else:
-                    created = None
-                    note = f"{note} (already in Plex)"
+                add_checked_item(
+                    imdb_id,
+                    normalized_title,
+                    "Ignored by filter rules",
+                    ignored=True,
+                )
+                continue
 
-            add_checked_item(note, ignored=bool(ignore))
+            pending_async.append(
+                {
+                    "imdb_id": imdb_id,
+                    "normalized_title": normalized_title,
+                    "attrs": attrs,
+                    "result": result,
+                }
+            )
+
+        async_results = asyncio.run(_arun_movie_candidates(pending_async))
+        for imdb_id, note, ignored in async_results:
+            normalized_title = next(
+                (
+                    c["normalized_title"]
+                    for c in pending_async
+                    if c["imdb_id"] == imdb_id
+                ),
+                imdb_id,
+            )
+            add_checked_item(imdb_id, normalized_title, note, ignored=ignored)
+
         summary = (
             f"Checked {len(checked_movies)} movie candidates from the last {days} days"
         )
@@ -330,9 +444,61 @@ def add_attr(attrs: Dict[str, Any], show: Dict[str, Any], key: str) -> None:
         attrs[key] = [str(val)]
 
 
+async def _afinish_show_candidate(
+    candidate: Dict[str, Any], semaphore: asyncio.Semaphore
+) -> Tuple[str, Optional[bool]]:
+    tvdb: str = candidate["tvdb"]
+    title: str = candidate["title"]
+    attrs: Dict[str, Any] = candidate["attrs"]
+
+    async with semaphore:
+        enriched_attrs = await annotate_with_ai_async("tv", tvdb, title, attrs)
+
+    def _create() -> None:
+        IgnoreItem.create(
+            title=title,
+            uid=tvdb,
+            ignore=False,
+            shown=True,
+            item_type="tv",
+            attributes=enriched_attrs,
+        )
+
+    await asyncio.to_thread(_create)
+    return "Flagged for review", False
+
+
+async def _arun_show_candidates(
+    pending: List[Dict[str, Any]],
+) -> List[Tuple[str, str, Optional[bool]]]:
+    if not pending:
+        return []
+    semaphore = asyncio.Semaphore(AI_ANNOTATE_CONCURRENCY)
+
+    async def wrap(c: Dict[str, Any]) -> Tuple[str, str, Optional[bool]]:
+        try:
+            note, ignored = await _afinish_show_candidate(c, semaphore)
+            return c["tvdb"], note, ignored
+        except Exception:
+            logger.exception("AI annotation failed for %s", c["tvdb"])
+            return c["tvdb"], "AI annotation failed", None
+
+    logger.info(
+        "Running async AI annotation over %d show candidates (concurrency=%d)",
+        len(pending),
+        AI_ANNOTATE_CONCURRENCY,
+    )
+    try:
+        return await asyncio.gather(*(wrap(c) for c in pending))
+    finally:
+        from .ai_recs import aclose_openai_clients
+
+        await aclose_openai_clients()
+
+
 def check_shows(days: int) -> None:
     started_at = datetime.utcnow()
-    checked_shows = []
+    checked_shows: List[Dict[str, Any]] = []
     success = False
     summary = "Show check did not complete"
     error_details = None
@@ -354,8 +520,9 @@ def check_shows(days: int) -> None:
             sleep(0.2)
     else:
         raise Exception("SSL attempts exhausted")
-    shows = []
-    checked_show_ids = set()
+    shows: List[Dict[str, Any]] = []
+    checked_show_ids: Set[str] = set()
+    pending_async: List[Dict[str, Any]] = []
 
     def already_have(tvdb: str) -> bool:
         for show in shows:
@@ -363,8 +530,23 @@ def check_shows(days: int) -> None:
                 return True
         return False
 
+    def add_checked_show(
+        tvdb: str, title: Optional[str], note: str, *, ignored: Optional[bool] = None
+    ) -> None:
+        if tvdb in checked_show_ids:
+            return
+        checked_show_ids.add(tvdb)
+        checked_shows.append(
+            {
+                "title": title,
+                "uid": tvdb,
+                "ignored": ignored,
+                "note": note,
+            }
+        )
+
     reset_series()
-    seen = set()
+    seen: Set[str] = set()
 
     try:
         for item in root.iter("item"):
@@ -374,35 +556,21 @@ def check_shows(days: int) -> None:
                 logger.error("no tvdb found for %s", title)
                 continue
             if tvdb in seen:
-                # cut down on log duplicates and api calls
                 continue
             seen.add(tvdb)
 
-            def add_checked_show(note: str, *, ignored: Optional[bool] = None) -> None:
-                if tvdb in checked_show_ids:
-                    return
-                checked_show_ids.add(tvdb)
-                checked_shows.append(
-                    {
-                        "title": title,
-                        "uid": tvdb,
-                        "ignored": ignored,
-                        "note": note,
-                    }
-                )
-
             if IgnoreItem.exists("tv", tvdb):
-                add_checked_show("Already recorded in ignore list")
+                add_checked_show(tvdb, title, "Already recorded in ignore list")
                 continue
             if already_have(tvdb):
                 logger.debug("already have %s", title)
-                add_checked_show("Duplicate in current feed")
+                add_checked_show(tvdb, title, "Duplicate in current feed")
                 continue
             try:
                 show = query_series(tvdb)
             except IndexError:
                 logger.error("Unable to query series %s %s", tvdb, title)
-                add_checked_show("Series query failed", ignored=None)
+                add_checked_show(tvdb, title, "Series query failed", ignored=None)
                 continue
             attrs = get_attrs(item)
             attrs["year"] = show["year"]  # type: ignore
@@ -422,20 +590,24 @@ def check_shows(days: int) -> None:
             temp_item = IgnoreItem(item_type="tv", uid=tvdb, attributes=attrs)
             ignore = should_ignore_by_rules(temp_item)
             if ignore:
-                enriched_attrs = attrs
-                note = "Ignored by filter rules"
-            else:
-                enriched_attrs = annotate_with_ai("tv", tvdb, title, attrs)
-                note = "Flagged for review"
-            IgnoreItem.create(
-                title=title,
-                uid=tvdb,
-                ignore=ignore,
-                shown=not ignore,
-                item_type="tv",
-                attributes=enriched_attrs,
-            )
-            add_checked_show(note, ignored=bool(ignore))
+                IgnoreItem.create(
+                    title=title,
+                    uid=tvdb,
+                    ignore=True,
+                    shown=False,
+                    item_type="tv",
+                    attributes=attrs,
+                )
+                add_checked_show(tvdb, title, "Ignored by filter rules", ignored=True)
+                continue
+
+            pending_async.append({"tvdb": tvdb, "title": title, "attrs": attrs})
+
+        async_results = asyncio.run(_arun_show_candidates(pending_async))
+        for tvdb, note, ignored in async_results:
+            title = next((c["title"] for c in pending_async if c["tvdb"] == tvdb), tvdb)
+            add_checked_show(tvdb, title, note, ignored=ignored)
+
         summary = (
             f"Checked {len(checked_shows)} show candidates from the last {days} days"
         )

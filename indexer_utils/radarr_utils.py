@@ -1,3 +1,4 @@
+import asyncio
 import json
 from typing import Any, Dict, List, Optional, cast
 
@@ -31,6 +32,14 @@ def radarr_query(cmd: str, method: str = "get", **kwargs) -> List[Dict[str, Any]
 
 
 MOVIES: List[Dict[str, object]] = []
+_movies_lock: Optional[asyncio.Lock] = None
+
+
+def _get_movies_lock() -> asyncio.Lock:
+    global _movies_lock
+    if _movies_lock is None:
+        _movies_lock = asyncio.Lock()
+    return _movies_lock
 
 
 def reset_movies() -> None:
@@ -47,3 +56,20 @@ def get_movie(imdbId: str) -> Optional[Dict[str, object]]:
         if movie["imdbId"] == imdbId:
             return movie
     return None
+
+
+async def aget_movie(imdbId: str) -> Optional[Dict[str, object]]:
+    async with _get_movies_lock():
+        if not MOVIES:
+            fetched = await asyncio.to_thread(radarr_query, "movie")
+            MOVIES.extend(cast(List[Dict[str, object]], fetched))
+    for movie in MOVIES:
+        if movie.get("imdbId") == imdbId:
+            return movie
+    return None
+
+
+async def aradarr_query(
+    cmd: str, method: str = "get", **kwargs: Any
+) -> List[Dict[str, Any]]:
+    return await asyncio.to_thread(radarr_query, cmd, method, **kwargs)

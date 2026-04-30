@@ -1,3 +1,5 @@
+import asyncio
+from typing import Any, Dict, List
 from uuid import uuid4
 
 import weaviate
@@ -7,6 +9,10 @@ from weaviate.classes.query import MetadataQuery
 
 def _request_headers() -> dict:
     return {"X-OpenAI-Api-Key": config("OPENAI_API_KEY")}
+
+
+def _class_name(item_type: str) -> str:
+    return "IgnoreItemMV" if item_type == "mv" else "IgnoreItemTV"
 
 
 def get_weaviate_client():
@@ -19,10 +25,8 @@ def get_weaviate_client():
 
 def get_nearest_neighbors(uuid: str, k: int, item_type: str):
     client = get_weaviate_client()
-    class_name = "IgnoreItemMV" if item_type == "mv" else "IgnoreItemTV"
-    coll = client.collections.get(class_name)
+    coll = client.collections.get(_class_name(item_type))
 
-    # Fetch the vector of the seed item from Weaviate
     items = coll.query.near_object(
         uuid,
         limit=k,
@@ -40,9 +44,39 @@ def get_nearest_neighbors(uuid: str, k: int, item_type: str):
     return item_distances
 
 
+def search_by_synopsis(query_text: str, k: int, item_type: str) -> List[Dict[str, Any]]:
+    client = get_weaviate_client()
+    coll = client.collections.get(_class_name(item_type))
+    items = coll.query.near_text(
+        query=query_text,
+        limit=k,
+        return_metadata=MetadataQuery(distance=True),
+    )
+    results = [
+        {
+            "uid": obj.properties.get("uid"),
+            "title": obj.properties.get("title"),
+            "synopsis": obj.properties.get("synopsis"),
+            "distance": obj.metadata.distance,
+        }
+        for obj in items.objects
+    ]
+    client.close()
+    return results
+
+
+async def asearch_by_synopsis(
+    query_text: str, k: int, item_type: str
+) -> List[Dict[str, Any]]:
+    return await asyncio.to_thread(search_by_synopsis, query_text, k, item_type)
+
+
+async def aget_nearest_neighbors(uuid: str, k: int, item_type: str):
+    return await asyncio.to_thread(get_nearest_neighbors, uuid, k, item_type)
+
+
 def upsert_item_attrs(attrs: dict, item_type: str, uid, title, synopsis):
     client = get_weaviate_client()
-    class_name = "IgnoreItemMV" if item_type == "mv" else "IgnoreItemTV"
     ai = attrs.get("ai", {})
     weav_uuid = ai.get("weaviate_uuid")
     if not weav_uuid:
@@ -55,10 +89,16 @@ def upsert_item_attrs(attrs: dict, item_type: str, uid, title, synopsis):
         "type": item_type,
         "synopsis": synopsis,
     }
-    coll = client.collections.get(class_name)
+    coll = client.collections.get(_class_name(item_type))
     if coll.data.exists(uuid=weav_uuid):
         coll.data.update(properties=data_obj, uuid=weav_uuid)
     else:
         coll.data.insert(properties=data_obj, uuid=weav_uuid)
     client.close()
     return attrs
+
+
+async def aupsert_item_attrs(attrs: dict, item_type: str, uid, title, synopsis):
+    return await asyncio.to_thread(
+        upsert_item_attrs, attrs, item_type, uid, title, synopsis
+    )
