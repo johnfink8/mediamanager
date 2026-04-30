@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any, Dict, List, Optional, Set
 from urllib.parse import quote_plus
 
@@ -56,6 +57,45 @@ def _extract_imdb_from_guid(guid_value: str) -> Optional[str]:
     imdb_id = imdb_id.split("?")[0]
     imdb_id = imdb_id.strip()
     return imdb_id or None
+
+
+_PLEX_DETAIL_FIELDS = (
+    "viewCount",
+    "lastViewedAt",
+    "audienceRating",
+    "rating",
+    "userRating",
+    "addedAt",
+    "summary",
+    "duration",
+    "contentRating",
+)
+
+
+def get_plex_details(
+    title: str, year: Optional[int] = None
+) -> Optional[Dict[str, Any]]:
+    """Look up a movie in Plex and return a slim dict with view/rating fields.
+
+    Returns None when not found or on error.
+    """
+    try:
+        movie = find_movie(title, year)
+    except Exception:
+        return None
+    if not movie:
+        return None
+    return {key: movie.get(key) for key in _PLEX_DETAIL_FIELDS if key in movie}
+
+
+async def aget_plex_details(
+    title: str, year: Optional[int] = None
+) -> Optional[Dict[str, Any]]:
+    return await asyncio.to_thread(get_plex_details, title, year)
+
+
+async def aget_recently_played(limit: int = 40) -> List[Dict[str, Any]]:
+    return await asyncio.to_thread(get_recently_played, limit)
 
 
 def get_recently_played_imdb_ids(limit: int = 40) -> Set[str]:

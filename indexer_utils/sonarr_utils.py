@@ -1,5 +1,6 @@
+import asyncio
 import json
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 from decouple import config
@@ -23,6 +24,14 @@ def sn_query(cmd: str, post: bool = False, **kwargs: object) -> object:
 
 
 SERIES: List[object] = []
+_series_lock: Optional[asyncio.Lock] = None
+
+
+def _get_series_lock() -> asyncio.Lock:
+    global _series_lock
+    if _series_lock is None:
+        _series_lock = asyncio.Lock()
+    return _series_lock
 
 
 def reset_series() -> None:
@@ -39,8 +48,28 @@ def get_series(tvdb_id: int) -> Optional[Dict[str, object]]:
     return None
 
 
+async def aget_series(tvdb_id: int) -> Optional[Dict[str, object]]:
+    tvdb_id = int(tvdb_id)
+    async with _get_series_lock():
+        if not SERIES:
+            fetched = await asyncio.to_thread(sn_query, "series")
+            SERIES.extend(fetched)
+    for series in SERIES:
+        if series.get("tvdbId") == tvdb_id:
+            return series
+    return None
+
+
 def query_series(tvdb: str) -> Dict[str, object]:
     return sn_query("series/lookup", term="tvdb:" + tvdb)[0]
+
+
+async def aquery_series(tvdb: str) -> Dict[str, object]:
+    return await asyncio.to_thread(query_series, tvdb)
+
+
+async def asn_query(cmd: str, post: bool = False, **kwargs: Any) -> object:
+    return await asyncio.to_thread(sn_query, cmd, post, **kwargs)
 
 
 def add_series(tvdb: str, all_seasons: bool = True) -> None:
