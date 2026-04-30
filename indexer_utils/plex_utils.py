@@ -31,7 +31,13 @@ def find_movie(title: str, year: Optional[int] = None) -> Optional[Dict[str, Any
 
 
 def get_recently_played(limit: int = 40) -> List[Dict[str, Any]]:
-    """Fetch recent play history for movies from Plex."""
+    """Fetch recent play history for movies from Plex.
+
+    Plex's ``/status/sessions/history/all`` endpoint ignores ``maxResults``
+    and returns the entire history (potentially thousands of entries) in
+    no guaranteed order. Sort by ``viewedAt`` descending and slice
+    client-side so callers actually get the most-recent ``limit`` plays.
+    """
 
     url = config("PLEX_URL")
     headers = _plex_headers()
@@ -43,7 +49,16 @@ def get_recently_played(limit: int = 40) -> List[Dict[str, Any]]:
     )
     response.raise_for_status()
     payload = response.json()
-    return payload.get("MediaContainer", {}).get("Metadata", []) or []
+    metadata = payload.get("MediaContainer", {}).get("Metadata", []) or []
+
+    def _viewed_at(entry: Dict[str, Any]) -> int:
+        try:
+            return int(entry.get("viewedAt") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    metadata.sort(key=_viewed_at, reverse=True)
+    return metadata[:limit]
 
 
 def _extract_imdb_from_guid(guid_value: str) -> Optional[str]:
