@@ -1,10 +1,11 @@
+import asyncio
 import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from decouple import config
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
 
 from indexer_utils.tmdb import (
     get_movie_cast,
@@ -14,14 +15,11 @@ from indexer_utils.tmdb import (
     get_tv_id,
 )
 
+from .ai_tools import REGISTRY, AgentRunResult, ToolContext, run_agent
 from .models import IgnoreItem
 from .radarr_utils import radarr_query
-from .session import db_session
 from .sonarr_utils import query_series
-from .weaviate_client import (
-    get_nearest_neighbors,
-    upsert_item_attrs,
-)
+from .weaviate_client import upsert_item_attrs
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -30,6 +28,9 @@ logger.addHandler(logging.StreamHandler())
 BASE_DIR = Path(__file__).parent
 PROMPTS_DIR = BASE_DIR / "prompts"
 OPENAI_MODEL = config("OPENAI_MODEL", default="gpt-5.5")
+
+AGENT_MAX_TURNS = int(config("AI_AGENT_MAX_TURNS", default=6))
+AGENT_MAX_TOOL_CALLS = int(config("AI_AGENT_MAX_TOOL_CALLS", default=16))
 
 
 def load_prompt(filename: str) -> str:
@@ -57,24 +58,8 @@ RECOMMENDATION_PROMPTS = {
     "tv": load_prompt("tv_recommendation.md"),
 }
 
-N_NEIGHBORS = 40
-_openai_client = None
-
-SIMILAR_ATTRIBUTE_KEYS = [
-    "genres",
-    "director",
-    "network",
-    "rating_value",
-    "rating_votes",
-    "imdbuser_value",
-    "imdbuser_votes",
-    "tmdbuser_value",
-    "tmdbuser_votes",
-    "originalLanguage",
-    "rottenTomatoesuser_value",
-    "rottenTomatoesuser_votes",
-    "cast",
-]
+_openai_client: Optional[OpenAI] = None
+_async_openai_client: Optional[AsyncOpenAI] = None
 
 
 def _to_list_of_str(value: Any) -> List[str]:
@@ -127,12 +112,10 @@ def ensure_movie_release_count(
     return attrs, release_count, True
 
 
-def get_openai_client():
+def get_openai_client() -> Optional[OpenAI]:
     global _openai_client
     if _openai_client is not None:
         return _openai_client
-    if OpenAI is None:
-        return None
     try:
         api_key = config("OPENAI_API_KEY")
         _openai_client = OpenAI(api_key=api_key)
@@ -140,6 +123,39 @@ def get_openai_client():
     except Exception:
         logger.exception("Failed to initialize OpenAI client")
         return None
+
+
+def get_async_openai_client() -> Optional[AsyncOpenAI]:
+    global _async_openai_client
+    if _async_openai_client is not None:
+        return _async_openai_client
+    try:
+        api_key = config("OPENAI_API_KEY")
+        _async_openai_client = AsyncOpenAI(api_key=api_key)
+        return _async_openai_client
+    except Exception:
+        logger.exception("Failed to initialize async OpenAI client")
+        return None
+
+
+async def aclose_openai_clients() -> None:
+    """Close cached OpenAI clients. Call from inside the asyncio loop that
+    opened the async client so its httpx transports close cleanly."""
+    global _async_openai_client, _openai_client
+    if _async_openai_client is not None:
+        try:
+            await _async_openai_client.close()
+        except Exception:
+            logger.exception("failed to close AsyncOpenAI client")
+        finally:
+            _async_openai_client = None
+    if _openai_client is not None:
+        try:
+            _openai_client.close()
+        except Exception:
+            logger.exception("failed to close OpenAI client")
+        finally:
+            _openai_client = None
 
 
 def call_openai_json(
@@ -171,6 +187,12 @@ def call_openai_json(
             "message": str(exc),
             "stage": "request",
         }
+
+
+async def acall_openai_json(
+    system_prompt: str, user_prompt: str
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    return await asyncio.to_thread(call_openai_json, system_prompt, user_prompt)
 
 
 def generate_synopsis_for_candidate(
@@ -213,6 +235,19 @@ def generate_synopsis_for_candidate(
             "step": "synopsis",
         }
     return synopsis, synopsis_failure
+
+
+async def agenerate_synopsis_for_candidate(
+    title: str,
+    year: Optional[int],
+    genres: List[str],
+    language: List[str],
+    item_type: str,
+    cast: Optional[List[str]] = None,
+) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    return await asyncio.to_thread(
+        generate_synopsis_for_candidate, title, year, genres, language, item_type, cast
+    )
 
 
 def _add_attr(attrs: Dict[str, Any], show: Dict[str, Any], key: str) -> None:
@@ -263,84 +298,17 @@ def refresh_visible_item_attributes(item: IgnoreItem) -> Dict[str, Any]:
     return attrs
 
 
-def annotate_with_ai(
-    item_type: str, uid: str, title: str, attrs: Dict[str, Any]
+def _build_user_payload(
+    item_type: str,
+    uid: str,
+    title: str,
+    attrs: Dict[str, Any],
+    candidate_synopsis: Optional[str],
 ) -> Dict[str, Any]:
-    # Basic item facts for the prompt / candidate context
-    logger.info(f"Annotating {item_type} {uid} {title}")
     genres = _to_list_of_str(attrs.get("genres"))
     lang = _to_list_of_str(attrs.get("originalLanguage"))
     year = _year_from_attrs(attrs)
-    if item_type == "mv":
-        attrs["tmdb_id"] = attrs.get("tmdb_id") or get_movie_id(uid)
-        if attrs["tmdb_id"]:
-            attrs["cast"] = attrs.get("cast") or get_movie_cast(attrs["tmdb_id"], n=10)
-        attrs, _, _ = ensure_movie_release_count(attrs, uid)
-    elif item_type == "tv":
-        attrs["tmdb_id"] = attrs.get("tmdb_id") or get_tv_id(uid)
-        if attrs["tmdb_id"]:
-            attrs["cast"] = attrs.get("cast") or get_tv_cast(attrs["tmdb_id"], n=10)
-
-    # Generate synopsis and embedding first
-    candidate_synopsis, synopsis_failure = generate_synopsis_for_candidate(
-        title, year, genres, lang, item_type, attrs.get("cast")
-    )
-    attrs = upsert_item_attrs(attrs, item_type, uid, title, candidate_synopsis)
-
-    # Choose similar by vector if possible, otherwise fallback to attribute similarity
-    similar_defs = get_nearest_neighbors(
-        attrs.get("ai", {}).get("weaviate_uuid"), N_NEIGHBORS, item_type
-    )
-    session = db_session()
-    similar_pairs = [
-        (
-            session.query(IgnoreItem).filter(IgnoreItem.uid == item_def["uid"]).first(),
-            item_def["distance"],
-        )
-        for item_def in similar_defs.values()
-    ]
-
-    similar_summary = []
-    for s, distance in similar_pairs:
-        if s is None:
-            continue
-        if s.uid == uid:
-            continue
-        item_attrs = s.attributes or {}
-        attributes = {
-            k: v for k in SIMILAR_ATTRIBUTE_KEYS if (v := item_attrs.get(k)) is not None
-        }
-        if item_type == "mv":
-            item_attrs, release_count, updated = ensure_movie_release_count(
-                item_attrs, s.uid
-            )
-            attributes["release_count"] = release_count
-            if updated:
-                s.attributes = item_attrs
-                s.save()
-        similar_summary.append(
-            {
-                "title": s.title,
-                "uid": s.uid,
-                "distance": round(distance, 3),
-                "genres": _to_list_of_str(item_attrs.get("genres")),
-                "added": s.added,
-                "attributes": attributes,
-            }
-        )
-
-    added_similar = [s for s in similar_summary if s.get("added")]
-    ignored_similar = [s for s in similar_summary if not s.get("added")]
-
-    system_prompt = RECOMMENDATION_PROMPTS.get(item_type)
-    candidate_attributes = {
-        k: v for k in SIMILAR_ATTRIBUTE_KEYS if (v := (attrs or {}).get(k)) is not None
-    }
-    if item_type == "mv":
-        candidate_attributes["release_count"] = (attrs.get("ai") or {}).get(
-            "release_count"
-        )
-    user_payload = {
+    payload: Dict[str, Any] = {
         "item_type": item_type,
         "candidate": {
             "title": title,
@@ -349,109 +317,173 @@ def annotate_with_ai(
             "genres": genres,
             "language": lang,
             "synopsis": candidate_synopsis,
-            "attributes": candidate_attributes,
+            "cast": attrs.get("cast"),
+            "network": attrs.get("network"),
+            "rating_value": attrs.get("rating_value"),
+            "rating_votes": attrs.get("rating_votes"),
         },
-        "similar_items_added": added_similar or "No similar items added",
-        "similar_items_ignored": ignored_similar or "No similar items ignored",
     }
-    user_prompt = json.dumps(user_payload)
+    if item_type == "mv":
+        payload["candidate"]["release_count"] = (attrs.get("ai") or {}).get(
+            "release_count"
+        )
+    return payload
 
-    result, recommendation_failure = call_openai_json(system_prompt, user_prompt)
-    if recommendation_failure:
-        recommendation_failure = dict(recommendation_failure)
-        recommendation_failure.setdefault("stage", "recommendation")
-        recommendation_failure.setdefault("step", "recommendation")
 
-    # Consolidate AI info into a single 'ai' attribute with boolean value and details
-    attrs_out = dict(attrs)
-    ai_details: Dict[str, Any] = attrs_out.get(
-        "ai",
-        {
-            "value": None,  # boolean when available
-            "score": None,
-            "reason": None,
-            "synopsis": None,
-            "similar": similar_summary,
-            "model": OPENAI_MODEL,
-            "weaviate_uuid": None,
-            "failure": None,
-            "failed": False,
-        },
-    )
+def _ai_details_from_run(
+    run: AgentRunResult,
+    candidate_synopsis: Optional[str],
+    synopsis_failure: Optional[Dict[str, Any]],
+    base_ai: Dict[str, Any],
+) -> Dict[str, Any]:
+    details = dict(base_ai)
+    details.setdefault("model", OPENAI_MODEL)
+    details.setdefault("weaviate_uuid", base_ai.get("weaviate_uuid"))
+    details["synopsis"] = candidate_synopsis
+    details["tool_log"] = run.tool_log
+    details["turns"] = run.turns
+    details["tool_calls"] = run.tool_calls
 
-    failure_details = synopsis_failure or recommendation_failure
-    if failure_details:
-        ai_details.update(
+    failure = synopsis_failure or run.failure
+    submission = run.submission
+    if submission is not None and run.failure is None:
+        details.update(
             {
-                "failure": failure_details,
-                "failed": True,
+                "value": bool(submission.get("recommend")),
+                "score": float(submission.get("score") or 0.0),
+                "reason": str(submission.get("reason") or "")[:240],
+                "failure": failure,
+                "failed": failure is not None,
             }
         )
     else:
-        ai_details.update({"failure": None, "failed": False})
-
-    if result is None:
-        ai_details.update(
+        details.update(
             {
                 "value": None,
                 "score": 0.0,
-                "reason": "AI not configured or failed",
+                "reason": (failure or {}).get("message", "AI did not submit verdict"),
+                "failure": failure
+                or {
+                    "code": "no_submission",
+                    "message": "AI completed without submitting a verdict",
+                    "stage": "recommendation",
+                },
+                "failed": True,
             }
         )
-        if ai_details.get("failure") is None:
-            ai_details.update(
-                {
-                    "failure": {
-                        "code": "unknown_failure",
-                        "message": "AI returned no result",
-                        "stage": "recommendation",
-                    },
-                    "failed": True,
-                }
-            )
-    else:
-        try:
-            rec = bool(result.get("recommend"))
-            score = float(result.get("score", 0))
-            reason = str(result.get("reason", ""))[:240]
-            ai_details.update(
-                {
-                    "value": rec,
-                    "score": score,
-                    "reason": reason,
-                    "synopsis": candidate_synopsis,
-                }
-            )
-        except Exception:
-            ai_details.update(
-                {
-                    "value": None,
-                    "score": 0.0,
-                    "reason": "AI parse error",
-                }
-            )
-            if ai_details.get("failure") is None:
-                ai_details.update(
-                    {
-                        "failure": {
-                            "code": "parse_error",
-                            "message": "Unable to parse AI recommendation",
-                            "stage": "recommendation",
-                        },
-                        "failed": True,
-                    }
-                )
+    return details
 
-    attrs_out["ai"] = ai_details
+
+async def annotate_with_ai_async(
+    item_type: str, uid: str, title: str, attrs: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Async agentic recommendation flow.
+
+    Steps: (1) hydrate cast/release_count, (2) generate synopsis + upsert to
+    Weaviate, (3) run the OpenAI tool-calling agent until ``submit_recommendation``,
+    (4) write a single consolidated ``ai`` block back to ``attrs``.
+    """
+    logger.info("Annotating %s %s %s", item_type, uid, title)
+    genres = _to_list_of_str(attrs.get("genres"))
+    lang = _to_list_of_str(attrs.get("originalLanguage"))
+    year = _year_from_attrs(attrs)
+
+    if item_type == "mv":
+        if not attrs.get("tmdb_id"):
+            tmdb_id = await asyncio.to_thread(get_movie_id, uid)
+            if tmdb_id:
+                attrs["tmdb_id"] = tmdb_id
+        if attrs.get("tmdb_id") and not attrs.get("cast"):
+            try:
+                attrs["cast"] = await asyncio.to_thread(
+                    get_movie_cast, attrs["tmdb_id"], 10
+                )
+            except Exception:
+                logger.exception("get_movie_cast failed for %s", uid)
+        attrs, _, _ = await asyncio.to_thread(ensure_movie_release_count, attrs, uid)
+    elif item_type == "tv":
+        if not attrs.get("tmdb_id"):
+            tmdb_id = await asyncio.to_thread(get_tv_id, uid)
+            if tmdb_id:
+                attrs["tmdb_id"] = tmdb_id
+        if attrs.get("tmdb_id") and not attrs.get("cast"):
+            try:
+                attrs["cast"] = await asyncio.to_thread(
+                    get_tv_cast, attrs["tmdb_id"], 10
+                )
+            except Exception:
+                logger.exception("get_tv_cast failed for %s", uid)
+
+    candidate_synopsis, synopsis_failure = await agenerate_synopsis_for_candidate(
+        title, year, genres, lang, item_type, attrs.get("cast")
+    )
+    attrs = await asyncio.to_thread(
+        upsert_item_attrs, attrs, item_type, uid, title, candidate_synopsis
+    )
+
+    base_ai = dict(attrs.get("ai") or {})
+
+    client = get_async_openai_client()
+    if client is None:
+        run = AgentRunResult(
+            failure={
+                "code": "client_not_configured",
+                "message": "OpenAI async client not configured",
+                "stage": "client",
+            }
+        )
+        attrs_out = dict(attrs)
+        attrs_out["ai"] = _ai_details_from_run(
+            run, candidate_synopsis, synopsis_failure, base_ai
+        )
+        return attrs_out
+
+    system_prompt = RECOMMENDATION_PROMPTS.get(item_type, "")
+    user_payload = _build_user_payload(item_type, uid, title, attrs, candidate_synopsis)
+    user_prompt = json.dumps(user_payload, default=str)
+
+    ctx = ToolContext(
+        item_type=item_type,
+        candidate={
+            "uid": uid,
+            "title": title,
+            "year": year,
+            "genres": genres,
+        },
+    )
+
+    run = await run_agent(
+        client=client,
+        model=OPENAI_MODEL,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        registry=REGISTRY,
+        ctx=ctx,
+        max_turns=AGENT_MAX_TURNS,
+        max_tool_calls=AGENT_MAX_TOOL_CALLS,
+    )
+
+    attrs_out = dict(attrs)
+    attrs_out["ai"] = _ai_details_from_run(
+        run, candidate_synopsis, synopsis_failure, base_ai
+    )
     return attrs_out
+
+
+def annotate_with_ai(
+    item_type: str, uid: str, title: str, attrs: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Synchronous wrapper. Prefer ``annotate_with_ai_async`` when in async code."""
+    return asyncio.run(annotate_with_ai_async(item_type, uid, title, attrs))
 
 
 def annotate_attributes_for_item(
     item_type: str, uid: str, title: str, attrs: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """Public wrapper to annotate attributes using the same logic as ingestion.
-
-    Returns a new attributes dict including the consolidated 'ai' details and
-    optional 'synopsis_vector' if embeddings are enabled.
-    """
     return annotate_with_ai(item_type, uid, title, attrs)
+
+
+async def annotate_attributes_for_item_async(
+    item_type: str, uid: str, title: str, attrs: Dict[str, Any]
+) -> Dict[str, Any]:
+    return await annotate_with_ai_async(item_type, uid, title, attrs)
