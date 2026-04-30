@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>Crimson Tide Below Zero (2024)</title>
+      <attr name="imdb" value="9999991"/>
+      <attr name="size" value="2147483648"/>
+    </item>
+    <item>
+      <title>The Quiet Fox (2024)</title>
+      <attr name="imdb" value="9999992"/>
+      <attr name="size" value="3221225472"/>
+    </item>
+    <item>
+      <title>Galactic Brunch (2024)</title>
+      <attr name="imdb" value="9999993"/>
+      <attr name="size" value="2684354560"/>
+    </item>
+    <item>
+      <title>Nightshade Cartographer (2023)</title>
+      <attr name="imdb" value="9999994"/>
+      <attr name="size" value="3758096384"/>
+    </item>
+  </channel>
+</rss>

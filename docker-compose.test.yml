@@ -96,3 +96,16 @@ services:
         condition: service_started
     environment:
       BASE_URL: http://web
+
+  # Unit tests (tests/) — use in-memory SQLite, no infrastructure deps.
+  # Run with: docker-compose -f docker-compose.test.yml run --rm pytest
+  pytest:
+    build:
+      context: .
+      target: runner
+    volumes:
+      - ./tests:/opt/servermonitor/tests
+    command:
+      - sh
+      - -c
+      - "pip install --quiet pytest && pytest tests/ -x -q"
