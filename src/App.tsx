@@ -1,4 +1,5 @@
 import React from "react";
+import { BrowserRouter } from "react-router-dom";
 import { SnackbarProvider } from "material-ui-snackbar-provider";
 import MenuDrawer from "./MenuDrawer";
 import {
@@ -52,10 +53,12 @@ const createEnvironment = () => {
 export default function App() {
     const environment = createEnvironment();
     return (
-        <RelayEnvironmentProvider environment={environment}>
-            <SnackbarProvider SnackbarProps={{ autoHideDuration: 4000 }}>
-                <MenuDrawer />
-            </SnackbarProvider>
-        </RelayEnvironmentProvider>
+        <BrowserRouter>
+            <RelayEnvironmentProvider environment={environment}>
+                <SnackbarProvider SnackbarProps={{ autoHideDuration: 4000 }}>
+                    <MenuDrawer />
+                </SnackbarProvider>
+            </RelayEnvironmentProvider>
+        </BrowserRouter>
     );
 }

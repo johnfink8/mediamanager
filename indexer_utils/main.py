@@ -70,10 +70,14 @@ def item_to_dict(item: IgnoreItem) -> Dict[str, Any]:
     return {col.name: getattr(item, col.name) for col in item.__table__.columns}
 
 
-@app.get("/", response_class=HTMLResponse)
-async def index() -> HTMLResponse:
+def _render_app() -> HTMLResponse:
     template = env.get_template("index.html")
     return template.render(SCRIPTS=load_scripts())
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index() -> HTMLResponse:
+    return _render_app()
 
 
 @app.get("/check_new/")
@@ -103,3 +107,8 @@ async def check_titles() -> Dict[str, str]:
 
 if os.environ.get("DEBUG"):
     app.mount("/static", StaticFiles(directory="frontend/static"), name="static")
+
+
+@app.get("/{_path:path}", response_class=HTMLResponse)
+async def spa_fallback(_path: str) -> HTMLResponse:
+    return _render_app()

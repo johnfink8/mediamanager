@@ -1,10 +1,7 @@
 import React, { FC, useEffect, useState } from "react";
-import Grid from "@mui/material/Grid";
-import Box from "@mui/material/Box";
 
 import ItemDetail from "./ItemDetail";
 import { MenuItemType } from "./types";
-import BreadCrumbs from "./BreadCrumbs";
 import {
     graphql,
     PreloadedQuery,
@@ -14,15 +11,6 @@ import {
 } from "react-relay";
 import { ItemListQuery } from "./__generated__/ItemListQuery.graphql";
 import { ItemListAcceptAllRecommendedMutation } from "./__generated__/ItemListAcceptAllRecommendedMutation.graphql";
-import {
-    Alert,
-    Backdrop,
-    Button,
-    Card,
-    CardContent,
-    Snackbar,
-    Typography,
-} from "@mui/material";
 
 const ItemListQueryGQL = graphql`
     query ItemListQuery($itemType: String) {
@@ -125,123 +113,127 @@ const ItemList: FC<{
         useMutation<ItemListAcceptAllRecommendedMutation>(
             AcceptAllRecommendedMutation
         );
-    const [acceptResult, setAcceptResult] = useState<{
-        addedCount: number;
-        ignoredCount: number;
-    } | null>(null);
+    const [acceptMessage, setAcceptMessage] = useState<string | null>(null);
+
     const recheckItemType =
         menuItem.typeName === "mv" || menuItem.typeName === "tv"
             ? menuItem.typeName
             : null;
 
+    const isMovies = menuItem.typeName === "mv";
+    const sectionLabel = isMovies ? "movies" : "shows";
+
     return (
-        <Box sx={{ position: "relative" }}>
-            <BreadCrumbs crumbs={[menuItem]} />
-            {recheckItemType && items.length > 0 && (
-                <Box mb={2} sx={{ display: "flex", gap: 1 }}>
-                    <Button
-                        variant="outlined"
-                        onClick={() =>
-                            recheckVisible({
-                                variables: { itemType: recheckItemType },
-                            })
-                        }
-                        disabled={isRechecking}
-                    >
-                        Recheck
-                    </Button>
-                    <Button
-                        variant="outlined"
-                        onClick={() =>
-                            acceptAllRecommended({
-                                variables: {
-                                    input: {
-                                        ids: items.map((item) => item.id),
-                                        itemType: recheckItemType,
-                                    },
-                                },
-                                onCompleted(response) {
-                                    const { addedCount, ignoredCount } =
-                                        response.acceptAllRecommended;
-                                    setAcceptResult({
-                                        addedCount,
-                                        ignoredCount,
-                                    });
-                                },
-                            })
-                        }
-                        disabled={isAccepting}
-                    >
-                        Accept All Recommended
-                    </Button>
-                </Box>
-            )}
-            <Snackbar
-                open={acceptResult !== null}
-                autoHideDuration={6000}
-                onClose={() => setAcceptResult(null)}
-            >
-                <Alert
-                    onClose={() => setAcceptResult(null)}
-                    severity="info"
-                    sx={{ width: "100%" }}
+        <>
+            <div className="page-head">
+                <h1>
+                    Pending <em>{sectionLabel}</em>
+                </h1>
+                <div className="page-actions">
+                    {recheckItemType && items.length > 0 && (
+                        <>
+                            <button
+                                className="btn ghost"
+                                onClick={() =>
+                                    recheckVisible({
+                                        variables: {
+                                            itemType: recheckItemType,
+                                        },
+                                    })
+                                }
+                                disabled={isRechecking}
+                            >
+                                Re-scan
+                            </button>
+                            <button
+                                className="btn"
+                                onClick={() =>
+                                    acceptAllRecommended({
+                                        variables: {
+                                            input: {
+                                                ids: items.map((i) => i.id),
+                                                itemType: recheckItemType,
+                                            },
+                                        },
+                                        onCompleted(response) {
+                                            const { addedCount, ignoredCount } =
+                                                response.acceptAllRecommended;
+                                            setAcceptMessage(
+                                                `Added ${addedCount}, skipped ${ignoredCount}`
+                                            );
+                                            setTimeout(
+                                                () => setAcceptMessage(null),
+                                                5000
+                                            );
+                                        },
+                                    })
+                                }
+                                disabled={isAccepting}
+                            >
+                                Accept all recommended
+                            </button>
+                        </>
+                    )}
+                </div>
+            </div>
+
+            <div className="page-stats">
+                <div className="stat">
+                    <strong>{items.length}</strong> in queue
+                </div>
+            </div>
+
+            {acceptMessage && (
+                <div
+                    style={{
+                        padding: "0 36px 12px",
+                        color: "var(--good)",
+                        fontSize: 13,
+                        fontFamily: "JetBrains Mono, monospace",
+                    }}
                 >
-                    {acceptResult
-                        ? `Added ${acceptResult.addedCount}, skipped ${acceptResult.ignoredCount}`
-                        : ""}
-                </Alert>
-            </Snackbar>
-            <Grid container spacing={2}>
+                    {acceptMessage}
+                </div>
+            )}
+
+            <div className="queue">
                 {items.map((item) => (
                     <ItemDetail key={item.uid} item={item} />
                 ))}
-            </Grid>
-        </Box>
+                {items.length === 0 && (
+                    <div className="empty" style={{ gridColumn: "1 / -1" }}>
+                        <div className="e-title">Queue is clear</div>
+                        <div>
+                            Everything found has been reviewed. Next scan
+                            incoming.
+                        </div>
+                    </div>
+                )}
+            </div>
+        </>
     );
 };
 
 const ItemListLoading: FC = () => (
-    <Grid container spacing={2}>
-        <Grid item xs={12} sm={12} md={6}>
-            <Card sx={{ position: "relative" }}>
-                <Backdrop
-                    open
-                    sx={{
-                        position: "absolute",
-                    }}
-                />
-                <CardContent>
-                    <Typography variant="h6">Loading...</Typography>
-                </CardContent>
-            </Card>
-        </Grid>
-        <Grid item xs={12} sm={12} md={6}>
-            <Card sx={{ position: "relative" }}>
-                <Backdrop
-                    open
-                    sx={{
-                        position: "absolute",
-                    }}
-                />
-                <CardContent>
-                    <Typography variant="h6">Loading...</Typography>
-                </CardContent>
-            </Card>
-        </Grid>
-        <Grid item xs={12} sm={12} md={6}>
-            <Card sx={{ position: "relative" }}>
-                <Backdrop
-                    open
-                    sx={{
-                        position: "absolute",
-                    }}
-                />
-                <CardContent>
-                    <Typography variant="h6">Loading...</Typography>
-                </CardContent>
-            </Card>
-        </Grid>
-    </Grid>
+    <div className="loading-grid">
+        {[1, 2, 3, 4].map((n) => (
+            <div className="skeleton-card" key={n}>
+                <div className="skeleton-poster" />
+                <div className="skeleton-body">
+                    <div className="skeleton-line" style={{ width: "70%" }} />
+                    <div className="skeleton-line" style={{ width: "40%" }} />
+                    <div
+                        className="skeleton-line"
+                        style={{ width: "90%", height: 80, marginTop: 8 }}
+                    />
+                    <div
+                        className="skeleton-line"
+                        style={{ width: "60%", marginTop: "auto" }}
+                    />
+                </div>
+            </div>
+        ))}
+    </div>
 );
 
 const ItemListContainer: FC<{ menuItem: MenuItemType }> = ({ menuItem }) => {
