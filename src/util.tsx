@@ -1,18 +1,10 @@
 import React, { useState, useCallback } from "react";
 import { useSnackbar } from "material-ui-snackbar-provider";
-import {
-    LiveTv,
-    Movie,
-    FilterList,
-    LocalMovies,
-    FactCheck,
-} from "@mui/icons-material";
+import { LiveTv, Movie, FactCheck } from "@mui/icons-material";
 import HistoryIcon from "@mui/icons-material/History";
 import { itemType, MenuItemType } from "./types";
 import ItemList from "./ItemList";
-import FilterRules from "./FilterRules";
 import HistoricalItemList from "./HistoricalItemList";
-import MovieRecommendation from "./MovieRecommendation";
 import CheckFeedbackPanel from "./CheckFeedbackPanel";
 
 export const tvHref = (uid: string) => {
@@ -82,20 +74,6 @@ export const menuItems: MenuItemType[] = [
         component: HistoricalItemList,
         tabIndex: 2,
         typeName: "mv",
-    },
-    {
-        name: "Filter Rules",
-        icon: <FilterList />,
-        component: FilterRules,
-        tabIndex: undefined,
-        typeName: undefined,
-    },
-    {
-        name: "Movie Night",
-        icon: <LocalMovies />,
-        component: MovieRecommendation,
-        tabIndex: undefined,
-        typeName: undefined,
     },
     {
         name: "Check Feedback",
