@@ -11,7 +11,11 @@ from sqlalchemy.orm.attributes import flag_modified
 from strawberry.relay import GlobalID
 from strawberry.scalars import ID, JSON
 
-from indexer_utils.ai_recs import annotate_with_ai, refresh_visible_item_attributes
+from indexer_utils.ai_recs import (
+    annotate_with_ai_async,
+    make_async_openai_client,
+    refresh_visible_item_attributes,
+)
 from indexer_utils.check_feedback import get_check_history
 from indexer_utils.session import db_session
 from indexer_utils.sonarr_utils import add_series
@@ -700,20 +704,27 @@ class Mutation:
             return IgnoreItemType.from_sqlalchemy(item)
 
     @strawberry.mutation
-    def retry_ai(self: "Mutation", data: RetryAiInput) -> IgnoreItemType:
+    async def retry_ai(self: "Mutation", data: RetryAiInput) -> IgnoreItemType:
+        # Read item snapshot in a sync session, run the agent off-session,
+        # then write results back. Holding a session open across an await
+        # boundary would pin a connection for the whole agent run.
         with db_session() as session:
             item = session.query(IgnoreItem).get(data.id.node_id)
             if not item:
                 raise Exception("Item not found")
-
+            item_type = item.item_type
+            uid = item.uid
+            title = item.title
             attrs = dict(item.attributes or {})
-            # Clear any previous AI state before re-running
             attrs.pop("ai", None)
             attrs.pop("_synopsis_vector_tmp", None)
 
-            refreshed_attrs = annotate_with_ai(
-                item.item_type, item.uid, item.title, attrs
-            )
+        refreshed_attrs = await annotate_with_ai_async(item_type, uid, title, attrs)
+
+        with db_session() as session:
+            item = session.query(IgnoreItem).get(data.id.node_id)
+            if not item:
+                raise Exception("Item not found")
             item.attributes = refreshed_attrs
             flag_modified(item, "attributes")
             session.add(item)
@@ -722,7 +733,8 @@ class Mutation:
             return IgnoreItemType.from_sqlalchemy(item)
 
     @strawberry.mutation
-    def recheck_visible(self: "Mutation", item_type: str) -> List[IgnoreItemType]:
+    async def recheck_visible(self: "Mutation", item_type: str) -> List[IgnoreItemType]:
+        # Phase 1: read items + refresh metadata.
         with db_session() as session:
             now = datetime.utcnow()
             items = (
@@ -736,20 +748,74 @@ class Mutation:
                 )
                 .all()
             )
+            prepared: List[Dict[str, Any]] = []
             for item in items:
                 attrs = refresh_visible_item_attributes(item)
                 attrs.pop("ai", None)
                 attrs.pop("_synopsis_vector_tmp", None)
-                refreshed_attrs = annotate_with_ai(
-                    item.item_type, item.uid, item.title, attrs
+                prepared.append(
+                    {
+                        "id": item.id,
+                        "item_type": item.item_type,
+                        "uid": item.uid,
+                        "title": item.title,
+                        "attrs": attrs,
+                    }
                 )
-                item.attributes = refreshed_attrs
+            ordered_ids = [p["id"] for p in prepared]
+
+        if not prepared:
+            return []
+
+        # Phase 2: run agent for each item, sharing one OpenAI client.
+        from indexer_utils.vid_utils import AI_ANNOTATE_CONCURRENCY
+
+        semaphore = asyncio.Semaphore(AI_ANNOTATE_CONCURRENCY)
+        openai_client = make_async_openai_client()
+
+        async def _annotate(p: Dict[str, Any]) -> Dict[str, Any]:
+            async with semaphore:
+                return await annotate_with_ai_async(
+                    p["item_type"],
+                    p["uid"],
+                    p["title"],
+                    p["attrs"],
+                    client=openai_client,
+                )
+
+        try:
+            results = await asyncio.gather(
+                *(_annotate(p) for p in prepared), return_exceptions=True
+            )
+        finally:
+            if openai_client is not None:
+                try:
+                    await openai_client.close()
+                except Exception:
+                    logger.exception("failed to close AsyncOpenAI client")
+
+        # Phase 3: write enriched attrs back.
+        with db_session() as session:
+            for p, outcome in zip(prepared, results):
+                if isinstance(outcome, BaseException):
+                    logger.exception(
+                        "annotate failed for %s:%s", p["item_type"], p["uid"]
+                    )
+                    continue
+                item: Optional[IgnoreItem] = session.query(IgnoreItem).get(p["id"])
+                if item is None:
+                    continue
+                item.attributes = outcome
                 flag_modified(item, "attributes")
                 session.add(item)
             session.commit()
-            for item in items:
-                session.refresh(item)
-            return [IgnoreItemType.from_sqlalchemy(item) for item in items]
+            ordered = (
+                session.query(IgnoreItem).filter(IgnoreItem.id.in_(ordered_ids)).all()
+            )
+            refreshed_items: List[IgnoreItem] = sorted(
+                ordered, key=lambda r: ordered_ids.index(r.id)
+            )
+            return [IgnoreItemType.from_sqlalchemy(it) for it in refreshed_items]
 
     @strawberry.mutation
     def defer_item(self: "Mutation", data: DeferItemInput) -> IgnoreItemType:
