@@ -112,6 +112,13 @@ async def _dispatch_tool_call(
     return message, audit_entry, is_terminal
 
 
+def _estimate_request_chars(messages: List[Dict[str, Any]]) -> int:
+    try:
+        return len(json.dumps(messages, default=str))
+    except (TypeError, ValueError):
+        return 0
+
+
 async def run_agent(
     *,
     client: AsyncOpenAI,
@@ -122,6 +129,10 @@ async def run_agent(
     ctx: ToolContext,
     max_turns: int = 6,
     max_tool_calls: int = 16,
+    # Pre-flight character cap on the messages array before each request.
+    # ~4 chars/token, so 600 KB chars ~ 150 K tokens. Well under typical
+    # context limits, leaves room for the response.
+    max_request_chars: int = 600_000,
     reasoning_effort: Optional[str] = None,
     log_tag: Optional[str] = None,
 ) -> AgentRunResult:
@@ -150,6 +161,45 @@ async def run_agent(
             logger.warning("%s exhausted turns=%d", log_tag, result.turns)
             return result
 
+        # Pre-flight context size check. Bail early with a clear failure
+        # rather than letting OpenAI return a 400 on context length.
+        request_chars = _estimate_request_chars(messages)
+        if request_chars > max_request_chars:
+            biggest = max(
+                (m for m in messages if m.get("role") == "tool"),
+                key=lambda m: len(json.dumps(m, default=str)),
+                default=None,
+            )
+            biggest_name = None
+            biggest_size = 0
+            if biggest is not None:
+                biggest_size = len(json.dumps(biggest, default=str))
+                # Look back for the assistant tool_call that produced it.
+                tcid = biggest.get("tool_call_id")
+                for m in messages:
+                    for tc in m.get("tool_calls") or []:
+                        if tc.get("id") == tcid:
+                            biggest_name = tc.get("function", {}).get("name")
+            logger.warning(
+                "%s context budget exhausted: %d chars (cap=%d). "
+                "Largest tool result: name=%s size=%d",
+                log_tag,
+                request_chars,
+                max_request_chars,
+                biggest_name,
+                biggest_size,
+            )
+            result.failure = {
+                "code": "context_budget_exceeded",
+                "message": (
+                    f"messages reached {request_chars} chars (cap "
+                    f"{max_request_chars}); largest tool='{biggest_name}' "
+                    f"size={biggest_size}"
+                ),
+                "stage": "recommendation",
+            }
+            return result
+
         result.turns += 1
         request_kwargs: Dict[str, Any] = {
             "model": model,
@@ -160,7 +210,11 @@ async def run_agent(
             request_kwargs["reasoning_effort"] = reasoning_effort
 
         logger.info(
-            "%s turn=%d sending messages=%d", log_tag, result.turns, len(messages)
+            "%s turn=%d sending messages=%d chars=%d",
+            log_tag,
+            result.turns,
+            len(messages),
+            request_chars,
         )
         try:
             resp = await client.chat.completions.create(**request_kwargs)
