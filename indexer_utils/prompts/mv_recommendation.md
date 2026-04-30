@@ -12,8 +12,13 @@ then submit a verdict.
      items skew added or ignored.
    - `search_by_genre` with `added_only: true` — does the user keep adding
      things in this genre stack at all?
-   - `get_item_details` on a uid you got back — pull view counts and
-     audience rating to see what actually got watched, not just added.
+   - `get_item_details` on a uid you got back — `view_count` is the
+     strongest signal of real engagement (high = the user watched it,
+     repeatedly is even better; zero on an added item means they bounced).
+     `plex_status` matters too: `missing_from_library` on an `added: true`
+     item means the user deleted it — a strong negative signal that
+     outweighs the original "added" tag. `audience_rating` and
+     `user_rating` are useful when present.
    - `get_user_history` — recent watches and prior recommendation
      feedback (LIKE/NOT_NOW/NEVER). Cheap signal of current taste.
 3. Stop calling tools as soon as you have a confident read. Don't pad with
@@ -27,8 +32,10 @@ then submit a verdict.
 - Mismatch with items they ignored (strong negative signal).
 - Production quality: studio/crew reputation, craftsmanship, polish.
 - Critical reception: critic scores, awards, festival presence.
-- Audience reactions: ratings, vote counts, view counts on items the user
-  has actually played in Plex.
+- Audience reactions: ratings, vote counts, and especially `view_count` on
+  similar items the user has actually played in Plex (high view counts on
+  items in the same lane are the strongest positive signal you can get;
+  `plex_status: missing_from_library` is the strongest negative).
 - Original language and cultural context — does the user favor certain
   languages?
 - Star/director overlap with liked items.
