@@ -1,16 +1,18 @@
 """Application-wide APScheduler instance and admin helpers.
 
 The scheduler uses a ``SQLAlchemyJobStore`` backed by the same MySQL
-database the rest of the app uses, so:
+database the rest of the app uses, plus a MySQL named lock
+(``GET_LOCK``) for leader election so:
 
-* Multiple uvicorn/gunicorn workers see the same job table and the
-  jobstore's row-level lock prevents duplicate fires.
+* Only **one** worker fires jobs at a time, even though every worker
+  imports this module — APScheduler has no built-in cross-process
+  coordination, so unsynchronized starts would cause every job to fire
+  N times.
+* The non-leader workers ("followers") still initialize the jobstore
+  in paused mode so the admin GraphQL API works on any worker.
 * The next-fire-time survives process restarts (no scan-on-boot).
 * Jobs are declared by Alembic migrations rather than re-registered
   every startup.
-
-A single module-level scheduler instance is created lazily so tests and
-migrations can import the helpers without spinning up a worker thread.
 
 The :data:`JOB_DESCRIPTIONS` registry is the canonical source for
 human-readable names + descriptions of the jobs the admin UI lists.
@@ -19,6 +21,7 @@ human-readable names + descriptions of the jobs the admin UI lists.
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -29,6 +32,8 @@ from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Connection, Engine
 
 from .session import get_db_url
 
@@ -75,7 +80,49 @@ JOB_DESCRIPTIONS: Dict[str, JobDescription] = {
 }
 
 
+# Leader election. Exactly one worker per cluster holds this lock and
+# fires jobs; everyone else runs the scheduler in paused mode so the
+# admin GraphQL API still works for reads/writes against the jobstore.
+LEADER_LOCK_NAME = "mediamanager_apscheduler_leader"
+
+# How long to wait between leader heartbeats. MySQL's ``wait_timeout``
+# defaults to 8h; the heartbeat keeps the lock-holding connection alive
+# so the lock isn't reaped during long quiet periods.
+LEADER_HEARTBEAT_SECONDS = 300
+
+# Cap on how long the leader will wait between jobstore polls. Cross-
+# process job edits (e.g., a "Trigger now" click that lands on a
+# follower) only update the row; APScheduler's ``wakeup()`` doesn't
+# cross processes. Polling at least every 30s keeps the manual-trigger
+# UX responsive.
+LEADER_MAX_WAIT_SECONDS = 30.0
+
+
 _scheduler: Optional[BackgroundScheduler] = None
+_lock_engine: Optional[Engine] = None
+_lock_conn: Optional[Connection] = None
+_heartbeat_thread: Optional[threading.Thread] = None
+_heartbeat_stop = threading.Event()
+_is_leader = False
+
+
+class _LeaderScheduler(BackgroundScheduler):  # type: ignore[misc]
+    """``BackgroundScheduler`` that clamps the inter-poll wait.
+
+    APScheduler computes ``next_wakeup`` from the next due job time and
+    sleeps until then. With multiple workers sharing a jobstore, a
+    follower's ``Job.modify(next_run_time=...)`` updates the row but
+    can't wake the leader's event loop. Capping the wait ensures the
+    leader picks up cross-process edits within
+    :data:`LEADER_MAX_WAIT_SECONDS`. On followers this method is never
+    productively called (they stay paused), so the cap is a no-op.
+    """
+
+    def _process_jobs(self) -> Optional[float]:
+        wait: Optional[float] = super()._process_jobs()
+        if wait is None or wait > LEADER_MAX_WAIT_SECONDS:
+            return LEADER_MAX_WAIT_SECONDS
+        return wait
 
 
 class _MigrationOwnedJobStore(SQLAlchemyJobStore):  # type: ignore[misc]
@@ -106,27 +153,142 @@ def get_scheduler() -> BackgroundScheduler:
     """Return the process-wide scheduler, instantiating on first call."""
     global _scheduler
     if _scheduler is None:
-        scheduler = BackgroundScheduler(timezone="UTC")
+        scheduler = _LeaderScheduler(timezone="UTC")
         scheduler.add_jobstore(build_jobstore(), alias=JOBSTORE_ALIAS)
         _scheduler = scheduler
     return _scheduler
 
 
+def is_leader() -> bool:
+    """True if this worker holds the leader lock."""
+    return _is_leader
+
+
+def _try_acquire_leader_lock() -> bool:
+    """Non-blocking ``GET_LOCK`` attempt on a dedicated connection.
+
+    Returns ``True`` iff this worker now owns the lock. A separate
+    engine + a single, held-open connection are used so the lock isn't
+    accidentally released by SQLAlchemy pool churn.
+    """
+    global _lock_engine, _lock_conn
+    engine = create_engine(
+        get_db_url(), pool_size=1, max_overflow=0, pool_pre_ping=False
+    )
+    conn = engine.connect()
+    try:
+        result = conn.execute(
+            text("SELECT GET_LOCK(:n, 0)"), {"n": LEADER_LOCK_NAME}
+        ).scalar()
+    except Exception:
+        conn.close()
+        engine.dispose()
+        raise
+    if result == 1:
+        _lock_engine = engine
+        _lock_conn = conn
+        return True
+    # Either another worker holds it (0) or an error occurred (NULL).
+    conn.close()
+    engine.dispose()
+    return False
+
+
+def _start_leader_heartbeat() -> None:
+    """Start a daemon thread that pings the lock connection periodically.
+
+    Without this, MySQL's ``wait_timeout`` (default 28800s) eventually
+    closes the idle connection holding the lock, releasing it and
+    causing a split-brain election on the next worker boot.
+    """
+    global _heartbeat_thread
+    _heartbeat_stop.clear()
+
+    def _run() -> None:
+        while not _heartbeat_stop.wait(LEADER_HEARTBEAT_SECONDS):
+            try:
+                if _lock_conn is not None:
+                    _lock_conn.execute(text("SELECT 1"))
+            except Exception:
+                logger.exception("Leader lock heartbeat ping failed")
+
+    thread = threading.Thread(
+        target=_run, name="apscheduler-leader-heartbeat", daemon=True
+    )
+    thread.start()
+    _heartbeat_thread = thread
+
+
+def _release_leader_lock() -> None:
+    """Stop the heartbeat, release the lock, close the connection."""
+    global _lock_engine, _lock_conn, _heartbeat_thread
+    _heartbeat_stop.set()
+    if _heartbeat_thread is not None:
+        _heartbeat_thread.join(timeout=5)
+        _heartbeat_thread = None
+    if _lock_conn is not None:
+        try:
+            _lock_conn.execute(text("SELECT RELEASE_LOCK(:n)"), {"n": LEADER_LOCK_NAME})
+        except Exception:
+            logger.exception("RELEASE_LOCK failed")
+        try:
+            _lock_conn.close()
+        except Exception:
+            logger.exception("Closing lock connection failed")
+        _lock_conn = None
+    if _lock_engine is not None:
+        try:
+            _lock_engine.dispose()
+        except Exception:
+            logger.exception("Disposing lock engine failed")
+        _lock_engine = None
+
+
 def start_scheduler() -> BackgroundScheduler:
-    """Start the scheduler if it is not already running."""
+    """Start the scheduler. Promotes this worker to leader if possible.
+
+    The leader runs the scheduler normally and dispatches jobs.
+    Followers start in paused mode — their jobstore is fully
+    initialized so the admin GraphQL API works on any worker, but they
+    never fire jobs themselves.
+    """
+    global _is_leader
     scheduler = get_scheduler()
-    if not scheduler.running:
+    if scheduler.running:
+        return scheduler
+    if _try_acquire_leader_lock():
+        _is_leader = True
         scheduler.start()
-        logger.info("APScheduler started (jobstore=%s)", JOBSTORE_TABLE)
+        _start_leader_heartbeat()
+        logger.info(
+            "APScheduler started as LEADER (jobstore=%s, lock=%s)",
+            JOBSTORE_TABLE,
+            LEADER_LOCK_NAME,
+        )
+    else:
+        _is_leader = False
+        scheduler.start(paused=True)
+        logger.info(
+            "APScheduler started as FOLLOWER — another worker holds %s; "
+            "this worker only serves admin reads/writes",
+            LEADER_LOCK_NAME,
+        )
     return scheduler
 
 
 def shutdown_scheduler() -> None:
-    """Shut down the scheduler if it is running."""
-    global _scheduler
+    """Stop the scheduler and, if leader, release the lock."""
+    global _scheduler, _is_leader
     if _scheduler is not None and _scheduler.running:
-        _scheduler.shutdown(wait=False)
-        logger.info("APScheduler shut down")
+        try:
+            _scheduler.shutdown(wait=False)
+            logger.info("APScheduler shut down")
+        except Exception:
+            logger.exception("APScheduler shutdown failed")
+    if _is_leader:
+        _release_leader_lock()
+        logger.info("Released APScheduler leader lock")
+        _is_leader = False
     _scheduler = None
 
 
