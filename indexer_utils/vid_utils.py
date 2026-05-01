@@ -292,6 +292,7 @@ def check_movies(days: int) -> None:
             add_attr(attrs, result, "originalLanguage")
             add_attr(attrs, result, "status")
             add_attr(attrs, result, "genres")
+            add_attr(attrs, result, "studio")
             attrs["year"] = result["year"]
             ratings = result.get("ratings")
             if ratings:

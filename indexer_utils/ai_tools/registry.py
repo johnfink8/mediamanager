@@ -1,11 +1,13 @@
 """Tool registry for the recommendation agent.
 
-Five tools are exposed to the model:
+Six tools are exposed to the model:
 
 - ``search_similar_by_synopsis`` — semantic free-text query over the user's
   catalog (Weaviate near_text). Source-agnostic from the model's POV.
 - ``search_by_genre`` — DB filter over IgnoreItem attributes by genre, scoped
   to the candidate's item_type.
+- ``search_by_network`` — DB filter by network (TV) or studio (movies).
+  Platform is often a strong taste signal.
 - ``get_item_details`` — IgnoreItem row + Plex view/rating fields for movies.
 - ``get_user_history`` — recent Plex plays + recent recommendation feedback.
 - ``submit_recommendation`` — terminal tool that ends the agent loop with the
@@ -138,7 +140,7 @@ def _attrs_get_genres(attrs: Optional[Dict[str, Any]]) -> List[str]:
 
 def _summarize_item(item: IgnoreItem) -> Dict[str, Any]:
     attrs = item.attributes or {}
-    return {
+    summary: Dict[str, Any] = {
         "uid": item.uid,
         "title": item.title,
         "added": bool(item.added),
@@ -148,6 +150,11 @@ def _summarize_item(item: IgnoreItem) -> Dict[str, Any]:
         "rating_value": attrs.get("rating_value"),
         "rating_votes": attrs.get("rating_votes"),
     }
+    if attrs.get("network"):
+        summary["network"] = attrs["network"]
+    if attrs.get("studio"):
+        summary["studio"] = attrs["studio"]
+    return summary
 
 
 def _query_db_items(item_type: str, uids: List[str]) -> Dict[str, IgnoreItem]:
@@ -215,14 +222,19 @@ async def _t_search_synopsis(input_: Dict[str, Any], ctx: ToolContext) -> ToolRe
             ),
         }
         if row is not None:
+            row_attrs = row.attributes or {}
             item.update(
                 {
                     "added": bool(row.added),
                     "ignored": bool(row.ignore),
-                    "genres": _attrs_get_genres(row.attributes),
-                    "year": (row.attributes or {}).get("year"),
+                    "genres": _attrs_get_genres(row_attrs),
+                    "year": row_attrs.get("year"),
                 }
             )
+            if row_attrs.get("network"):
+                item["network"] = row_attrs["network"]
+            if row_attrs.get("studio"):
+                item["studio"] = row_attrs["studio"]
         results.append(item)
     output = {"results": results}
     return ToolResult(
@@ -294,6 +306,69 @@ async def _t_search_genre(input_: Dict[str, Any], ctx: ToolContext) -> ToolResul
 
 
 # ---------------------------------------------------------------------------
+# search_by_network
+# ---------------------------------------------------------------------------
+
+SEARCH_NETWORK_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "network": {
+            "type": "string",
+            "description": (
+                "Network or studio name. Examples: 'Apple TV+', 'HBO', "
+                "'Netflix', 'A24'. Case-insensitive substring match against "
+                "network (TV) or studio (movies)."
+            ),
+        },
+        "added_only": {
+            "type": "boolean",
+            "description": "If true, restrict to items the user added. Default false.",
+        },
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "description": "Max results. Default 15.",
+        },
+    },
+    "required": ["network"],
+}
+
+
+async def _t_search_network(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult:
+    name_raw = str(input_.get("network") or "").strip()
+    if not name_raw:
+        return ToolResult(output={"error": "network is required"})
+    needle = name_raw.lower()
+    added_only = bool(input_.get("added_only"))
+    limit = int(input_.get("limit") or 15)
+    limit = max(1, min(limit, 50))
+
+    candidate_uid = ctx.candidate.get("uid")
+    matches: List[Dict[str, Any]] = []
+    with db_session() as session:
+        q = session.query(IgnoreItem).filter(IgnoreItem.item_type == ctx.item_type)
+        if added_only:
+            q = q.filter(IgnoreItem.added.is_(True))
+        for row in q.all():
+            if row.uid == candidate_uid:
+                continue
+            attrs = row.attributes or {}
+            net = str(attrs.get("network") or "").lower()
+            studio = str(attrs.get("studio") or "").lower()
+            if needle not in net and needle not in studio:
+                continue
+            matches.append(_summarize_item(row))
+            if len(matches) >= limit:
+                break
+    output = {"results": matches, "count": len(matches)}
+    return ToolResult(
+        output=_enforce_result_budget(output, "search_by_network", candidate_uid)
+    )
+
+
+# ---------------------------------------------------------------------------
 # get_item_details
 # ---------------------------------------------------------------------------
 
@@ -341,6 +416,7 @@ async def _t_get_details(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult
             "year": attrs.get("year"),
             "cast": _clip_list_of_strings(attrs.get("cast"), CAST_LIMIT),
             "network": attrs.get("network"),
+            "studio": attrs.get("studio"),
             "language": attrs.get("originalLanguage"),
             "rating_value": attrs.get("rating_value"),
             "rating_votes": attrs.get("rating_votes"),
@@ -523,6 +599,19 @@ def build_registry() -> Dict[str, Tool]:
             ),
             input_schema=SEARCH_GENRE_SCHEMA,
             execute=_t_search_genre,
+        ),
+        Tool(
+            name="search_by_network",
+            description=(
+                "Find items in the user's catalog by network (TV) or studio "
+                "(movies). Examples: 'Apple TV+', 'HBO', 'A24'. Use this when "
+                "the candidate has a distinctive platform — platform is often "
+                "a strong positive or negative taste signal. Combine with "
+                "added_only=true to see whether the user has historically "
+                "liked output from that platform."
+            ),
+            input_schema=SEARCH_NETWORK_SCHEMA,
+            execute=_t_search_network,
         ),
         Tool(
             name="get_item_details",
