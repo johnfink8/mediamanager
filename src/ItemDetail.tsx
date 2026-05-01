@@ -321,7 +321,9 @@ const CardTabs: React.FC<{ item: itemType }> = ({ item }) => {
 };
 
 const ItemDetail: React.FC<{ item: itemType }> = ({ item }) => {
-    const [exiting, setExiting] = useState(false);
+    const [exiting, setExiting] = useState<
+        null | "added" | "ignored" | "deferred"
+    >(null);
     const [addItem] = useMutation<ItemListAddItemMutation>(AddItemMutation);
     const [deleteItem] =
         useMutation<ItemListDeleteItemMutation>(DeleteItemMutation);
@@ -333,24 +335,24 @@ const ItemDetail: React.FC<{ item: itemType }> = ({ item }) => {
     const size = getAttrFirst(item, "size");
 
     const handleAdd = () => {
-        setExiting(true);
+        setExiting("added");
         setTimeout(
             () => addItem({ variables: { input: { id: item.id } } }),
-            350
+            500
         );
     };
     const handleDelete = () => {
-        setExiting(true);
+        setExiting("ignored");
         setTimeout(
             () => deleteItem({ variables: { input: { id: item.id } } }),
-            350
+            420
         );
     };
     const handleDefer = () => {
-        setExiting(true);
+        setExiting("deferred");
         setTimeout(
             () => deferItem({ variables: { input: { id: item.id } } }),
-            350
+            420
         );
     };
     const handleRetryAi = () => {
@@ -358,7 +360,11 @@ const ItemDetail: React.FC<{ item: itemType }> = ({ item }) => {
     };
 
     return (
-        <article className={`card${exiting ? " is-leaving" : ""}`}>
+        <article
+            className={`card${exiting ? " is-leaving" : ""}${
+                exiting === "added" ? " is-accepting" : ""
+            }`}
+        >
             <Poster item={item} />
             <div className="card-body">
                 <div className="card-head">
