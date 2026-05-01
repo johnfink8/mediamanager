@@ -9,6 +9,7 @@ from openai import AsyncOpenAI, OpenAI
 
 from indexer_utils.tmdb import (
     get_movie_cast,
+    get_movie_director,
     get_movie_id,
     get_movie_release_count,
     get_tv_cast,
@@ -257,7 +258,18 @@ def refresh_visible_item_attributes(item: IgnoreItem) -> Dict[str, Any]:
             _add_attr(attrs, result, "genres")
             _add_attr(attrs, result, "originalLanguage")
             _add_attr(attrs, result, "studio")
+            _add_attr(attrs, result, "runtime")
             attrs["year"] = result.get("year")
+            tmdb_id = result.get("tmdbId") or get_movie_id(item.uid)
+            if tmdb_id:
+                attrs["tmdb_id"] = str(tmdb_id)
+                if not attrs.get("director"):
+                    try:
+                        director = get_movie_director(int(tmdb_id))
+                        if director:
+                            attrs["director"] = director
+                    except Exception:
+                        logger.exception("Failed to refresh director for %s", item.uid)
             ratings = result.get("ratings")
             if ratings:
                 attrs["rating_votes"] = ratings.get("votes")
@@ -303,8 +315,10 @@ def _build_user_payload(
             "language": lang,
             "synopsis": candidate_synopsis,
             "cast": attrs.get("cast"),
+            "director": attrs.get("director"),
             "network": attrs.get("network"),
             "studio": attrs.get("studio"),
+            "runtime": attrs.get("runtime"),
             "rating_value": attrs.get("rating_value"),
             "rating_votes": attrs.get("rating_votes"),
         },
@@ -419,6 +433,15 @@ async def _annotate_with_ai_async_inner(
                 )
             except Exception:
                 logger.exception("get_movie_cast failed for %s", uid)
+        if attrs.get("tmdb_id") and not attrs.get("director"):
+            try:
+                director = await asyncio.to_thread(
+                    get_movie_director, int(attrs["tmdb_id"])
+                )
+                if director:
+                    attrs["director"] = director
+            except Exception:
+                logger.exception("get_movie_director failed for %s", uid)
         attrs, _, _ = await asyncio.to_thread(ensure_movie_release_count, attrs, uid)
     elif item_type == "tv":
         if not attrs.get("tmdb_id"):
