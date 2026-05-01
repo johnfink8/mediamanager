@@ -24,8 +24,6 @@ from .tmdb import get_tv_cast, get_tv_id
 AI_ANNOTATE_CONCURRENCY = int(config("AI_ANNOTATE_CONCURRENCY", default=4))
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-logger.addHandler(logging.StreamHandler())
 
 TVDB_API_KEY = config("TVDB_API_KEY", default=None)
 
