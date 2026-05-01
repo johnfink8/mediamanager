@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from apscheduler.job import Job
+from apscheduler.jobstores.base import BaseJobStore
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -77,9 +78,28 @@ JOB_DESCRIPTIONS: Dict[str, JobDescription] = {
 _scheduler: Optional[BackgroundScheduler] = None
 
 
+class _MigrationOwnedJobStore(SQLAlchemyJobStore):  # type: ignore[misc]
+    """``SQLAlchemyJobStore`` whose table is owned by Alembic, not the store.
+
+    Upstream's ``start()`` calls ``self.jobs_t.create(engine, True)`` on
+    every scheduler boot. ``checkfirst=True`` does an inspect + CREATE in
+    two non-atomic steps, so when several gunicorn workers boot in
+    parallel one of them races and crashes with
+    ``Table 'apscheduler_jobs' already exists`` (MySQL error 1050). The
+    migration ``add_plex_scan_job`` already owns the DDL — skip the
+    redundant create.
+    """
+
+    def start(self, scheduler: Any, alias: str) -> None:
+        # Skip ``self.jobs_t.create(...)`` by calling the grandparent
+        # ``BaseJobStore.start`` directly (which only stashes the
+        # scheduler reference and alias).
+        BaseJobStore.start(self, scheduler, alias)
+
+
 def build_jobstore() -> SQLAlchemyJobStore:
-    """Construct a ``SQLAlchemyJobStore`` pointed at the app database."""
-    return SQLAlchemyJobStore(url=get_db_url(), tablename=JOBSTORE_TABLE)
+    """Construct a jobstore pointed at the app database."""
+    return _MigrationOwnedJobStore(url=get_db_url(), tablename=JOBSTORE_TABLE)
 
 
 def get_scheduler() -> BackgroundScheduler:
