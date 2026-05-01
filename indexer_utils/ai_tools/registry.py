@@ -26,6 +26,9 @@ from ..weaviate_client import asearch_by_synopsis
 from .base import TerminalToolResult, Tool, ToolContext, ToolResult
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    logger.addHandler(logging.StreamHandler())
 
 
 # Defensive caps. Every text field the model sees is clipped here so a single
