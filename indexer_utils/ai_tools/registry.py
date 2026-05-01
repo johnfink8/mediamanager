@@ -138,13 +138,31 @@ def _attrs_get_genres(attrs: Optional[Dict[str, Any]]) -> List[str]:
     return []
 
 
+def _decision(item: IgnoreItem) -> str:
+    """Single field summarizing the user's decision on an item.
+
+    Replaces the (added, ignored) pair the model previously had to reason
+    through. ``ignored=True`` does NOT mean rejected — added items also have
+    ``ignored=True`` once they've been processed. The model was conflating
+    these.
+    """
+    if item.added:
+        return "added"
+    if item.ignore:
+        return "rejected"
+    return "pending"
+
+
+def _empty_decision_counts() -> Dict[str, int]:
+    return {"added": 0, "rejected": 0, "pending": 0}
+
+
 def _summarize_item(item: IgnoreItem) -> Dict[str, Any]:
     attrs = item.attributes or {}
     summary: Dict[str, Any] = {
         "uid": item.uid,
         "title": item.title,
-        "added": bool(item.added),
-        "ignored": bool(item.ignore),
+        "decision": _decision(item),
         "genres": _attrs_get_genres(attrs),
         "year": attrs.get("year"),
         "rating_value": attrs.get("rating_value"),
@@ -209,6 +227,7 @@ async def _t_search_synopsis(input_: Dict[str, Any], ctx: ToolContext) -> ToolRe
 
     candidate_uid = ctx.candidate.get("uid")
     results: List[Dict[str, Any]] = []
+    counts = _empty_decision_counts()
     for hit in raw:
         uid = hit.get("uid")
         if not uid or uid == candidate_uid:
@@ -223,10 +242,11 @@ async def _t_search_synopsis(input_: Dict[str, Any], ctx: ToolContext) -> ToolRe
         }
         if row is not None:
             row_attrs = row.attributes or {}
+            decision = _decision(row)
+            counts[decision] += 1
             item.update(
                 {
-                    "added": bool(row.added),
-                    "ignored": bool(row.ignore),
+                    "decision": decision,
                     "genres": _attrs_get_genres(row_attrs),
                     "year": row_attrs.get("year"),
                 }
@@ -236,7 +256,7 @@ async def _t_search_synopsis(input_: Dict[str, Any], ctx: ToolContext) -> ToolRe
             if row_attrs.get("studio"):
                 item["studio"] = row_attrs["studio"]
         results.append(item)
-    output = {"results": results}
+    output = {"results": results, "decision_counts": counts}
     return ToolResult(
         output=_enforce_result_budget(
             output, "search_similar_by_synopsis", candidate_uid
@@ -286,6 +306,7 @@ async def _t_search_genre(input_: Dict[str, Any], ctx: ToolContext) -> ToolResul
 
     candidate_uid = ctx.candidate.get("uid")
     matches: List[Dict[str, Any]] = []
+    counts = _empty_decision_counts()
     with db_session() as session:
         q = session.query(IgnoreItem).filter(IgnoreItem.item_type == ctx.item_type)
         if added_only:
@@ -296,10 +317,10 @@ async def _t_search_genre(input_: Dict[str, Any], ctx: ToolContext) -> ToolResul
             row_genres = {g.lower() for g in _attrs_get_genres(row.attributes)}
             if not (row_genres & wanted):
                 continue
-            matches.append(_summarize_item(row))
-            if len(matches) >= limit:
-                break
-    output = {"results": matches, "count": len(matches)}
+            counts[_decision(row)] += 1
+            if len(matches) < limit:
+                matches.append(_summarize_item(row))
+    output = {"results": matches, "decision_counts": counts}
     return ToolResult(
         output=_enforce_result_budget(output, "search_by_genre", candidate_uid)
     )
@@ -347,6 +368,7 @@ async def _t_search_network(input_: Dict[str, Any], ctx: ToolContext) -> ToolRes
 
     candidate_uid = ctx.candidate.get("uid")
     matches: List[Dict[str, Any]] = []
+    counts = _empty_decision_counts()
     with db_session() as session:
         q = session.query(IgnoreItem).filter(IgnoreItem.item_type == ctx.item_type)
         if added_only:
@@ -359,10 +381,10 @@ async def _t_search_network(input_: Dict[str, Any], ctx: ToolContext) -> ToolRes
             studio = str(attrs.get("studio") or "").lower()
             if needle not in net and needle not in studio:
                 continue
-            matches.append(_summarize_item(row))
-            if len(matches) >= limit:
-                break
-    output = {"results": matches, "count": len(matches)}
+            counts[_decision(row)] += 1
+            if len(matches) < limit:
+                matches.append(_summarize_item(row))
+    output = {"results": matches, "decision_counts": counts}
     return ToolResult(
         output=_enforce_result_budget(output, "search_by_network", candidate_uid)
     )
@@ -410,8 +432,7 @@ async def _t_get_details(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult
         details: Dict[str, Any] = {
             "uid": row.uid,
             "title": row.title,
-            "added": added_flag,
-            "ignored": bool(row.ignore),
+            "decision": _decision(row),
             "genres": _attrs_get_genres(attrs),
             "year": attrs.get("year"),
             "cast": _clip_list_of_strings(attrs.get("cast"), CAST_LIMIT),
@@ -582,10 +603,11 @@ def build_registry() -> Dict[str, Tool]:
         Tool(
             name="search_similar_by_synopsis",
             description=(
-                "Free-text semantic search over the user's catalog. Use this to "
-                "find items that resemble a vibe, theme, or premise (not exact "
-                "metadata matches). Returns titles with their added/ignored "
-                "status so you can read the user's taste signal."
+                "Free-text semantic search over the user's catalog. Use this "
+                "to find items that resemble a vibe, theme, or premise (not "
+                "exact metadata matches). Each row has a `decision` field "
+                "(added | rejected | pending) plus a `decision_counts` "
+                "summary across the result set."
             ),
             input_schema=SEARCH_SYNOPSIS_SCHEMA,
             execute=_t_search_synopsis,
