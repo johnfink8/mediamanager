@@ -13,6 +13,7 @@ const slugToName: Record<string, string> = {
     tv: "TV",
     history: "Item History",
     feedback: "Check Feedback",
+    admin: "Admin",
 };
 
 const nameToSlug: Record<string, string> = Object.fromEntries(
@@ -81,11 +82,13 @@ const navIconMap: Record<string, React.ReactElement> = {
     TV: <TVIcon />,
     "Item History": <HistoryIcon />,
     "Check Feedback": <ToolIcon />,
+    Admin: <ToolIcon />,
 };
 
 const queueItems = ["Movies", "TV"];
 const archiveItems = ["Item History"];
 const toolItems = ["Check Feedback"];
+const systemItems = ["Admin"];
 
 export default function AppShell() {
     const navigate = useNavigate();
@@ -151,6 +154,28 @@ export default function AppShell() {
                 <div className="nav-label">Tools</div>
                 {menuItems
                     .filter((e) => toolItems.includes(e.name))
+                    .map((entry) => (
+                        <button
+                            key={entry.name}
+                            className={`nav-item${
+                                selectedComponent === entry.name
+                                    ? " active"
+                                    : ""
+                            }`}
+                            onClick={() =>
+                                navigate(`/${nameToSlug[entry.name]}`)
+                            }
+                        >
+                            <span className="nav-icon">
+                                {navIconMap[entry.name] ?? null}
+                            </span>
+                            <span>{entry.name}</span>
+                        </button>
+                    ))}
+
+                <div className="nav-label">System</div>
+                {menuItems
+                    .filter((e) => systemItems.includes(e.name))
                     .map((entry) => (
                         <button
                             key={entry.name}

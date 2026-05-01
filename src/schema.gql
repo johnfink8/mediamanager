@@ -95,8 +95,8 @@ type IgnoreItem {
   checkedTitle: String
   posterUrl: String
   attributes: [AttributeEntry!]!
-  id: ID!
   createdAt: Int
+  id: ID!
 }
 
 type IgnoreItemList {
@@ -135,6 +135,10 @@ type Mutation {
   deferItem(data: DeferItemInput!): IgnoreItem!
   setRecommendationPreference(data: SetRecommendationPreferenceInput!): RecommendationFeedbackType!
   createFilterRule(data: FilterRuleInput!): MutationReturn!
+  triggerScheduledJob(id: ID!): ScheduledJobType!
+  pauseScheduledJob(id: ID!): ScheduledJobType!
+  resumeScheduledJob(id: ID!): ScheduledJobType!
+  updateScheduledJobTrigger(data: UpdateScheduledJobTriggerInput!): ScheduledJobType!
   deleteFilterRule(id: ID!): MutationReturn!
 }
 
@@ -166,11 +170,46 @@ input RetryAiInput {
   id: ID!
 }
 
+input ScheduledJobCronInput {
+  year: String = null
+  month: String = null
+  day: String = null
+  week: String = null
+  dayOfWeek: String = null
+  hour: String = null
+  minute: String = null
+  second: String = null
+}
+
+input ScheduledJobIntervalInput {
+  weeks: Int = null
+  days: Int = null
+  hours: Int = null
+  minutes: Int = null
+  seconds: Int = null
+}
+
+type ScheduledJobTriggerType {
+  kind: String!
+  expression: String!
+  fields: JSON!
+}
+
+type ScheduledJobType {
+  id: ID!
+  name: String!
+  description: String!
+  nextRunTime: String
+  paused: Boolean!
+  trigger: ScheduledJobTriggerType!
+}
+
 type SchemaQuery {
   items(itemType: String = null): IgnoreItemList!
   filterRules: FilterRuleList!
   checkRuns: CheckRunHistory!
   historicalItems(filters: [Filter!] = null, limit: Int! = 20, offset: Int! = 0, applyInvertedPermanentRules: Boolean! = false): HistoricalIgnoreItemList!
+  scheduledJobs: [ScheduledJobType!]!
   movieRecommendation(prompt: String = null): MovieRecommendationType
 }
 
@@ -186,4 +225,11 @@ input SetRecommendationPreferenceInput {
 
 type Subscription {
   items(itemType: String = null): IgnoreItemList!
+}
+
+input UpdateScheduledJobTriggerInput {
+  id: ID!
+  kind: String!
+  cron: ScheduledJobCronInput = null
+  interval: ScheduledJobIntervalInput = null
 }
