@@ -1,9 +1,12 @@
 import asyncio
-from typing import Any, Dict, List, Optional, Set
+import logging
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import quote_plus
 
 import requests
 from decouple import config
+
+logger = logging.getLogger(__name__)
 
 
 def _plex_headers() -> Dict[str, str]:
@@ -61,7 +64,7 @@ def get_recently_played(limit: int = 40) -> List[Dict[str, Any]]:
     return metadata[:limit]
 
 
-def _extract_imdb_from_guid(guid_value: str) -> Optional[str]:
+def _extract_imdb_from_guid(guid_value: Any) -> Optional[str]:
     if not guid_value:
         return None
     guid_value = str(guid_value)
@@ -111,6 +114,184 @@ async def aget_plex_details(
 
 async def aget_recently_played(limit: int = 40) -> List[Dict[str, Any]]:
     return await asyncio.to_thread(get_recently_played, limit)
+
+
+def _extract_tvdb_from_guid(guid_value: Any) -> Optional[str]:
+    if not guid_value:
+        return None
+    text = str(guid_value)
+    marker = "tvdb://"
+    if marker not in text:
+        return None
+    rest = text.split(marker, 1)[1]
+    rest = rest.split("?")[0].split("/")[0].strip()
+    return rest or None
+
+
+def _extract_ids_from_metadata(
+    entry: Dict[str, Any],
+) -> Tuple[Optional[str], Optional[str]]:
+    """Return ``(imdb_id, tvdb_id)`` extracted from a Plex metadata entry."""
+    imdb_id: Optional[str] = _extract_imdb_from_guid(entry.get("guid"))
+    tvdb_id: Optional[str] = _extract_tvdb_from_guid(entry.get("guid"))
+    guid_list = entry.get("Guid") or []
+    if isinstance(guid_list, list):
+        for guid_entry in guid_list:
+            value = guid_entry.get("id") if isinstance(guid_entry, dict) else None
+            if not imdb_id:
+                imdb_id = _extract_imdb_from_guid(value)
+            if not tvdb_id:
+                tvdb_id = _extract_tvdb_from_guid(value)
+            if imdb_id and tvdb_id:
+                break
+    return imdb_id, tvdb_id
+
+
+_PLEX_LIBRARY_ATTR_FIELDS = (
+    "summary",
+    "year",
+    "rating",
+    "audienceRating",
+    "userRating",
+    "contentRating",
+    "duration",
+    "originallyAvailableAt",
+    "studio",
+    "addedAt",
+    "viewCount",
+    "lastViewedAt",
+)
+
+
+def _normalize_library_item(
+    entry: Dict[str, Any], section_type: str
+) -> Optional[Dict[str, Any]]:
+    """Convert a Plex library metadata entry into a normalized record.
+
+    Returns ``None`` when no usable external id (IMDB for movies, TVDB for
+    shows) can be extracted.
+    """
+    imdb_id, tvdb_id = _extract_ids_from_metadata(entry)
+    if section_type == "movie":
+        if not imdb_id:
+            return None
+        item_type = "mv"
+        uid = imdb_id
+    elif section_type == "show":
+        if not tvdb_id:
+            return None
+        item_type = "tv"
+        uid = tvdb_id
+    else:
+        return None
+
+    attrs: Dict[str, Any] = {}
+    for key in _PLEX_LIBRARY_ATTR_FIELDS:
+        if key in entry and entry.get(key) not in (None, ""):
+            attrs[key] = entry[key]
+    summary = entry.get("summary")
+    if summary:
+        attrs["synopsis"] = summary
+    genres = entry.get("Genre") or []
+    if isinstance(genres, list):
+        names = [g.get("tag") for g in genres if isinstance(g, dict) and g.get("tag")]
+        if names:
+            attrs["genres"] = names
+    if imdb_id:
+        attrs["imdb_id"] = imdb_id
+    if tvdb_id:
+        attrs["tvdb_id"] = tvdb_id
+
+    return {
+        "item_type": item_type,
+        "uid": uid,
+        "title": entry.get("title") or "",
+        "poster_url": entry.get("thumb"),
+        "attributes": attrs,
+    }
+
+
+def iter_plex_library_items() -> Iterable[Dict[str, Any]]:
+    """Yield normalized records for every movie/show in Plex libraries."""
+    url = config("PLEX_URL")
+    headers = _plex_headers()
+    sections_resp = requests.get(f"{url}/library/sections", headers=headers)
+    sections_resp.raise_for_status()
+    directories = (
+        sections_resp.json().get("MediaContainer", {}).get("Directory", []) or []
+    )
+    for section in directories:
+        section_type = section.get("type")
+        if section_type not in ("movie", "show"):
+            continue
+        section_id = section.get("key")
+        if not section_id:
+            continue
+        page_resp = requests.get(
+            f"{url}/library/sections/{section_id}/all",
+            headers=headers,
+            params={"includeGuids": 1},
+        )
+        try:
+            page_resp.raise_for_status()
+        except Exception:
+            logger.exception("Plex library section %s fetch failed", section_id)
+            continue
+        items = page_resp.json().get("MediaContainer", {}).get("Metadata", []) or []
+        for entry in items:
+            normalized = _normalize_library_item(entry, section_type)
+            if normalized is not None:
+                yield normalized
+
+
+def scan_and_index_plex_library() -> Dict[str, int]:
+    """Scan all Plex libraries and upsert IgnoreItem rows for each item.
+
+    Items found in Plex are marked ``added=True`` and ``ignore=True`` so the
+    candidate UI hides them. Plex metadata (including the synopsis) is merged
+    into the ``attributes`` JSON without clobbering existing AI fields.
+    """
+    # Local import to avoid a circular import with ``models`` at module load.
+    from .models import IgnoreItem
+    from .session import db_session
+
+    created = 0
+    updated = 0
+    for record in iter_plex_library_items():
+        with db_session() as session:
+            existing = (
+                session.query(IgnoreItem)
+                .filter_by(item_type=record["item_type"], uid=record["uid"])
+                .one_or_none()
+            )
+            if existing is None:
+                session.add(
+                    IgnoreItem(
+                        item_type=record["item_type"],
+                        uid=record["uid"],
+                        title=record["title"],
+                        poster_url=record["poster_url"],
+                        attributes=record["attributes"],
+                        added=True,
+                        ignore=True,
+                        shown=False,
+                    )
+                )
+                created += 1
+            else:
+                merged = dict(existing.attributes or {})
+                merged.update(record["attributes"])
+                existing.attributes = merged
+                if record["title"] and not existing.title:
+                    existing.title = record["title"]
+                if record["poster_url"] and not existing.poster_url:
+                    existing.poster_url = record["poster_url"]
+                existing.added = True
+                existing.ignore = True
+                updated += 1
+            session.commit()
+    logger.info("Plex library scan complete: %d new, %d updated", created, updated)
+    return {"created": created, "updated": updated}
 
 
 def get_recently_played_imdb_ids(limit: int = 40) -> Set[str]:

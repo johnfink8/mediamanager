@@ -16,3 +16,4 @@ mypy
 alembic
 openai>=1.0.0
 weaviate-client==4.16.6
+apscheduler>=3.10,<4

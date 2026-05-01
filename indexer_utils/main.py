@@ -3,7 +3,8 @@ import json
 import logging
 import os
 import pathlib
-from typing import Any, Dict
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Dict
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
@@ -13,16 +14,15 @@ from pydantic import BaseModel
 from strawberry.fastapi import GraphQLRouter
 from strawberry.subscriptions import GRAPHQL_TRANSPORT_WS_PROTOCOL, GRAPHQL_WS_PROTOCOL
 
-from indexer_utils.vid_utils import (
-    check_movies,
-    check_shows,
-    get_movie_titles,
-    get_show_titles,
-)
-
 from .log import configure_logging
 from .models import IgnoreItem
-from .schema import events, schema
+from .scheduler import (
+    PLEX_SCAN_JOB_ID,
+    shutdown_scheduler,
+    start_scheduler,
+    trigger_plex_scan_now,
+)
+from .schema import schema
 
 configure_logging()
 
@@ -31,7 +31,22 @@ logger = logging.getLogger(__name__)
 
 ROOT_DIR = pathlib.Path(__file__).parent.parent
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Boot the persistent APScheduler. The Plex scan job itself lives in
+    # the SQLAlchemy jobstore (registered by Alembic migration
+    # ``add_plex_scan_job``); the scheduler simply picks it up and honors
+    # its persisted next_run_time, so a restart never causes an immediate
+    # scan and parallel workers won't double-fire.
+    start_scheduler()
+    try:
+        yield
+    finally:
+        shutdown_scheduler()
+
+
+app = FastAPI(lifespan=lifespan)
 graphql_app = GraphQLRouter(
     schema,
     subscription_protocols=[
@@ -82,32 +97,24 @@ async def index() -> HTMLResponse:
     return _render_app()
 
 
-@app.get("/check_new/")
-async def check_new() -> Dict[str, str]:
-    # check_movies / check_shows internally use asyncio.run, which would
-    # collide with the running FastAPI event loop. Offload to a worker
-    # thread so each invocation gets its own asyncio context.
-    logger.info("Checking movies")
-    for i in (1, 4, 30):
-        await asyncio.to_thread(check_movies, i)
-    events.get("mv").set()
-    logger.info("Checking shows")
-    for i in (1, 4, 30):
-        await asyncio.to_thread(check_shows, i)
-    logger.info("Shows done")
-    events.get("tv").set()
-    return {"status": "done"}
+@app.post("/admin/scan_plex/")
+async def scan_plex_now() -> Dict[str, Any]:
+    """Reschedule the persistent Plex scan job to fire immediately.
 
-
-@app.get("/check_titles/")
-async def check_titles() -> Dict[str, str]:
-    logger.info("Checking movies")
-    get_movie_titles()
-    events.get("mv").set()
-    logger.info("checking shows")
-    get_show_titles()
-    events.get("tv").set()
-    return {"status": "done"}
+    Kept for shell-level access (curl). The Admin UI calls the
+    ``triggerScheduledJob`` GraphQL mutation, which can trigger any of
+    the registered jobs.
+    """
+    next_run = await asyncio.to_thread(trigger_plex_scan_now)
+    if next_run is None:
+        return {
+            "status": "error",
+            "detail": (
+                f"Job {PLEX_SCAN_JOB_ID!r} not registered — apply the "
+                "add_plex_scan_job Alembic migration."
+            ),
+        }
+    return {"status": "scheduled", "job_id": PLEX_SCAN_JOB_ID, "next_run": next_run}
 
 
 if os.environ.get("DEBUG"):
