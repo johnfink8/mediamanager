@@ -168,11 +168,120 @@ def _summarize_item(item: IgnoreItem) -> Dict[str, Any]:
         "rating_value": attrs.get("rating_value"),
         "rating_votes": attrs.get("rating_votes"),
     }
-    if attrs.get("network"):
-        summary["network"] = attrs["network"]
-    if attrs.get("studio"):
-        summary["studio"] = attrs["studio"]
+    for key in ("network", "studio", "director", "runtime"):
+        if attrs.get(key):
+            summary[key] = attrs[key]
+    lang = attrs.get("originalLanguage")
+    if lang:
+        summary["language"] = lang
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Shared optional filters across search_by_genre / search_by_network /
+# search_similar_by_synopsis. Each tool exposes the same set so the agent
+# learns one filter vocabulary; missing fields on a row never match a
+# numeric filter (we skip rather than match-by-default).
+# ---------------------------------------------------------------------------
+
+SHARED_FILTER_PROPS: Dict[str, Any] = {
+    "language": {
+        "type": "string",
+        "description": (
+            "Original language. Case-insensitive substring (e.g. 'en', "
+            "'english', 'ja')."
+        ),
+    },
+    "director": {
+        "type": "string",
+        "description": (
+            "Director name. Case-insensitive substring. Movies only — "
+            "TV rows have no director field."
+        ),
+    },
+    "runtime_min": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Min runtime in minutes (movies: total; TV: per-episode).",
+    },
+    "runtime_max": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Max runtime in minutes.",
+    },
+    "rating_min": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 10,
+        "description": "Minimum rating value (0-10 scale).",
+    },
+    "votes_min": {
+        "type": "integer",
+        "minimum": 0,
+        "description": (
+            "Minimum rating-vote count. Use to suppress shows with high "
+            "ratings backed by very few votes."
+        ),
+    },
+    "year_min": {"type": "integer", "description": "Earliest release year."},
+    "year_max": {"type": "integer", "description": "Latest release year."},
+}
+
+
+def _row_passes_filters(item: IgnoreItem, filters: Dict[str, Any]) -> bool:
+    """Return True if the row passes every specified filter. Missing data
+    on the row counts as a fail for any filter that names that field —
+    otherwise a search-by-runtime would silently include items with no
+    runtime, which is misleading.
+    """
+    if not filters:
+        return True
+    attrs = item.attributes or {}
+
+    if filters.get("language"):
+        needle = str(filters["language"]).strip().lower()
+        haystack = str(attrs.get("originalLanguage") or "").lower()
+        if needle and needle not in haystack:
+            return False
+
+    if filters.get("director"):
+        needle = str(filters["director"]).strip().lower()
+        haystack = str(attrs.get("director") or "").lower()
+        if needle and needle not in haystack:
+            return False
+
+    runtime = attrs.get("runtime")
+    if filters.get("runtime_min") is not None:
+        if not isinstance(runtime, (int, float)) or runtime < filters["runtime_min"]:
+            return False
+    if filters.get("runtime_max") is not None:
+        if not isinstance(runtime, (int, float)) or runtime > filters["runtime_max"]:
+            return False
+
+    rating = attrs.get("rating_value")
+    if filters.get("rating_min") is not None:
+        if not isinstance(rating, (int, float)) or rating < filters["rating_min"]:
+            return False
+
+    votes = attrs.get("rating_votes")
+    if filters.get("votes_min") is not None:
+        if not isinstance(votes, (int, float)) or votes < filters["votes_min"]:
+            return False
+
+    year = attrs.get("year")
+    if filters.get("year_min") is not None:
+        if not isinstance(year, (int, float)) or year < filters["year_min"]:
+            return False
+    if filters.get("year_max") is not None:
+        if not isinstance(year, (int, float)) or year > filters["year_max"]:
+            return False
+
+    return True
+
+
+def _extract_filters(input_: Dict[str, Any]) -> Dict[str, Any]:
+    """Pull just the shared-filter keys out of a tool's input dict."""
+    return {k: input_[k] for k in SHARED_FILTER_PROPS if input_.get(k) is not None}
 
 
 def _query_db_items(item_type: str, uids: List[str]) -> Dict[str, IgnoreItem]:
@@ -209,6 +318,7 @@ SEARCH_SYNOPSIS_SCHEMA: Dict[str, Any] = {
             "maximum": 25,
             "description": "Max results. Default 10.",
         },
+        **SHARED_FILTER_PROPS,
     },
     "required": ["query"],
 }
@@ -224,6 +334,7 @@ async def _t_search_synopsis(input_: Dict[str, Any], ctx: ToolContext) -> ToolRe
     raw = await asearch_by_synopsis(query, limit, ctx.item_type)
     uids = [r["uid"] for r in raw if r.get("uid")]
     db_rows = _query_db_items(ctx.item_type, uids)
+    filters = _extract_filters(input_)
 
     candidate_uid = ctx.candidate.get("uid")
     results: List[Dict[str, Any]] = []
@@ -233,6 +344,13 @@ async def _t_search_synopsis(input_: Dict[str, Any], ctx: ToolContext) -> ToolRe
         if not uid or uid == candidate_uid:
             continue
         row = db_rows.get(uid)
+        if row is not None and not _row_passes_filters(row, filters):
+            continue
+        if row is None and filters:
+            # No DB row → can't evaluate filters → omit. This avoids
+            # silently returning unfilterable hits when the agent asked
+            # for a constraint.
+            continue
         item: Dict[str, Any] = {
             "uid": uid,
             "title": hit.get("title"),
@@ -241,20 +359,13 @@ async def _t_search_synopsis(input_: Dict[str, Any], ctx: ToolContext) -> ToolRe
             ),
         }
         if row is not None:
-            row_attrs = row.attributes or {}
-            decision = _decision(row)
+            summary = _summarize_item(row)
+            decision = summary["decision"]
             counts[decision] += 1
-            item.update(
-                {
-                    "decision": decision,
-                    "genres": _attrs_get_genres(row_attrs),
-                    "year": row_attrs.get("year"),
-                }
-            )
-            if row_attrs.get("network"):
-                item["network"] = row_attrs["network"]
-            if row_attrs.get("studio"):
-                item["studio"] = row_attrs["studio"]
+            # Drop fields already on the synopsis hit (uid, title) and merge.
+            for k, v in summary.items():
+                if k not in ("uid", "title"):
+                    item[k] = v
         results.append(item)
     output = {"results": results, "decision_counts": counts}
     return ToolResult(
@@ -288,6 +399,7 @@ SEARCH_GENRE_SCHEMA: Dict[str, Any] = {
             "maximum": 50,
             "description": "Max results. Default 15.",
         },
+        **SHARED_FILTER_PROPS,
     },
     "required": ["genres"],
 }
@@ -304,6 +416,7 @@ async def _t_search_genre(input_: Dict[str, Any], ctx: ToolContext) -> ToolResul
     limit = int(input_.get("limit") or 15)
     limit = max(1, min(limit, 50))
 
+    filters = _extract_filters(input_)
     candidate_uid = ctx.candidate.get("uid")
     matches: List[Dict[str, Any]] = []
     counts = _empty_decision_counts()
@@ -316,6 +429,8 @@ async def _t_search_genre(input_: Dict[str, Any], ctx: ToolContext) -> ToolResul
                 continue
             row_genres = {g.lower() for g in _attrs_get_genres(row.attributes)}
             if not (row_genres & wanted):
+                continue
+            if not _row_passes_filters(row, filters):
                 continue
             counts[_decision(row)] += 1
             if len(matches) < limit:
@@ -352,6 +467,7 @@ SEARCH_NETWORK_SCHEMA: Dict[str, Any] = {
             "maximum": 50,
             "description": "Max results. Default 15.",
         },
+        **SHARED_FILTER_PROPS,
     },
     "required": ["network"],
 }
@@ -366,6 +482,7 @@ async def _t_search_network(input_: Dict[str, Any], ctx: ToolContext) -> ToolRes
     limit = int(input_.get("limit") or 15)
     limit = max(1, min(limit, 50))
 
+    filters = _extract_filters(input_)
     candidate_uid = ctx.candidate.get("uid")
     matches: List[Dict[str, Any]] = []
     counts = _empty_decision_counts()
@@ -380,6 +497,8 @@ async def _t_search_network(input_: Dict[str, Any], ctx: ToolContext) -> ToolRes
             net = str(attrs.get("network") or "").lower()
             studio = str(attrs.get("studio") or "").lower()
             if needle not in net and needle not in studio:
+                continue
+            if not _row_passes_filters(row, filters):
                 continue
             counts[_decision(row)] += 1
             if len(matches) < limit:
@@ -438,6 +557,8 @@ async def _t_get_details(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult
             "cast": _clip_list_of_strings(attrs.get("cast"), CAST_LIMIT),
             "network": attrs.get("network"),
             "studio": attrs.get("studio"),
+            "director": attrs.get("director"),
+            "runtime": attrs.get("runtime"),
             "language": attrs.get("originalLanguage"),
             "rating_value": attrs.get("rating_value"),
             "rating_votes": attrs.get("rating_votes"),
