@@ -21,6 +21,12 @@ from openai import AsyncOpenAI
 from .base import Tool, ToolContext, safe_input, truncate_for_log
 
 logger = logging.getLogger(__name__)
+# Match the rest of indexer_utils — emit INFO-level logs to stdout regardless
+# of how the host configures the root logger. Guard against duplicate handlers
+# on module re-import.
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    logger.addHandler(logging.StreamHandler())
 
 
 class NoSubmissionError(RuntimeError):
@@ -88,13 +94,14 @@ async def _dispatch_tool_call(
             error = exc.__class__.__name__
 
     duration_ms = int((time.monotonic() - started) * 1000)
+    output_preview = truncate_for_log(output, 600)
     audit_entry = {
         "name": name,
         "arguments": arguments,
         "duration_ms": duration_ms,
         "error": error,
         "is_terminal": is_terminal,
-        "output_preview": truncate_for_log(output, 600),
+        "output_preview": output_preview,
     }
     logger.info(
         "%s tool=%s ms=%d err=%s args=%s",
@@ -102,8 +109,17 @@ async def _dispatch_tool_call(
         name,
         duration_ms,
         error or "-",
-        truncate_for_log(arguments, 200),
+        truncate_for_log(arguments, 400),
     )
+    # Show what came back so the agent's reasoning is reviewable from logs
+    # alone. Terminal submission gets its own dedicated line below in run_agent.
+    if not is_terminal:
+        logger.info(
+            "%s tool=%s -> %s",
+            log_tag,
+            name,
+            truncate_for_log(output_preview, 800),
+        )
     message = {
         "role": "tool",
         "tool_call_id": tool_call.id,
@@ -234,6 +250,14 @@ async def run_agent(
         assistant_msg: Dict[str, Any] = {"role": "assistant"}
         if message.content:
             assistant_msg["content"] = message.content
+            # Surface the model's reasoning so the log is enough to follow
+            # how a verdict was reached.
+            logger.info(
+                "%s turn=%d says: %s",
+                log_tag,
+                result.turns,
+                truncate_for_log(message.content, 800),
+            )
         if tool_calls:
             assistant_msg["tool_calls"] = [
                 {
@@ -291,9 +315,12 @@ async def run_agent(
         if terminal_payload is not None:
             result.submission = terminal_payload
             logger.info(
-                "%s submitted recommend=%s score=%s",
+                "%s submitted recommend=%s score=%s turns=%d tool_calls=%d reason=%s",
                 log_tag,
                 terminal_payload.get("recommend"),
                 terminal_payload.get("score"),
+                result.turns,
+                result.tool_calls,
+                truncate_for_log(terminal_payload.get("reason"), 320),
             )
             return result

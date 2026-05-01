@@ -378,7 +378,16 @@ async def annotate_with_ai_async(
     fresh client is built and closed within this call so the caller doesn't
     have to manage its lifecycle.
     """
-    logger.info("Annotating %s %s %s", item_type, uid, title)
+    import time as _time
+
+    started_at = _time.monotonic()
+    logger.info(
+        "annotate START %s:%s '%s' genres=%s",
+        item_type,
+        uid,
+        title,
+        _to_list_of_str(attrs.get("genres")),
+    )
     genres = _to_list_of_str(attrs.get("genres"))
     lang = _to_list_of_str(attrs.get("originalLanguage"))
     year = _year_from_attrs(attrs)
@@ -412,6 +421,22 @@ async def annotate_with_ai_async(
     candidate_synopsis, synopsis_failure = await agenerate_synopsis_for_candidate(
         title, year, genres, lang, item_type, attrs.get("cast")
     )
+    if synopsis_failure:
+        logger.warning(
+            "annotate %s:%s synopsis FAILED: %s",
+            item_type,
+            uid,
+            synopsis_failure.get("message"),
+        )
+    elif candidate_synopsis:
+        logger.info(
+            "annotate %s:%s synopsis: %s",
+            item_type,
+            uid,
+            (candidate_synopsis[:480] + " …")
+            if len(candidate_synopsis) > 480
+            else candidate_synopsis,
+        )
     attrs = await asyncio.to_thread(
         upsert_item_attrs, attrs, item_type, uid, title, candidate_synopsis
     )
@@ -471,6 +496,32 @@ async def annotate_with_ai_async(
     attrs_out["ai"] = _ai_details_from_run(
         run, candidate_synopsis, synopsis_failure, base_ai
     )
+    elapsed = _time.monotonic() - started_at
+    ai_out = attrs_out["ai"]
+    if ai_out.get("failed"):
+        logger.warning(
+            "annotate FAIL  %s:%s '%s' elapsed=%.1fs failure=%s",
+            item_type,
+            uid,
+            title,
+            elapsed,
+            ai_out.get("failure"),
+        )
+    else:
+        reason = ai_out.get("reason") or ""
+        logger.info(
+            "annotate DONE  %s:%s '%s' recommend=%s score=%s "
+            "turns=%s tool_calls=%s elapsed=%.1fs reason=%s",
+            item_type,
+            uid,
+            title,
+            ai_out.get("value"),
+            ai_out.get("score"),
+            ai_out.get("turns"),
+            ai_out.get("tool_calls"),
+            elapsed,
+            reason if len(reason) <= 320 else reason[:320] + " …",
+        )
     return attrs_out
 
 
