@@ -110,26 +110,57 @@ const formatNextRun = (iso: string | null | undefined): string => {
     return d.toLocaleString();
 };
 
-interface CronFields {
-    year: string;
-    month: string;
-    day: string;
-    week: string;
-    day_of_week: string;
-    hour: string;
-    minute: string;
-    second: string;
-}
+const CRON_FIELD_KEYS = [
+    "year",
+    "month",
+    "day",
+    "week",
+    "day_of_week",
+    "hour",
+    "minute",
+    "second",
+] as const;
+type CronFieldKey = (typeof CRON_FIELD_KEYS)[number];
+type CronFields = Record<CronFieldKey, string>;
 
-interface IntervalFields {
-    weeks: string;
-    days: string;
-    hours: string;
-    minutes: string;
-    seconds: string;
-}
+const INTERVAL_FIELD_KEYS = [
+    "weeks",
+    "days",
+    "hours",
+    "minutes",
+    "seconds",
+] as const;
+type IntervalFieldKey = (typeof INTERVAL_FIELD_KEYS)[number];
+type IntervalFields = Record<IntervalFieldKey, string>;
 
-const blankCron: CronFields = {
+type TriggerKind = "cron" | "interval";
+
+const isTriggerKind = (value: unknown): value is TriggerKind =>
+    value === "cron" || value === "interval";
+
+const CRON_FIELD_DEFS: readonly { key: CronFieldKey; label: string }[] = [
+    { key: "day_of_week", label: "Day of week" },
+    { key: "hour", label: "Hour" },
+    { key: "minute", label: "Minute" },
+    { key: "second", label: "Second" },
+    { key: "day", label: "Day of month" },
+    { key: "month", label: "Month" },
+    { key: "week", label: "Week" },
+    { key: "year", label: "Year" },
+];
+
+const INTERVAL_FIELD_DEFS: readonly {
+    key: IntervalFieldKey;
+    label: string;
+}[] = [
+    { key: "weeks", label: "Weeks" },
+    { key: "days", label: "Days" },
+    { key: "hours", label: "Hours" },
+    { key: "minutes", label: "Minutes" },
+    { key: "seconds", label: "Seconds" },
+];
+
+const blankCron = (): CronFields => ({
     year: "",
     month: "",
     day: "",
@@ -138,37 +169,38 @@ const blankCron: CronFields = {
     hour: "",
     minute: "",
     second: "",
-};
+});
 
-const blankInterval: IntervalFields = {
+const blankInterval = (): IntervalFields => ({
     weeks: "",
     days: "",
     hours: "",
     minutes: "",
     seconds: "",
+});
+
+// `fields` comes from the GraphQL JSON scalar (typed `any` by Relay), so
+// narrow it with a real type predicate before reading any keys.
+const isUnknownRecord = (value: unknown): value is Record<string, unknown> =>
+    typeof value === "object" && value !== null && !Array.isArray(value);
+
+const cronFromJobFields = (fields: unknown): CronFields => {
+    const result = blankCron();
+    if (!isUnknownRecord(fields)) return result;
+    for (const key of CRON_FIELD_KEYS) {
+        const v = fields[key];
+        if (typeof v === "string") result[key] = v;
+    }
+    return result;
 };
 
-const cronFromJobFields = (
-    fields: Record<string, unknown> | null | undefined
-): CronFields => {
-    const f = (fields ?? {}) as Record<string, string>;
-    return {
-        ...blankCron,
-        ...Object.fromEntries(
-            Object.entries(f).filter(([, v]) => typeof v === "string")
-        ),
-    } as CronFields;
-};
-
-const intervalFromJobFields = (
-    fields: Record<string, unknown> | null | undefined
-): IntervalFields => {
-    const f = (fields ?? {}) as Record<string, string>;
-    const result: IntervalFields = { ...blankInterval };
-    (["weeks", "days", "hours", "minutes", "seconds"] as const).forEach((k) => {
-        const v = f[k];
-        if (v && v !== "0") result[k] = v;
-    });
+const intervalFromJobFields = (fields: unknown): IntervalFields => {
+    const result = blankInterval();
+    if (!isUnknownRecord(fields)) return result;
+    for (const key of INTERVAL_FIELD_KEYS) {
+        const v = fields[key];
+        if (typeof v === "string" && v !== "0") result[key] = v;
+    }
     return result;
 };
 
@@ -186,21 +218,18 @@ const JobRow: React.FC<{ job: Job; onAfterMutation: () => void }> = ({
     const [updateTrigger, isUpdating] =
         useMutation<AdminPanelUpdateTriggerMutation>(UpdateTriggerMutation);
 
-    const initialKind = job.trigger.kind === "interval" ? "interval" : "cron";
-    const [kind, setKind] = useState<"cron" | "interval">(initialKind);
+    const initialKind: TriggerKind =
+        job.trigger.kind === "interval" ? "interval" : "cron";
+    const [kind, setKind] = useState<TriggerKind>(initialKind);
     const [cronFields, setCronFields] = useState<CronFields>(() =>
         job.trigger.kind === "cron"
-            ? cronFromJobFields(
-                  job.trigger.fields as Record<string, unknown> | null
-              )
-            : blankCron
+            ? cronFromJobFields(job.trigger.fields)
+            : blankCron()
     );
     const [intervalFields, setIntervalFields] = useState<IntervalFields>(() =>
         job.trigger.kind === "interval"
-            ? intervalFromJobFields(
-                  job.trigger.fields as Record<string, unknown> | null
-              )
-            : blankInterval
+            ? intervalFromJobFields(job.trigger.fields)
+            : blankInterval()
     );
 
     const handleTrigger = () => {
@@ -359,9 +388,9 @@ const JobRow: React.FC<{ job: Job; onAfterMutation: () => void }> = ({
                                 value={kind}
                                 exclusive
                                 size="small"
-                                onChange={(_, v) =>
-                                    v && setKind(v as "cron" | "interval")
-                                }
+                                onChange={(_, v) => {
+                                    if (isTriggerKind(v)) setKind(v);
+                                }}
                             >
                                 <ToggleButton value="cron">Cron</ToggleButton>
                                 <ToggleButton value="interval">
@@ -377,18 +406,7 @@ const JobRow: React.FC<{ job: Job; onAfterMutation: () => void }> = ({
                                 Cron schedule (blank = wildcard)
                             </Typography>
                             <Grid container spacing={1}>
-                                {(
-                                    [
-                                        ["day_of_week", "Day of week"],
-                                        ["hour", "Hour"],
-                                        ["minute", "Minute"],
-                                        ["second", "Second"],
-                                        ["day", "Day of month"],
-                                        ["month", "Month"],
-                                        ["week", "Week"],
-                                        ["year", "Year"],
-                                    ] as [keyof CronFields, string][]
-                                ).map(([key, label]) => (
+                                {CRON_FIELD_DEFS.map(({ key, label }) => (
                                     <Grid item xs={6} sm={3} key={key}>
                                         <TextField
                                             size="small"
@@ -413,15 +431,7 @@ const JobRow: React.FC<{ job: Job; onAfterMutation: () => void }> = ({
                                 Interval (blank = 0)
                             </Typography>
                             <Grid container spacing={1}>
-                                {(
-                                    [
-                                        ["weeks", "Weeks"],
-                                        ["days", "Days"],
-                                        ["hours", "Hours"],
-                                        ["minutes", "Minutes"],
-                                        ["seconds", "Seconds"],
-                                    ] as [keyof IntervalFields, string][]
-                                ).map(([key, label]) => (
+                                {INTERVAL_FIELD_DEFS.map(({ key, label }) => (
                                     <Grid item xs={6} sm={2.4} key={key}>
                                         <TextField
                                             size="small"
