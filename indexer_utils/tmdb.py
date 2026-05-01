@@ -30,6 +30,23 @@ def get_movie_cast(movie_id: int, n: int = 10) -> List[str]:
     return [cast["name"] for cast in response["cast"][:n]]
 
 
+def get_movie_director(movie_id: int) -> Optional[str]:
+    """Return the primary director name for a TMDB movie, or None.
+
+    For multi-director films, returns the first Director credit (TMDB
+    typically lists co-directors in alphabetical order).
+    """
+    url = f"https://api.themoviedb.org/3/movie/{movie_id}/credits?language=en-US"
+    response = requests.get(url, headers=_auth_headers())
+    crew = response.json().get("crew") or []
+    for member in crew:
+        if member.get("job") == "Director":
+            name = member.get("name")
+            if name:
+                return str(name)
+    return None
+
+
 def get_movie_release_count(movie_id: int) -> int:
     url = f"https://api.themoviedb.org/3/movie/{movie_id}/release_dates?language=en-US"
     response = requests.get(url, headers=_auth_headers())
