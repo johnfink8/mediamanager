@@ -46,6 +46,7 @@ def get_recently_played(limit: int = 40) -> List[Dict[str, Any]]:
     url = config("PLEX_URL")
     headers = _plex_headers()
     params = {"maxResults": limit, "metadataItemType": 1}
+    logger.info("Fetching Plex play history (limit=%d)", limit)
     response = requests.get(
         f"{url}/status/sessions/history/all",
         headers=headers,
@@ -262,16 +263,17 @@ def scan_and_index_plex_library() -> Dict[str, int]:
     seen = 0
     started = time.monotonic()
     logger.info("Plex library scan starting")
-    for record in iter_plex_library_items():
-        seen += 1
-        if seen % 500 == 0:
-            logger.info(
-                "Plex library scan progress: %d items scanned (%d new, %d updated)",
-                seen,
-                created,
-                updated,
-            )
-        with db_session() as session:
+    BATCH = 100
+    with db_session() as session:
+        for record in iter_plex_library_items():
+            seen += 1
+            if seen % 500 == 0:
+                logger.info(
+                    "Plex library scan progress: %d items scanned (%d new, %d updated)",
+                    seen,
+                    created,
+                    updated,
+                )
             # There is no unique constraint on (item_type, uid) so historical
             # races can leave duplicates. Take the lowest-id row as canonical
             # and merge into it; ``.one_or_none()`` would crash here.
@@ -316,7 +318,9 @@ def scan_and_index_plex_library() -> Dict[str, int]:
                 existing.added = True
                 existing.ignore = True
                 updated += 1
-            session.commit()
+            if seen % BATCH == 0:
+                session.commit()
+        session.commit()
     elapsed = time.monotonic() - started
     logger.info(
         "Plex library scan complete in %.1fs: %d items, %d new, %d updated, %d duplicate rows seen",
