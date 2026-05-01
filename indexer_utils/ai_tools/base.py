@@ -54,9 +54,7 @@ class Tool:
 
 def truncate_for_log(value: Any, limit: int = 400) -> str:
     text = str(value)
-    if len(text) <= limit:
-        return text
-    return text[:limit] + f"... <truncated {len(text) - limit} chars>"
+    return text
 
 
 def safe_input(arguments: Optional[str]) -> Dict[str, Any]:
