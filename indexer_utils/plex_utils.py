@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import quote_plus
 
@@ -257,14 +258,30 @@ def scan_and_index_plex_library() -> Dict[str, int]:
 
     created = 0
     updated = 0
+    duplicates_seen = 0
+    seen = 0
+    started = time.monotonic()
+    logger.info("Plex library scan starting")
     for record in iter_plex_library_items():
+        seen += 1
+        if seen % 500 == 0:
+            logger.info(
+                "Plex library scan progress: %d items scanned (%d new, %d updated)",
+                seen,
+                created,
+                updated,
+            )
         with db_session() as session:
-            existing = (
+            # There is no unique constraint on (item_type, uid) so historical
+            # races can leave duplicates. Take the lowest-id row as canonical
+            # and merge into it; ``.one_or_none()`` would crash here.
+            matches = (
                 session.query(IgnoreItem)
                 .filter_by(item_type=record["item_type"], uid=record["uid"])
-                .one_or_none()
+                .order_by(IgnoreItem.id)
+                .all()
             )
-            if existing is None:
+            if not matches:
                 session.add(
                     IgnoreItem(
                         item_type=record["item_type"],
@@ -279,6 +296,16 @@ def scan_and_index_plex_library() -> Dict[str, int]:
                 )
                 created += 1
             else:
+                if len(matches) > 1:
+                    duplicates_seen += len(matches) - 1
+                    logger.warning(
+                        "Duplicate IgnoreItem rows for %s/%s: %d copies (ids=%s)",
+                        record["item_type"],
+                        record["uid"],
+                        len(matches),
+                        [m.id for m in matches],
+                    )
+                existing = matches[0]
                 merged = dict(existing.attributes or {})
                 merged.update(record["attributes"])
                 existing.attributes = merged
@@ -290,7 +317,15 @@ def scan_and_index_plex_library() -> Dict[str, int]:
                 existing.ignore = True
                 updated += 1
             session.commit()
-    logger.info("Plex library scan complete: %d new, %d updated", created, updated)
+    elapsed = time.monotonic() - started
+    logger.info(
+        "Plex library scan complete in %.1fs: %d items, %d new, %d updated, %d duplicate rows seen",
+        elapsed,
+        seen,
+        created,
+        updated,
+        duplicates_seen,
+    )
     return {"created": created, "updated": updated}
 
 
