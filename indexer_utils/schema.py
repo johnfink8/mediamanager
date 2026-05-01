@@ -515,6 +515,73 @@ class MovieRecommendationType:
         )
 
 
+# ---------------------------------------------------------------------------
+# Admin: APScheduler job management
+# ---------------------------------------------------------------------------
+
+
+@strawberry.type
+class ScheduledJobTriggerType:
+    kind: str
+    expression: str
+    fields: JSON
+
+
+@strawberry.type
+class ScheduledJobType:
+    id: ID
+    name: str
+    description: str
+    next_run_time: Optional[str]
+    paused: bool
+    trigger: ScheduledJobTriggerType
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ScheduledJobType":
+        trig = data["trigger"]
+        return cls(
+            id=data["id"],
+            name=data["name"],
+            description=data["description"],
+            next_run_time=data["next_run_time"],
+            paused=data["paused"],
+            trigger=ScheduledJobTriggerType(
+                kind=trig["kind"],
+                expression=trig["expression"],
+                fields=trig["fields"],
+            ),
+        )
+
+
+@strawberry.input
+class ScheduledJobCronInput:
+    year: Optional[str] = None
+    month: Optional[str] = None
+    day: Optional[str] = None
+    week: Optional[str] = None
+    day_of_week: Optional[str] = None
+    hour: Optional[str] = None
+    minute: Optional[str] = None
+    second: Optional[str] = None
+
+
+@strawberry.input
+class ScheduledJobIntervalInput:
+    weeks: Optional[int] = None
+    days: Optional[int] = None
+    hours: Optional[int] = None
+    minutes: Optional[int] = None
+    seconds: Optional[int] = None
+
+
+@strawberry.input
+class UpdateScheduledJobTriggerInput:
+    id: ID
+    kind: str
+    cron: Optional[ScheduledJobCronInput] = None
+    interval: Optional[ScheduledJobIntervalInput] = None
+
+
 @strawberry.type
 class SchemaQuery:
     @strawberry.field
@@ -548,6 +615,12 @@ class SchemaQuery:
             offset=offset,
             apply_inverted_permanent_rules=apply_inverted_permanent_rules,
         )
+
+    @strawberry.field
+    def scheduled_jobs(self: "SchemaQuery") -> List[ScheduledJobType]:
+        from indexer_utils.scheduler import list_scheduled_jobs
+
+        return [ScheduledJobType.from_dict(d) for d in list_scheduled_jobs()]
 
     @strawberry.field
     def movie_recommendation(
@@ -897,6 +970,77 @@ class Mutation:
             ignore_items = IgnoreItemList(item_type=data.item_type)
             filter_rules = FilterRuleList()
             return MutationReturn(ignore_items=ignore_items, filter_rules=filter_rules)
+
+    # ----- Admin: APScheduler job management -----
+
+    @strawberry.mutation
+    def trigger_scheduled_job(self, id: ID) -> ScheduledJobType:
+        from indexer_utils.scheduler import trigger_job_now
+
+        result = trigger_job_now(str(id))
+        if result is None:
+            raise Exception(f"Scheduled job not found: {id}")
+        return ScheduledJobType.from_dict(result)
+
+    @strawberry.mutation
+    def pause_scheduled_job(self, id: ID) -> ScheduledJobType:
+        from indexer_utils.scheduler import pause_job
+
+        result = pause_job(str(id))
+        if result is None:
+            raise Exception(f"Scheduled job not found: {id}")
+        return ScheduledJobType.from_dict(result)
+
+    @strawberry.mutation
+    def resume_scheduled_job(self, id: ID) -> ScheduledJobType:
+        from indexer_utils.scheduler import resume_job
+
+        result = resume_job(str(id))
+        if result is None:
+            raise Exception(f"Scheduled job not found: {id}")
+        return ScheduledJobType.from_dict(result)
+
+    @strawberry.mutation
+    def update_scheduled_job_trigger(
+        self, data: UpdateScheduledJobTriggerInput
+    ) -> ScheduledJobType:
+        from indexer_utils.scheduler import update_job_trigger
+
+        cron_args: Optional[Dict[str, str]] = None
+        if data.cron is not None:
+            cron_args = {
+                k: v
+                for k, v in {
+                    "year": data.cron.year,
+                    "month": data.cron.month,
+                    "day": data.cron.day,
+                    "week": data.cron.week,
+                    "day_of_week": data.cron.day_of_week,
+                    "hour": data.cron.hour,
+                    "minute": data.cron.minute,
+                    "second": data.cron.second,
+                }.items()
+                if v is not None and v != ""
+            }
+        interval_args: Optional[Dict[str, int]] = None
+        if data.interval is not None:
+            interval_args = {
+                k: v
+                for k, v in {
+                    "weeks": data.interval.weeks,
+                    "days": data.interval.days,
+                    "hours": data.interval.hours,
+                    "minutes": data.interval.minutes,
+                    "seconds": data.interval.seconds,
+                }.items()
+                if v is not None
+            }
+        result = update_job_trigger(
+            str(data.id), kind=data.kind, cron=cron_args, interval=interval_args
+        )
+        if result is None:
+            raise Exception(f"Scheduled job not found: {data.id}")
+        return ScheduledJobType.from_dict(result)
 
     @strawberry.mutation
     def delete_filter_rule(self, id: GlobalID) -> MutationReturn:
