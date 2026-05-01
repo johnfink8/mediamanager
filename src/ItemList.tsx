@@ -133,7 +133,9 @@ const ItemList: FC<{
                     {recheckItemType && items.length > 0 && (
                         <>
                             <button
-                                className="btn ghost"
+                                className={`btn ghost${
+                                    isRechecking ? " is-scanning" : ""
+                                }`}
                                 onClick={() =>
                                     recheckVisible({
                                         variables: {
@@ -143,7 +145,14 @@ const ItemList: FC<{
                                 }
                                 disabled={isRechecking}
                             >
-                                Re-scan
+                                {isRechecking ? (
+                                    <>
+                                        <span className="scan-spinner" />
+                                        Scanning…
+                                    </>
+                                ) : (
+                                    "Re-scan"
+                                )}
                             </button>
                             <button
                                 className="btn"
@@ -168,7 +177,7 @@ const ItemList: FC<{
                                         },
                                     })
                                 }
-                                disabled={isAccepting}
+                                disabled={isAccepting || isRechecking}
                             >
                                 Accept all recommended
                             </button>
@@ -196,11 +205,55 @@ const ItemList: FC<{
                 </div>
             )}
 
+            {isRechecking && (
+                <div className="scan-banner">
+                    <div className="scan-banner-text">
+                        <strong>Re-scanning {sectionLabel}…</strong>
+                        <span>This usually takes a minute or two.</span>
+                    </div>
+                    <div className="scan-indeterminate">
+                        <span />
+                    </div>
+                    <div className="scan-banner-progress" />
+                </div>
+            )}
+
             <div className="queue">
-                {items.map((item) => (
-                    <ItemDetail key={item.uid} item={item} />
-                ))}
-                {items.length === 0 && (
+                {isRechecking
+                    ? [0, 1, 2, 3].map((n) => (
+                          <div className="skeleton-card" key={`skel-${n}`}>
+                              <div className="skeleton-poster" />
+                              <div className="skeleton-body">
+                                  <div
+                                      className="skeleton-line"
+                                      style={{ width: "70%" }}
+                                  />
+                                  <div
+                                      className="skeleton-line"
+                                      style={{ width: "40%" }}
+                                  />
+                                  <div
+                                      className="skeleton-line"
+                                      style={{
+                                          width: "90%",
+                                          height: 80,
+                                          marginTop: 8,
+                                      }}
+                                  />
+                                  <div
+                                      className="skeleton-line"
+                                      style={{
+                                          width: "60%",
+                                          marginTop: "auto",
+                                      }}
+                                  />
+                              </div>
+                          </div>
+                      ))
+                    : items.map((item) => (
+                          <ItemDetail key={item.uid} item={item} />
+                      ))}
+                {!isRechecking && items.length === 0 && (
                     <div className="empty" style={{ gridColumn: "1 / -1" }}>
                         <div className="e-title">Queue is clear</div>
                         <div>
