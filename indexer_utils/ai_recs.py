@@ -256,6 +256,7 @@ def refresh_visible_item_attributes(item: IgnoreItem) -> Dict[str, Any]:
             result = radarr_query("movie/lookup", term="imdb:" + item.uid)[0]
             _add_attr(attrs, result, "genres")
             _add_attr(attrs, result, "originalLanguage")
+            _add_attr(attrs, result, "studio")
             attrs["year"] = result.get("year")
             ratings = result.get("ratings")
             if ratings:
@@ -303,6 +304,7 @@ def _build_user_payload(
             "synopsis": candidate_synopsis,
             "cast": attrs.get("cast"),
             "network": attrs.get("network"),
+            "studio": attrs.get("studio"),
             "rating_value": attrs.get("rating_value"),
             "rating_votes": attrs.get("rating_votes"),
         },
