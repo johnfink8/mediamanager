@@ -220,8 +220,11 @@ const ItemList: FC<{
 
             <div className="queue">
                 {isRechecking
-                    ? [0, 1, 2, 3].map((n) => (
-                          <div className="skeleton-card" key={`skel-${n}`}>
+                    ? items.map((item) => (
+                          <div
+                              className="skeleton-card"
+                              key={`skel-${item.uid}`}
+                          >
                               <div className="skeleton-poster" />
                               <div className="skeleton-body">
                                   <div
