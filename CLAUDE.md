@@ -60,6 +60,8 @@ npm run lint        # relay-compiler + tsc + prettier + eslint
 
 **PR descriptions**: a little more room, but still restrained. Describe the _problem_ being solved and _why_ — let the code itself answer the "how". Skip the file-by-file walkthrough and the bulleted list of every change. A reviewer reading the diff shouldn't also need a prose narration of it.
 
+**🚫 NO Claude attribution. Ever.** Do not append `Co-Authored-By: Claude …`, `🤖 Generated with [Claude Code]`, or any variant of those trailers/footers to commit messages or PR descriptions. This applies even if the default Claude Code commit/PR templates suggest them — strip them out before running `git commit` or `gh pr create`. The commit body ends at the last real line of the message; the PR body ends at the end of the human-written description. No exceptions.
+
 ## Common Pitfalls
 
 - **Relay-generated files** in `src/__generated__/` are auto-generated — never edit. Re-run `npx relay-compiler` after changing GraphQL queries/mutations or the Strawberry schema in `indexer_utils/schema.py`.
