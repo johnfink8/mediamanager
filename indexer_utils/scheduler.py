@@ -22,10 +22,19 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from apscheduler.events import (
+    EVENT_JOB_ERROR,
+    EVENT_JOB_EXECUTED,
+    EVENT_JOB_MISSED,
+    EVENT_JOB_SUBMITTED,
+    JobExecutionEvent,
+    JobSubmissionEvent,
+)
 from apscheduler.job import Job
 from apscheduler.jobstores.base import BaseJobStore
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
@@ -105,6 +114,11 @@ _heartbeat_thread: Optional[threading.Thread] = None
 _heartbeat_stop = threading.Event()
 _is_leader = False
 
+# Per-job submission timestamps so the EXECUTED/ERROR listener can report
+# wall-clock duration. Keyed by APScheduler's run-instance id.
+_job_started_at: Dict[str, float] = {}
+_job_started_lock = threading.Lock()
+
 
 class _LeaderScheduler(BackgroundScheduler):  # type: ignore[misc]
     """``BackgroundScheduler`` that clamps the inter-poll wait.
@@ -157,6 +171,98 @@ def get_scheduler() -> BackgroundScheduler:
         scheduler.add_jobstore(build_jobstore(), alias=JOBSTORE_ALIAS)
         _scheduler = scheduler
     return _scheduler
+
+
+def _job_label(job_id: str) -> str:
+    desc = JOB_DESCRIPTIONS.get(job_id)
+    if desc is None:
+        return job_id
+    return f"{job_id} ({desc.name})"
+
+
+def _on_job_submitted(event: JobSubmissionEvent) -> None:
+    """Mark a job as in-flight so the executed/error listener can time it."""
+    with _job_started_lock:
+        _job_started_at[event.job_id] = time.monotonic()
+    # ``scheduled_run_times`` is a list (one per coalesced fire). Most jobs
+    # have just one. Format the first as the canonical scheduled time.
+    runs = event.scheduled_run_times or []
+    scheduled = runs[0].isoformat() if runs else "?"
+    logger.info(
+        "Scheduler dispatching job %s (scheduled_for=%s, coalesced_runs=%d)",
+        _job_label(event.job_id),
+        scheduled,
+        len(runs),
+    )
+
+
+def _on_job_executed(event: JobExecutionEvent) -> None:
+    duration = _pop_duration(event.job_id)
+    logger.info(
+        "Scheduler job %s finished OK in %s",
+        _job_label(event.job_id),
+        _format_duration(duration),
+    )
+
+
+def _on_job_error(event: JobExecutionEvent) -> None:
+    duration = _pop_duration(event.job_id)
+    logger.error(
+        "Scheduler job %s FAILED after %s: %s",
+        _job_label(event.job_id),
+        _format_duration(duration),
+        event.exception,
+    )
+
+
+def _on_job_missed(event: JobExecutionEvent) -> None:
+    logger.warning(
+        "Scheduler job %s MISSED its scheduled run at %s "
+        "(misfire_grace_time exceeded — likely worker overload or shutdown)",
+        _job_label(event.job_id),
+        event.scheduled_run_time,
+    )
+
+
+def _pop_duration(job_id: str) -> Optional[float]:
+    with _job_started_lock:
+        started = _job_started_at.pop(job_id, None)
+    return None if started is None else time.monotonic() - started
+
+
+def _format_duration(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "?s"
+    if seconds < 1:
+        return f"{seconds * 1000:.0f}ms"
+    return f"{seconds:.1f}s"
+
+
+def _attach_job_listeners(scheduler: BackgroundScheduler) -> None:
+    """Wire lifecycle listeners so every job fire is logged."""
+    scheduler.add_listener(_on_job_submitted, EVENT_JOB_SUBMITTED)
+    scheduler.add_listener(_on_job_executed, EVENT_JOB_EXECUTED)
+    scheduler.add_listener(_on_job_error, EVENT_JOB_ERROR)
+    scheduler.add_listener(_on_job_missed, EVENT_JOB_MISSED)
+
+
+def _log_scheduled_inventory(scheduler: BackgroundScheduler) -> None:
+    """Dump the current job table so an operator can confirm it's armed."""
+    try:
+        jobs = scheduler.get_jobs(jobstore=JOBSTORE_ALIAS)
+    except Exception:
+        logger.exception("Could not enumerate scheduled jobs at startup")
+        return
+    if not jobs:
+        logger.warning("APScheduler has NO jobs registered — check migrations")
+        return
+    for job in jobs:
+        logger.info(
+            "Scheduled job %s — trigger=%s, next_run=%s",
+            _job_label(job.id),
+            job.trigger,
+            job.next_run_time.isoformat() if job.next_run_time else "(paused)",
+        )
 
 
 def is_leader() -> bool:
@@ -258,6 +364,7 @@ def start_scheduler() -> BackgroundScheduler:
         return scheduler
     if _try_acquire_leader_lock():
         _is_leader = True
+        _attach_job_listeners(scheduler)
         scheduler.start()
         _start_leader_heartbeat()
         logger.info(
@@ -265,6 +372,7 @@ def start_scheduler() -> BackgroundScheduler:
             JOBSTORE_TABLE,
             LEADER_LOCK_NAME,
         )
+        _log_scheduled_inventory(scheduler)
     else:
         _is_leader = False
         scheduler.start(paused=True)
