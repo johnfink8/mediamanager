@@ -16,14 +16,13 @@ from indexer_utils.tmdb import (
 )
 
 from .ai_tools import REGISTRY, AgentRunResult, ToolContext, run_agent
+from .log import item_context
 from .models import IgnoreItem
 from .radarr_utils import radarr_query
 from .sonarr_utils import query_series
 from .weaviate_client import upsert_item_attrs
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-logger.addHandler(logging.StreamHandler())
 
 BASE_DIR = Path(__file__).parent
 PROMPTS_DIR = BASE_DIR / "prompts"
@@ -378,6 +377,20 @@ async def annotate_with_ai_async(
     fresh client is built and closed within this call so the caller doesn't
     have to manage its lifecycle.
     """
+    with item_context(f"{item_type}:{uid}"):
+        return await _annotate_with_ai_async_inner(
+            item_type, uid, title, attrs, client=client
+        )
+
+
+async def _annotate_with_ai_async_inner(
+    item_type: str,
+    uid: str,
+    title: str,
+    attrs: Dict[str, Any],
+    *,
+    client: Optional[AsyncOpenAI] = None,
+) -> Dict[str, Any]:
     import time as _time
 
     started_at = _time.monotonic()
