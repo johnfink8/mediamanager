@@ -19,7 +19,7 @@ from .models import IgnoreItem
 from .plex_utils import find_movie
 from .radarr_utils import get_movie, radarr_query, reset_movies
 from .sonarr_utils import query_series, reset_series
-from .tmdb import get_tv_cast, get_tv_id
+from .tmdb import get_movie_director, get_movie_id, get_tv_cast, get_tv_id
 
 AI_ANNOTATE_CONCURRENCY = int(config("AI_ANNOTATE_CONCURRENCY", default=4))
 
@@ -293,7 +293,20 @@ def check_movies(days: int) -> None:
             add_attr(attrs, result, "status")
             add_attr(attrs, result, "genres")
             add_attr(attrs, result, "studio")
+            add_attr(attrs, result, "runtime")
             attrs["year"] = result["year"]
+            tmdb_id = result.get("tmdbId") or get_movie_id(imdb_id)
+            if tmdb_id:
+                attrs["tmdb_id"] = str(tmdb_id)
+                # Only fetch director from TMDB if the indexer XML didn't
+                # already provide one — many indexers expose it for free.
+                if not attrs.get("director"):
+                    try:
+                        director = get_movie_director(int(tmdb_id))
+                        if director:
+                            attrs["director"] = director
+                    except Exception:
+                        logger.exception("Unable to fetch director for %s", title)
             ratings = result.get("ratings")
             if ratings:
                 attrs.update(get_ratings_attrs(ratings))
@@ -596,7 +609,14 @@ def check_shows(days: int) -> None:
             if ratings:
                 attrs["rating_votes"] = ratings["votes"]  # type: ignore
                 attrs["rating_value"] = ratings["value"]  # type: ignore
-            for key in ("network", "genres", "status", "seriesType", "certification"):
+            for key in (
+                "network",
+                "genres",
+                "status",
+                "seriesType",
+                "certification",
+                "runtime",
+            ):
                 add_attr(attrs, show, key)
             temp_item = IgnoreItem(item_type="tv", uid=tvdb, attributes=attrs)
             ignore = should_ignore_by_rules(temp_item)
