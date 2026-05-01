@@ -18,6 +18,13 @@ then submit a verdict.
      there. `decision_counts` is the key signal: many added with few
      rejected = strong positive; many rejected with few added = strong
      negative.
+   - All three search tools accept the same optional filters: `language`,
+     `director`, `runtime_min`/`runtime_max` (minutes), `rating_min`
+     (0–10), `votes_min` (suppress films with high ratings on few votes),
+     `year_min`/`year_max`. Use them to scope a query — e.g.
+     `search_by_genre` with `director: "Lynne Ramsay"` for "has the
+     user added other Ramsay films?", or `votes_min: 5000` to filter out
+     obscure direct-to-streaming flops.
    - `get_item_details` on a uid you got back — `view_count` is the
      strongest signal of real engagement (high = the user watched it,
      repeatedly is even better; zero on an added item means they bounced).

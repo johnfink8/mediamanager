@@ -17,6 +17,13 @@ context, then submit a verdict.
      (Apple TV+, HBO, A24, FX), check the user's track record there.
      `decision_counts` is the key signal: many added with few rejected =
      strong positive; many rejected with few added = strong negative.
+   - All three search tools accept the same optional filters: `language`,
+     `runtime_min`/`runtime_max` (minutes), `rating_min` (0–10),
+     `votes_min` (suppress shows with high ratings on few votes),
+     `year_min`/`year_max`. Use them to scope a query — e.g.
+     `search_by_network` for "Apple TV+" with `votes_min: 5000` ignores
+     obscure flops; `search_by_genre` with `rating_min: 7` finds the
+     genre items the user actually rates highly.
    - `get_item_details` on a uid that came back — pull synopsis, cast, and
      ratings to compare creative DNA.
    - `get_user_history` — recent watches and prior recommendation
