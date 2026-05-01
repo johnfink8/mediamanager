@@ -2,10 +2,12 @@ import React, { useState, useCallback } from "react";
 import { useSnackbar } from "material-ui-snackbar-provider";
 import { LiveTv, Movie, FactCheck } from "@mui/icons-material";
 import HistoryIcon from "@mui/icons-material/History";
+import SettingsIcon from "@mui/icons-material/Settings";
 import { itemType, MenuItemType } from "./types";
 import ItemList from "./ItemList";
 import HistoricalItemList from "./HistoricalItemList";
 import CheckFeedbackPanel from "./CheckFeedbackPanel";
+import AdminPanel from "./AdminPanel";
 
 export const tvHref = (uid: string) => {
     return `http://thetvdb.com/?tab=series&id=${uid}`;
@@ -79,6 +81,13 @@ export const menuItems: MenuItemType[] = [
         name: "Check Feedback",
         icon: <FactCheck />,
         component: CheckFeedbackPanel,
+        tabIndex: undefined,
+        typeName: undefined,
+    },
+    {
+        name: "Admin",
+        icon: <SettingsIcon />,
+        component: AdminPanel,
         tabIndex: undefined,
         typeName: undefined,
     },
