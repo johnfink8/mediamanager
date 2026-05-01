@@ -20,13 +20,14 @@ from indexer_utils.vid_utils import (
     get_show_titles,
 )
 
+from .log import configure_logging
 from .models import IgnoreItem
 from .schema import events, schema
 
+configure_logging()
+
 env = Environment(loader=PackageLoader("indexer_utils"), autoescape=select_autoescape())
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-logger.addHandler(logging.StreamHandler())
 
 ROOT_DIR = pathlib.Path(__file__).parent.parent
 
