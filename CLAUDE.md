@@ -5,8 +5,10 @@
 Before doing any work, always run this to orient yourself:
 
 ```bash
-pwd && ls venv/bin/ruff 2>/dev/null && echo "venv OK" || echo "venv MISSING — see Worktree Setup below"
+pwd && which ruff >/dev/null 2>&1 && echo "venv OK" || echo "venv MISSING — see Worktree Setup below"
 ```
+
+The Claude Code shell sources `venv/bin/activate` on startup, so `python`, `ruff`, `mypy`, `pytest`, `uvicorn`, `alembic`, etc. are on PATH directly — no `./venv/bin/` prefix needed.
 
 **If running inside a git worktree** (i.e. `pwd` shows a path like `.git/worktrees/...` or a sibling directory, and `venv/` is missing), symlink the shared artifacts from the main project rather than reinstalling:
 
@@ -18,18 +20,7 @@ ln -s "$MAIN/venv" ./venv
 ln -s "$MAIN/node_modules" ./node_modules
 ```
 
-After symlinking, verify: `./venv/bin/ruff --version && npx relay-compiler --version`
-
-## ⚠️ Homebrew — PATH Issue
-
-`gh` and other helper apps are installed but not on Claude Code's default PATH. Use the `./claude-exec` wrapper for any Homebrew-installed tool:
-
-```bash
-./claude-exec gh run list --limit 5
-./claude-exec gh pr create --title "..." --body "..."
-```
-
-`claude-exec` prepends the Homebrew bin directories before executing, so `gh`, `node`, and any other Homebrew tools are always found. It is safe to use for any command, not just `gh`.
+After symlinking, verify: `ruff --version && npx relay-compiler --version` (you may need to start a new shell so the activate hook re-runs).
 
 ## Project Overview
 
@@ -43,87 +34,41 @@ Full-stack media manager app: **FastAPI + Strawberry GraphQL** backend (Python),
 - `tests/` — Python unit tests
 - `e2e/` — Playwright end-to-end tests
 
-## ⚠️ Executable Paths — Critical
-
-All Python tools live in the **local virtualenv**, not the system PATH. Always use the `./venv/bin/` prefix:
-
-```bash
-# Python
-./venv/bin/python
-
-# Linting & formatting (ruff handles both)
-./venv/bin/ruff check .
-./venv/bin/ruff format .
-
-# Type checking
-./venv/bin/mypy indexer_utils
-
-# Running the dev server
-./venv/bin/uvicorn indexer_utils.main:app --reload --host 0.0.0.0 --port 8000
-
-# Running Python tests
-./venv/bin/pytest tests/
-```
-
-Never run `python`, `ruff`, `mypy`, or `uvicorn` without the `./venv/bin/` prefix — they will resolve to wrong system versions or fail entirely.
-
-For JS/TS tools, use `npx` or the `npm run` scripts:
-
-```bash
-# Preferred: use npm scripts (these handle relay-compiler ordering)
-npm run lint        # relay-compiler + tsc + prettier + eslint
-npm run format      # prettier --write
-
-# Or directly via npx
-npx relay-compiler
-npx tsc --noEmit
-npx prettier --check "src/**/*.{js,jsx,ts,tsx,less}"
-npx eslint "src/**/*.{js,jsx,ts,tsx}"
-```
-
-## Code Style & Linting
+## Code Style & Tooling
 
 ### Python
 
-- **Formatter/linter**: `ruff` (configured in `pyproject.toml`) — replaces black + isort + flake8
-- **Type checker**: `mypy` in strict mode (`mypy.ini`)
-- Line length: 88, Python 3.9 target
-- Always run `./venv/bin/ruff format .` before `./venv/bin/ruff check .`
-- Fix lint errors automatically: `./venv/bin/ruff check --fix .`
+- **Formatter/linter**: `ruff` (config in `pyproject.toml`) — replaces black + isort + flake8. Line length 88, Python 3.9 target.
+- **Type checker**: `mypy` in strict mode (`mypy.ini`). Annotate all new functions; use `Optional[X]` / `X | None` for nullables.
+- Auto-fix: `ruff check --fix .`
 
 ### TypeScript / React
 
-- **Formatter**: `prettier` (v2)
-- **Linter**: `eslint` with TypeScript, React, import, jsx-a11y plugins
-- **Type checker**: `tsc --noEmit`
-- **Important**: `relay-compiler` must run before `tsc` or `eslint` because it generates types in `src/__generated__/`
-- Run `npm run lint` to do all of the above in the correct order
+- **Formatter**: `prettier` (v2). **Linter**: `eslint`. **Type checker**: `tsc --noEmit`.
+- `relay-compiler` must run **before** `tsc`/`eslint` because it generates types in `src/__generated__/`. The `npm run lint` script handles this ordering.
 
 ## Before Committing
 
-Always run both:
-
 ```bash
-./venv/bin/ruff format . && ./venv/bin/ruff check .
-npm run lint
+ruff format . && ruff check .
+npm run lint        # relay-compiler + tsc + prettier + eslint
 ```
+
+## Commits & PRs
+
+**Commit messages**: short and concise — 12 words max. State the central point of the change in one line. No bullet lists, no feature breakdowns, no "and also" addenda.
+
+**PR descriptions**: a little more room, but still restrained. Describe the _problem_ being solved and _why_ — let the code itself answer the "how". Skip the file-by-file walkthrough and the bulleted list of every change. A reviewer reading the diff shouldn't also need a prose narration of it.
 
 ## Common Pitfalls
 
-- **Relay-generated files**: Files in `src/__generated__/` are auto-generated — never edit them manually. Run `npx relay-compiler` to regenerate after changing GraphQL queries/mutations.
-- **GraphQL schema**: Defined via Strawberry in `indexer_utils/schema.py`. After schema changes, re-run `relay-compiler`.
-- **alembic migrations**: Use `./venv/bin/alembic upgrade head` to apply migrations. Generate new ones with `./venv/bin/alembic revision --autogenerate -m "description"`.
-- **mypy strict mode**: The codebase uses `strict = True`. Add proper type annotations to all new functions. Use `Optional[X]` or `X | None` for nullable types.
-- **venv not activated**: If a tool is missing, check `./venv/bin/` before assuming it's not installed.
+- **Relay-generated files** in `src/__generated__/` are auto-generated — never edit. Re-run `npx relay-compiler` after changing GraphQL queries/mutations or the Strawberry schema in `indexer_utils/schema.py`.
+- **alembic**: `alembic upgrade head` to apply, `alembic revision --autogenerate -m "…"` to create.
+- **Missing tool**: if a Python tool isn't found, the activate hook didn't fire — check `./venv/bin/` directly (most likely a worktree missing the symlink).
 
 ## Dev Server
 
 ```bash
-# Backend only
-bash dev_server.sh
-# (runs: DEBUG=true uvicorn indexer_utils.main:app --reload --host 0.0.0.0 --port 8000)
-
-# Frontend (in a separate terminal)
-npm run dev
-# (runs: relay-compiler && webpack --watch --mode development)
+bash dev_server.sh   # backend (uvicorn, DEBUG=true, port 8000)
+npm run dev          # frontend (relay-compiler + webpack --watch)
 ```
