@@ -1,19 +1,20 @@
-"""Subagent-backed discovery tool: theatrical release window report.
+"""Subagent-backed discovery tools: theatrical and TV release window reports.
 
-Unlike the other tools in this package, this one makes a nested LLM call
-rather than reading project state. We hand a small research task to
-OpenAI's Responses API with the hosted ``web_search`` tool enabled, ask
-it to consult Box Office Mojo and Wikipedia, and return the prose
-dossier directly to the recommendation agent. No JSON post-processing —
-the consumer is another LLM that reads prose fluently, so imposing a
-schema would just add latency, cost, and parse-failure modes without
-helping the reader.
+Unlike the other tools in this package, these make a nested LLM call
+rather than reading project state. Each hands a small research task to
+OpenAI's Responses API with the hosted ``web_search`` tool enabled, asks
+it to consult domain-appropriate sources (Box Office Mojo + Wikipedia
+for theatrical; Nielsen-via-Variety + Wikipedia for TV), and returns the
+prose dossier directly to the recommendation agent. No JSON
+post-processing — the consumer is another LLM that reads prose
+fluently, so imposing a schema would just add latency, cost, and
+parse-failure modes without helping the reader.
 """
 
 import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 from zoneinfo import ZoneInfo
 
 from decouple import config
@@ -40,60 +41,69 @@ REPORT_CHAR_CAP = 12000
 # Cache the dossier in Redis so repeated calls within a window don't
 # pay the LLM + web_search cost. The cache key includes ``today`` so
 # the day-rollover gives us free invalidation; the TTL just bounds
-# Redis memory and protects against within-day staleness if Box Office
-# Mojo updates mid-day. Bump the version suffix on prompt/schema
-# changes to flush old entries.
+# Redis memory and protects against within-day source updates. Bump the
+# version suffix on prompt/schema changes to flush old entries.
 CACHE_TTL_SECONDS = 6 * 60 * 60
 CACHE_KEY_VERSION = "v1"
 
-# US theatrical day rolls over latest on the West Coast — Pacific keeps
-# the cache key and the queried weekend window stable for a UTC host
-# during late-Sunday-US hours, which would otherwise tip into Monday.
+# US release day rolls over latest on the West Coast — Pacific keeps
+# the cache key and the queried windows stable for a UTC host during
+# late-Sunday-US hours, which would otherwise tip into Monday.
 _TODAY_TZ = ZoneInfo("America/Los_Angeles")
 
-SEARCH_RECENT_RELEASES_SCHEMA: Dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "weeks_back": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 8,
-            "default": 2,
-            "description": "How many weeks before today to include.",
+
+def _window_schema(top_n_description: str) -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "weeks_back": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 8,
+                "default": 2,
+                "description": "How many weeks before today to include.",
+            },
+            "weeks_forward": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 8,
+                "default": 2,
+                "description": (
+                    "How many weeks after today to include for upcoming releases."
+                ),
+            },
+            "top_n": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 30,
+                "default": 20,
+                "description": top_n_description,
+            },
+            "focus": {
+                "type": "string",
+                "maxLength": 120,
+                "description": (
+                    "Optional free-text bias for the selection (e.g. 'horror', "
+                    "'family-friendly', 'awards contenders'). "
+                    "Empty string for none."
+                ),
+            },
         },
-        "weeks_forward": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 8,
-            "default": 2,
-            "description": "How many weeks after today to include for upcoming releases.",
-        },
-        "top_n": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 30,
-            "default": 20,
-            "description": "Cap on the weekend chart size.",
-        },
-        "focus": {
-            "type": "string",
-            "maxLength": 120,
-            "description": (
-                "Optional free-text bias for the selection (e.g. 'horror', "
-                "'family-friendly', 'awards contenders'). Empty string for none."
-            ),
-        },
-    },
-}
+    }
+
+
+SEARCH_RECENT_RELEASES_SCHEMA = _window_schema("Cap on the weekend chart size.")
+SEARCH_RECENT_TV_SCHEMA = _window_schema("Cap on the streaming chart size.")
 
 # Loaded at import time, matching ``ai_recs.RECOMMENDATION_PROMPTS``. We
 # inline the read instead of reusing ``ai_recs.load_prompt`` because
 # importing from ai_recs would cycle through ``ai_tools/__init__``.
-_SYSTEM_PROMPT = (_PROMPTS_DIR / "search_recent_releases.md").read_text()
+_MOVIES_SYSTEM_PROMPT = (_PROMPTS_DIR / "search_recent_releases.md").read_text()
+_TV_SYSTEM_PROMPT = (_PROMPTS_DIR / "search_recent_tv.md").read_text()
 
 
-def _build_prompt(
+def _build_movies_prompt(
     *,
     today: date,
     weeks_back: int,
@@ -130,7 +140,7 @@ def _build_prompt(
     return "\n".join(parts)
 
 
-def _cache_key(
+def _build_tv_prompt(
     *,
     today: date,
     weeks_back: int,
@@ -138,32 +148,80 @@ def _cache_key(
     top_n: int,
     focus: Optional[str],
 ) -> str:
-    return (
-        f"mediamanager:search_recent_releases:{CACHE_KEY_VERSION}:"
-        f"{today.isoformat()}:{weeks_back}:{weeks_forward}:"
-        f"{top_n}:{focus or ''}"
-    )
+    window_start = today - timedelta(weeks=weeks_back)
+    window_end = today + timedelta(weeks=weeks_forward)
+    parts = [
+        f"Today is {today.isoformat()}.",
+        (
+            f"Build a US TV-release dossier for the window "
+            f"{window_start.isoformat()} through {window_end.isoformat()}."
+        ),
+        "",
+        "Cover:",
+        f"- The most recent Nielsen weekly streaming top 10 (top {top_n} "
+        "rows; combine originals and acquired). For each row include "
+        "rank, title, network/streamer, and viewership figure if "
+        "published.",
+        "- Series with new premieres in the window — full-season debuts "
+        "or new-season debuts — with title, premiere date, "
+        "network/streamer, and whether returning or brand-new.",
+        "- Series wrapping with finales in the window; finales are "
+        "often buzz peaks worth flagging.",
+        "- A handful of notable limited-series or specialty premieres.",
+        "- A 1-2 sentence summary of the headline release.",
+        "",
+        "Attach a quantitative signal to every title. For titles already "
+        "on the Nielsen chart, the minutes-viewed figure already counts — "
+        "don't double up. For all other titles, surface one of: IMDb "
+        "rating + vote count (imdb.com/title/...), Rotten Tomatoes "
+        "Tomatometer % + critic count and audience score "
+        "(rottentomatoes.com/tv/...), or Metacritic Metascore + review "
+        "count (metacritic.com/tv/...). Actively search for ratings on "
+        "established shows that have aired ≥1 season — they almost "
+        "always have IMDb scores. Reserve 'no rating found' for "
+        "genuinely unrated titles (brand-new premieres yet to air, "
+        "obscure regional series).",
+        "",
+        "Method: pull Nielsen's most recent weekly streaming top 10 "
+        "from Variety or THR coverage, premiere/finale calendars from "
+        f"Wikipedia's 'List of American television programs of {today.year}' "
+        "or trade week-ahead recaps, IMDb Most Popular TV for "
+        "supplementary buzz signal, and per-title ratings from IMDb, "
+        "Rotten Tomatoes, or Metacritic.",
+    ]
+    if focus:
+        parts.extend(["", f"Bias selections toward: {focus}."])
+    return "\n".join(parts)
 
 
-async def _run_subagent(
+def _cache_key(
     *,
+    prefix: str,
     today: date,
     weeks_back: int,
     weeks_forward: int,
     top_n: int,
     focus: Optional[str],
+) -> str:
+    return (
+        f"mediamanager:{prefix}:{CACHE_KEY_VERSION}:"
+        f"{today.isoformat()}:{weeks_back}:{weeks_forward}:"
+        f"{top_n}:{focus or ''}"
+    )
+
+
+async def _fetch_dossier(
+    *,
+    cache_key: str,
+    system_prompt: str,
+    user_prompt: str,
+    today: date,
+    log_tag: str,
 ) -> Dict[str, Any]:
     redis = get_redis_client()
-    key = _cache_key(
-        today=today,
-        weeks_back=weeks_back,
-        weeks_forward=weeks_forward,
-        top_n=top_n,
-        focus=focus,
-    )
-    cached = redis_get_json(redis, key)
+    cached = redis_get_json(redis, cache_key)
     if isinstance(cached, dict) and "report" in cached:
-        logger.info("search_recent_releases cache hit key=%s", key)
+        logger.info("%s cache hit key=%s", log_tag, cache_key)
         return cached
 
     # Build a fresh AsyncOpenAI client per call. ai_recs.make_async_openai_client
@@ -176,23 +234,16 @@ async def _run_subagent(
         logger.exception("failed to initialize subagent OpenAI client")
         return {"error": f"OpenAI client init failed: {exc}"}
 
-    prompt = _build_prompt(
-        today=today,
-        weeks_back=weeks_back,
-        weeks_forward=weeks_forward,
-        top_n=top_n,
-        focus=focus,
-    )
     try:
         try:
             resp = await client.responses.create(
                 model=MODEL,
                 tools=[{"type": "web_search"}],
-                instructions=_SYSTEM_PROMPT,
-                input=prompt,
+                instructions=system_prompt,
+                input=user_prompt,
             )
         except Exception as exc:
-            logger.exception("search_recent_releases subagent failed")
+            logger.exception("%s subagent failed", log_tag)
             return {"error": f"{exc.__class__.__name__}: {exc}"}
     finally:
         try:
@@ -208,30 +259,65 @@ async def _run_subagent(
         "as_of": today.isoformat(),
         "report": dossier[:REPORT_CHAR_CAP],
     }
-    redis_set_json(redis, key, payload, CACHE_TTL_SECONDS)
+    redis_set_json(redis, cache_key, payload, CACHE_TTL_SECONDS)
     return payload
 
 
-async def _t_search_recent_releases(
-    input_: Dict[str, Any], ctx: ToolContext
-) -> ToolResult:
-    weeks_back = max(0, min(8, int(input_.get("weeks_back") or 2)))
-    weeks_forward = max(0, min(8, int(input_.get("weeks_forward") or 2)))
-    top_n = max(1, min(30, int(input_.get("top_n") or 20)))
-    focus = (input_.get("focus") or "").strip() or None
+PromptBuilder = Callable[..., str]
 
-    today = datetime.now(_TODAY_TZ).date()
-    payload = await _run_subagent(
-        today=today,
-        weeks_back=weeks_back,
-        weeks_forward=weeks_forward,
-        top_n=top_n,
-        focus=focus,
-    )
-    candidate_uid = ctx.candidate.get("uid") if ctx.candidate else None
-    return ToolResult(
-        output=enforce_result_budget(payload, "search_recent_releases", candidate_uid)
-    )
+
+def _make_handler(
+    *,
+    name: str,
+    system_prompt: str,
+    prompt_builder: PromptBuilder,
+) -> Callable[[Dict[str, Any], ToolContext], Awaitable[ToolResult]]:
+    async def _handler(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult:
+        weeks_back = max(0, min(8, int(input_.get("weeks_back") or 2)))
+        weeks_forward = max(0, min(8, int(input_.get("weeks_forward") or 2)))
+        top_n = max(1, min(30, int(input_.get("top_n") or 20)))
+        focus = (input_.get("focus") or "").strip() or None
+
+        today = datetime.now(_TODAY_TZ).date()
+        user_prompt = prompt_builder(
+            today=today,
+            weeks_back=weeks_back,
+            weeks_forward=weeks_forward,
+            top_n=top_n,
+            focus=focus,
+        )
+        cache_key = _cache_key(
+            prefix=name,
+            today=today,
+            weeks_back=weeks_back,
+            weeks_forward=weeks_forward,
+            top_n=top_n,
+            focus=focus,
+        )
+        payload = await _fetch_dossier(
+            cache_key=cache_key,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            today=today,
+            log_tag=name,
+        )
+        candidate_uid = ctx.candidate.get("uid") if ctx.candidate else None
+        return ToolResult(output=enforce_result_budget(payload, name, candidate_uid))
+
+    return _handler
+
+
+_t_search_recent_releases = _make_handler(
+    name="search_recent_releases",
+    system_prompt=_MOVIES_SYSTEM_PROMPT,
+    prompt_builder=_build_movies_prompt,
+)
+
+_t_search_recent_tv = _make_handler(
+    name="search_recent_tv",
+    system_prompt=_TV_SYSTEM_PROMPT,
+    prompt_builder=_build_tv_prompt,
+)
 
 
 SEARCH_RECENT_RELEASES_TOOL = Tool(
@@ -255,4 +341,27 @@ SEARCH_RECENT_RELEASES_TOOL = Tool(
     input_schema=SEARCH_RECENT_RELEASES_SCHEMA,
     execute=_t_search_recent_releases,
     applies_to=("mv",),
+)
+
+
+SEARCH_RECENT_TV_TOOL = Tool(
+    name="search_recent_tv",
+    description=(
+        "Check whether the candidate is a current TV release worth a "
+        "closer look. Most catalog candidates are obscure and won't "
+        "appear here at all; finding the candidate's title in the "
+        "report is itself a strong positive signal — scan the Nielsen "
+        "streaming top 10, premiere calendar, and notable limited "
+        "premieres for it before anything else. Returns {as_of, "
+        "report} where report is a prose dossier on US TV releases "
+        "and streaming buzz for a window around today (Nielsen via "
+        "Variety/THR + Wikipedia, via a web-research subagent). Use "
+        "when the candidate is a recent or soon-to-arrive TV series "
+        "— not for movie items. Window defaults to ±2 weeks; raise "
+        "weeks_back / weeks_forward for a wider net. One call per "
+        "session; the report is expensive (LLM + web fetches)."
+    ),
+    input_schema=SEARCH_RECENT_TV_SCHEMA,
+    execute=_t_search_recent_tv,
+    applies_to=("tv",),
 )
