@@ -11,9 +11,10 @@ helping the reader.
 """
 
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional
+from zoneinfo import ZoneInfo
 
 from decouple import config
 from openai import AsyncOpenAI
@@ -44,6 +45,11 @@ REPORT_CHAR_CAP = 12000
 # changes to flush old entries.
 CACHE_TTL_SECONDS = 6 * 60 * 60
 CACHE_KEY_VERSION = "v1"
+
+# US theatrical day rolls over latest on the West Coast — Pacific keeps
+# the cache key and the queried weekend window stable for a UTC host
+# during late-Sunday-US hours, which would otherwise tip into Monday.
+_TODAY_TZ = ZoneInfo("America/Los_Angeles")
 
 SEARCH_RECENT_RELEASES_SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -214,7 +220,7 @@ async def _t_search_recent_releases(
     top_n = max(1, min(30, int(input_.get("top_n") or 20)))
     focus = (input_.get("focus") or "").strip() or None
 
-    today = date.today()
+    today = datetime.now(_TODAY_TZ).date()
     payload = await _run_subagent(
         today=today,
         weeks_back=weeks_back,
@@ -248,4 +254,5 @@ SEARCH_RECENT_RELEASES_TOOL = Tool(
     ),
     input_schema=SEARCH_RECENT_RELEASES_SCHEMA,
     execute=_t_search_recent_releases,
+    applies_to=("mv",),
 )

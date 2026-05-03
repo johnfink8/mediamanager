@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
 
 @dataclass
@@ -39,6 +39,10 @@ class Tool:
     input_schema: Dict[str, Any]
     execute: ToolExecute
     is_terminal: bool = False
+    # Restrict which ToolContext.item_type values this tool is exposed for.
+    # ``None`` means available on every run; e.g. ``("mv",)`` hides the
+    # tool from TV runs entirely so the model can't waste budget on it.
+    applies_to: Optional[Tuple[str, ...]] = None
 
     def to_openai(self) -> Dict[str, Any]:
         """Render this tool as an OpenAI Chat Completions tool definition."""
