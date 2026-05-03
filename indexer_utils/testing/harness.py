@@ -490,7 +490,7 @@ def simulate_environment(
     from indexer_utils import (
         session as session_module,
     )
-    from indexer_utils.ai_tools import registry as tool_registry
+    from indexer_utils.ai_tools import inspections as tool_inspections
     from indexer_utils.models import IgnoreItem
 
     recorder = SimulationRecorder()
@@ -546,12 +546,12 @@ def simulate_environment(
         patch.object(plex_utils, "get_recently_played", fake_recently_played),
         patch.object(vid_utils, "find_movie", fake_find_movie),
         patch.object(
-            tool_registry, "aget_recently_played", _async_wrap(fake_recently_played)
+            tool_inspections, "aget_recently_played", _async_wrap(fake_recently_played)
         ),
         # Seeded movies with a ``plex`` key surface as in_library; added items
         # without one surface as missing_from_library.
         patch.object(
-            tool_registry, "aget_plex_details", _async_wrap(fake_seed_plex_details)
+            tool_inspections, "aget_plex_details", _async_wrap(fake_seed_plex_details)
         ),
         # Weaviate: read-only against _sim classes; do not touch real index.
         patch.object(weaviate_client, "_class_name", fake_class_name),
