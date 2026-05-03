@@ -1,14 +1,15 @@
-"""Subagent-backed discovery tools: theatrical and TV release window reports.
+"""Subagent-backed discovery tools: window reports and per-title buzz lookup.
 
 Unlike the other tools in this package, these make a nested LLM call
 rather than reading project state. Each hands a small research task to
 OpenAI's Responses API with the hosted ``web_search`` tool enabled, asks
 it to consult domain-appropriate sources (Box Office Mojo + Wikipedia
-for theatrical; Nielsen-via-Variety + Wikipedia for TV), and returns the
-prose dossier directly to the recommendation agent. No JSON
-post-processing — the consumer is another LLM that reads prose
-fluently, so imposing a schema would just add latency, cost, and
-parse-failure modes without helping the reader.
+for theatrical windows; Nielsen-via-Variety + Wikipedia for TV windows;
+Rotten Tomatoes + Metacritic + IMDb + community discussion for the
+per-title buzz lookup), and returns the prose dossier directly to the
+recommendation agent. No JSON post-processing — the consumer is another
+LLM that reads prose fluently, so imposing a schema would just add
+latency, cost, and parse-failure modes without helping the reader.
 """
 
 import logging
@@ -96,11 +97,43 @@ def _window_schema(top_n_description: str) -> Dict[str, Any]:
 SEARCH_RECENT_RELEASES_SCHEMA = _window_schema("Cap on the weekend chart size.")
 SEARCH_RECENT_TV_SCHEMA = _window_schema("Cap on the streaming chart size.")
 
+SEARCH_TITLE_BUZZ_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Exact title to look up.",
+        },
+        "year": {
+            "type": "integer",
+            "minimum": 1900,
+            "maximum": 2100,
+            "description": (
+                "Release year for disambiguation. Strongly preferred — "
+                "remakes and franchise entries collide on title alone."
+            ),
+        },
+        "item_type": {
+            "type": "string",
+            "enum": ["mv", "tv"],
+            "description": (
+                "Whether the title is a movie ('mv') or TV series ('tv'). "
+                "Optional; defaults to the agent's current item type."
+            ),
+        },
+    },
+    "required": ["title"],
+}
+
 # Loaded at import time, matching ``ai_recs.RECOMMENDATION_PROMPTS``. We
 # inline the read instead of reusing ``ai_recs.load_prompt`` because
 # importing from ai_recs would cycle through ``ai_tools/__init__``.
 _MOVIES_SYSTEM_PROMPT = (_PROMPTS_DIR / "search_recent_releases.md").read_text()
 _TV_SYSTEM_PROMPT = (_PROMPTS_DIR / "search_recent_tv.md").read_text()
+_BUZZ_SYSTEM_PROMPT = (_PROMPTS_DIR / "search_title_buzz.md").read_text()
 
 
 def _build_movies_prompt(
@@ -194,6 +227,52 @@ def _build_tv_prompt(
     return "\n".join(parts)
 
 
+def _build_buzz_prompt(
+    *,
+    today: date,
+    title: str,
+    year: Optional[int],
+    item_type: str,
+) -> str:
+    type_word = {"mv": "movie", "tv": "TV series"}.get(item_type, "title")
+    year_part = f" ({year})" if year else ""
+    return "\n".join(
+        [
+            f"Today is {today.isoformat()}.",
+            (
+                f"Look up review consensus, ratings, and online buzz "
+                f"for the {type_word}: {title}{year_part}."
+            ),
+            "",
+            "Cover:",
+            "- Quantitative scores from primary sources where you can "
+            "confirm them: Rotten Tomatoes (Tomatometer % + critic "
+            "count + audience % + the Tomatometer consensus blurb), "
+            "Metacritic (Metascore + review count + user score), "
+            "IMDb (rating + vote count). Mark whichever you can't "
+            "confirm 'no rating found' — never guess.",
+            "- A 1-2 sentence critic consensus that captures what "
+            "reviewers are actually saying, not just the number.",
+            "- A 1-2 sentence audience reception read, especially "
+            "where it diverges from critics.",
+            "- Online buzz beyond aggregators: Reddit thread sentiment "
+            "(r/movies, r/television, dedicated subreddits), "
+            "Letterboxd (movies), or social/trade chatter. Capture "
+            "the dominant takes — what people love, what they "
+            "complain about. Quote phrases verbatim where it sharpens "
+            "the read.",
+            "- 1-2 sentence overall verdict on whether a typical "
+            "viewer in 2026 would find this worth their time.",
+            "",
+            "Method: hit Rotten Tomatoes, Metacritic, and IMDb pages "
+            "for the title directly; sample relevant Reddit threads "
+            "and Letterboxd reviews; cross-check with the Wikipedia "
+            "reception section and one or two tier-1 trade reviews "
+            "(NYT, Variety, THR, The Guardian) where they exist.",
+        ]
+    )
+
+
 def _cache_key(
     *,
     prefix: str,
@@ -207,6 +286,20 @@ def _cache_key(
         f"mediamanager:{prefix}:{CACHE_KEY_VERSION}:"
         f"{today.isoformat()}:{weeks_back}:{weeks_forward}:"
         f"{top_n}:{focus or ''}"
+    )
+
+
+def _buzz_cache_key(
+    *,
+    today: date,
+    title: str,
+    year: Optional[int],
+    item_type: str,
+) -> str:
+    return (
+        f"mediamanager:search_title_buzz:{CACHE_KEY_VERSION}:"
+        f"{today.isoformat()}:{item_type}:{title.strip().lower()}:"
+        f"{year or ''}"
     )
 
 
@@ -364,4 +457,60 @@ SEARCH_RECENT_TV_TOOL = Tool(
     input_schema=SEARCH_RECENT_TV_SCHEMA,
     execute=_t_search_recent_tv,
     applies_to=("tv",),
+)
+
+
+async def _t_search_title_buzz(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult:
+    title = (input_.get("title") or "").strip()
+    if not title:
+        return ToolResult(output={"error": "title is required"})
+
+    year_raw = input_.get("year")
+    try:
+        year: Optional[int] = int(year_raw) if year_raw is not None else None
+    except (TypeError, ValueError):
+        year = None
+
+    item_type = input_.get("item_type")
+    if item_type not in ("mv", "tv"):
+        item_type = ctx.item_type
+
+    today = datetime.now(_TODAY_TZ).date()
+    user_prompt = _build_buzz_prompt(
+        today=today, title=title, year=year, item_type=item_type
+    )
+    cache_key = _buzz_cache_key(
+        today=today, title=title, year=year, item_type=item_type
+    )
+    payload = await _fetch_dossier(
+        cache_key=cache_key,
+        system_prompt=_BUZZ_SYSTEM_PROMPT,
+        user_prompt=user_prompt,
+        today=today,
+        log_tag="search_title_buzz",
+    )
+    candidate_uid = ctx.candidate.get("uid") if ctx.candidate else None
+    return ToolResult(
+        output=enforce_result_budget(payload, "search_title_buzz", candidate_uid)
+    )
+
+
+SEARCH_TITLE_BUZZ_TOOL = Tool(
+    name="search_title_buzz",
+    description=(
+        "Deep-dive on review consensus and online buzz for a specific "
+        "movie or TV title. Returns {as_of, report} where report is a "
+        "prose dossier with Rotten Tomatoes / Metacritic / IMDb scores, "
+        "the critic-consensus blurb, audience reception, and online "
+        "chatter (Reddit, Letterboxd, trade reviews). Use when you "
+        "need more than 'is it on a current chart' — e.g. the "
+        "candidate looks promising and you want a reception read "
+        "before recommending, or you're weighing how it lands with "
+        "audiences vs critics, or comparing against a director's / "
+        "showrunner's prior work. One call per candidate is plenty; "
+        "the report is expensive (LLM + web fetches). Pass the year "
+        "when known to disambiguate remakes and franchise entries."
+    ),
+    input_schema=SEARCH_TITLE_BUZZ_SCHEMA,
+    execute=_t_search_title_buzz,
 )
