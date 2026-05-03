@@ -165,7 +165,11 @@ async def run_agent(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
-    tools_payload = [t.to_openai() for t in registry.values()]
+    tools_payload = [
+        t.to_openai()
+        for t in registry.values()
+        if t.applies_to is None or ctx.item_type in t.applies_to
+    ]
 
     while True:
         if result.turns >= max_turns:
