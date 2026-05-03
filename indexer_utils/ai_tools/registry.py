@@ -15,6 +15,9 @@ Tools exposed to the model:
 - ``search_recent_tv`` — subagent-backed report on US TV releases and
   streaming buzz in a window around today (Nielsen via Variety/THR +
   Wikipedia). TV runs only.
+- ``search_title_buzz`` — subagent-backed reception lookup for a single
+  title (RT + Metacritic + IMDb + Reddit/Letterboxd chatter). Works
+  for both movies and TV.
 - ``submit_recommendation`` — terminal tool; ends the agent loop.
 
 Implementations live in sibling modules: ``searches`` (the three search
@@ -27,7 +30,11 @@ registry.
 from typing import Any, Dict
 
 from .base import TerminalToolResult, Tool, ToolContext, ToolResult
-from .discoveries import SEARCH_RECENT_RELEASES_TOOL, SEARCH_RECENT_TV_TOOL
+from .discoveries import (
+    SEARCH_RECENT_RELEASES_TOOL,
+    SEARCH_RECENT_TV_TOOL,
+    SEARCH_TITLE_BUZZ_TOOL,
+)
 from .inspections import (
     CHECK_ADDED_HISTORY_TOOL,
     GET_DETAILS_TOOL,
@@ -96,6 +103,7 @@ REGISTRY: Dict[str, Tool] = {
         CHECK_ADDED_HISTORY_TOOL,
         SEARCH_RECENT_RELEASES_TOOL,
         SEARCH_RECENT_TV_TOOL,
+        SEARCH_TITLE_BUZZ_TOOL,
         SUBMIT_TOOL,
     )
 }
