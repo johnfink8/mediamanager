@@ -191,6 +191,13 @@ def _normalize_library_item(
     for key in _PLEX_LIBRARY_ATTR_FIELDS:
         if key in entry and entry.get(key) not in (None, ""):
             attrs[key] = entry[key]
+    # Plex omits ``viewCount`` from the JSON for items that have never been
+    # played to completion. The general loop above drops missing keys, which
+    # would conflate "in Plex with zero plays" (a negative engagement signal)
+    # with "not in Plex / not yet scanned" (no signal). Default to 0 so the
+    # absence of the field cleanly means the latter.
+    if "viewCount" not in attrs:
+        attrs["viewCount"] = 0
     summary = entry.get("summary")
     if summary:
         attrs["synopsis"] = summary
