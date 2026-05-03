@@ -9,17 +9,21 @@ Tools exposed to the model:
 - ``get_user_history`` — recent Plex plays + recent recommendation feedback.
 - ``check_added_history`` — Radarr/Sonarr download state + Plex views for
   previously-added items, gated on release date.
+- ``search_recent_releases`` — subagent-backed report on US theatrical
+  releases in a window around today (Box Office Mojo + Wikipedia).
 - ``submit_recommendation`` — terminal tool; ends the agent loop.
 
 Implementations live in sibling modules: ``searches`` (the three search
-tools), ``inspections`` (Plex/Radarr/Sonarr lookup tools), and ``_shared``
-(clipping, budget enforcement, decision/filter primitives). This module
-just composes the registry.
+tools), ``inspections`` (Plex/Radarr/Sonarr lookup tools), ``discoveries``
+(outward-looking research subagents), and ``_shared`` (clipping, budget
+enforcement, decision/filter primitives). This module just composes the
+registry.
 """
 
 from typing import Any, Dict
 
 from .base import TerminalToolResult, Tool, ToolContext, ToolResult
+from .discoveries import SEARCH_RECENT_RELEASES_TOOL
 from .inspections import (
     CHECK_ADDED_HISTORY_TOOL,
     GET_DETAILS_TOOL,
@@ -86,6 +90,7 @@ REGISTRY: Dict[str, Tool] = {
         GET_DETAILS_TOOL,
         GET_HISTORY_TOOL,
         CHECK_ADDED_HISTORY_TOOL,
+        SEARCH_RECENT_RELEASES_TOOL,
         SUBMIT_TOOL,
     )
 }
