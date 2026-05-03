@@ -12,6 +12,7 @@ helping the reader.
 
 import logging
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from decouple import config
@@ -20,6 +21,8 @@ from openai import AsyncOpenAI
 from ..redis_client import get_redis_client, redis_get_json, redis_set_json
 from .base import Tool, ToolContext, ToolResult
 from .shared import enforce_result_budget
+
+_PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
 logger = logging.getLogger(__name__)
 
@@ -78,18 +81,10 @@ SEARCH_RECENT_RELEASES_SCHEMA: Dict[str, Any] = {
     },
 }
 
-_SYSTEM_PROMPT = (
-    "You are a research assistant for US theatrical movie releases. Use "
-    "the web_search tool. Prefer Box Office Mojo (boxofficemojo.com) for "
-    "the weekend chart and release calendar, and Wikipedia's annual "
-    "'List of American films of YYYY' page for cross-reference and "
-    "metadata. Pick the most recent weekend chart that actually has "
-    "data; if the latest week shows 'No data available', fall back to "
-    "the previous weekend. Never invent titles, distributors, or "
-    "grosses. Output a brief plain-text dossier — no markdown tables, "
-    "no JSON. Another LLM will read this directly, so favor clarity and "
-    "compactness over decorative formatting."
-)
+# Loaded at import time, matching ``ai_recs.RECOMMENDATION_PROMPTS``. We
+# inline the read instead of reusing ``ai_recs.load_prompt`` because
+# importing from ai_recs would cycle through ``ai_tools/__init__``.
+_SYSTEM_PROMPT = (_PROMPTS_DIR / "search_recent_releases.md").read_text()
 
 
 def _build_prompt(
