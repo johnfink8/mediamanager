@@ -6,7 +6,7 @@ from .loop import (
     TooManyTurnsError,
     run_agent,
 )
-from .registry import REGISTRY, build_registry
+from .registry import REGISTRY
 
 __all__ = [
     "Tool",
@@ -19,5 +19,4 @@ __all__ = [
     "TooManyTurnsError",
     "run_agent",
     "REGISTRY",
-    "build_registry",
 ]
