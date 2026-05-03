@@ -11,6 +11,10 @@ Tools exposed to the model:
   previously-added items, gated on release date.
 - ``search_recent_releases`` — subagent-backed report on US theatrical
   releases in a window around today (Box Office Mojo + Wikipedia).
+  Movie runs only.
+- ``search_recent_tv`` — subagent-backed report on US TV releases and
+  streaming buzz in a window around today (Nielsen via Variety/THR +
+  Wikipedia). TV runs only.
 - ``submit_recommendation`` — terminal tool; ends the agent loop.
 
 Implementations live in sibling modules: ``searches`` (the three search
@@ -23,7 +27,7 @@ registry.
 from typing import Any, Dict
 
 from .base import TerminalToolResult, Tool, ToolContext, ToolResult
-from .discoveries import SEARCH_RECENT_RELEASES_TOOL
+from .discoveries import SEARCH_RECENT_RELEASES_TOOL, SEARCH_RECENT_TV_TOOL
 from .inspections import (
     CHECK_ADDED_HISTORY_TOOL,
     GET_DETAILS_TOOL,
@@ -91,6 +95,7 @@ REGISTRY: Dict[str, Tool] = {
         GET_HISTORY_TOOL,
         CHECK_ADDED_HISTORY_TOOL,
         SEARCH_RECENT_RELEASES_TOOL,
+        SEARCH_RECENT_TV_TOOL,
         SUBMIT_TOOL,
     )
 }
