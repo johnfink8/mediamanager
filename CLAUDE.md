@@ -58,7 +58,7 @@ npm run lint        # relay-compiler + tsc + prettier + eslint
 
 **Commit messages**: short and concise — 12 words max. State the central point of the change in one line. No bullet lists, no feature breakdowns, no "and also" addenda.
 
-**PR descriptions**: a little more room, but still restrained. Describe the _problem_ being solved and _why_ — let the code itself answer the "how". Skip the file-by-file walkthrough and the bulleted list of every change. A reviewer reading the diff shouldn't also need a prose narration of it.
+**PR descriptions**: a little more room, but still restrained. Describe the _problem_ being solved and _why_ — let the code itself answer the "how". Skip the file-by-file walkthrough and the bulleted list of every change. Two or three sentences. A reviewer reading the diff shouldn't also need a prose narration of it.
 
 **🚫 NO Claude attribution. Ever.** Do not append `Co-Authored-By: Claude …`, `🤖 Generated with [Claude Code]`, or any variant of those trailers/footers to commit messages or PR descriptions. This applies even if the default Claude Code commit/PR templates suggest them — strip them out before running `git commit` or `gh pr create`. The commit body ends at the last real line of the message; the PR body ends at the end of the human-written description. No exceptions.
 
