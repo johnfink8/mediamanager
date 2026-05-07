@@ -208,7 +208,7 @@ type SchemaQuery {
   items(itemType: String = null): IgnoreItemList!
   filterRules: FilterRuleList!
   checkRuns: CheckRunHistory!
-  historicalItems(filters: [Filter!] = null, limit: Int! = 20, offset: Int! = 0, applyInvertedPermanentRules: Boolean! = false): HistoricalIgnoreItemList!
+  historicalItems(filters: [Filter!] = null, limit: Int! = 20, offset: Int! = 0, applyInvertedPermanentRules: Boolean! = false, search: String = null): HistoricalIgnoreItemList!
   scheduledJobs: [ScheduledJobType!]!
   movieRecommendation(prompt: String = null): MovieRecommendationType
 }
