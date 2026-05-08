@@ -17,12 +17,14 @@ const HistoricalItemsQuery = graphql`
         $limit: Int!
         $offset: Int!
         $applyInvertedPermanentRules: Boolean!
+        $search: String
     ) {
         historicalItems(
             filters: [{ type: $type }]
             limit: $limit
             offset: $offset
             applyInvertedPermanentRules: $applyInvertedPermanentRules
+            search: $search
         ) {
             nodes {
                 id
@@ -213,6 +215,8 @@ const HistoricalItemListContent: FC<{
     setDecisionFilter: (d: DecisionFilter) => void;
     offset: number;
     setOffset: (o: number) => void;
+    searchInput: string;
+    setSearchInput: (s: string) => void;
 }> = ({
     queryRef,
     typeFilter,
@@ -221,6 +225,8 @@ const HistoricalItemListContent: FC<{
     setDecisionFilter,
     offset,
     setOffset,
+    searchInput,
+    setSearchInput,
 }) => {
     const data = usePreloadedQuery<HistoricalItemListQuery>(
         HistoricalItemsQuery,
@@ -301,6 +307,14 @@ const HistoricalItemListContent: FC<{
                         </button>
                     ))}
                 </div>
+
+                <input
+                    type="search"
+                    className="search-input"
+                    placeholder="Search title…"
+                    value={searchInput}
+                    onChange={(e) => setSearchInput(e.target.value)}
+                />
 
                 <div className="toolbar-meta">
                     <strong>{pageInfo.totalCount}</strong> total
@@ -384,8 +398,20 @@ const HistoricalItemList: FC<{ menuItem: MenuItemType }> = ({ menuItem }) => {
         (menuItem.typeName as TypeFilter) || "mv"
     );
     const [decisionFilter, setDecisionFilter] = useState<DecisionFilter>("all");
+    const [searchInput, setSearchInputRaw] = useState("");
+    const [search, setSearch] = useState("");
     const [queryRef, loadQuery, disposeQuery] =
         useQueryLoader<HistoricalItemListQuery>(HistoricalItemsQuery);
+
+    const setSearchInput = (s: string) => {
+        setSearchInputRaw(s);
+        setOffset(0);
+    };
+
+    useEffect(() => {
+        const handle = setTimeout(() => setSearch(searchInput), 200);
+        return () => clearTimeout(handle);
+    }, [searchInput]);
 
     useEffect(() => {
         loadQuery({
@@ -393,11 +419,12 @@ const HistoricalItemList: FC<{ menuItem: MenuItemType }> = ({ menuItem }) => {
             limit: PAGE_SIZE,
             offset,
             applyInvertedPermanentRules: false,
+            search: search || null,
         });
         return () => {
             disposeQuery();
         };
-    }, [typeFilter, offset, loadQuery, disposeQuery]);
+    }, [typeFilter, offset, search, loadQuery, disposeQuery]);
 
     if (!queryRef) {
         return (
@@ -417,6 +444,8 @@ const HistoricalItemList: FC<{ menuItem: MenuItemType }> = ({ menuItem }) => {
             setDecisionFilter={setDecisionFilter}
             offset={offset}
             setOffset={setOffset}
+            searchInput={searchInput}
+            setSearchInput={setSearchInput}
         />
     );
 };

@@ -419,6 +419,7 @@ class HistoricalIgnoreItemList:
         limit: int = 20,
         offset: int = 0,
         apply_inverted_permanent_rules: bool = False,
+        search: Optional[str] = None,
     ) -> "HistoricalIgnoreItemList":
         with db_session() as session:
             query = session.query(IgnoreItem).where(IgnoreItem.ignore.is_(True))
@@ -428,6 +429,15 @@ class HistoricalIgnoreItemList:
             )
             if item_type_filter:
                 query = query.where(IgnoreItem.item_type == item_type_filter)
+
+            if search and search.strip():
+                pattern = f"%{search.strip()}%"
+                query = query.where(
+                    or_(
+                        IgnoreItem.title.ilike(pattern),
+                        IgnoreItem.checked_title.ilike(pattern),
+                    )
+                )
 
             # Optionally apply the inverted permanent rules for this type
             if apply_inverted_permanent_rules:
@@ -608,12 +618,14 @@ class SchemaQuery:
         limit: int = 20,
         offset: int = 0,
         apply_inverted_permanent_rules: bool = False,
+        search: Optional[str] = None,
     ) -> HistoricalIgnoreItemList:
         return HistoricalIgnoreItemList.get_historical(
             filters=filters,
             limit=limit,
             offset=offset,
             apply_inverted_permanent_rules=apply_inverted_permanent_rules,
+            search=search,
         )
 
     @strawberry.field
