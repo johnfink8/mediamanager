@@ -108,4 +108,4 @@ services:
     command:
       - sh
       - -c
-      - "pip install --quiet pytest && pytest tests/ -x -q"
+      - "pip install --quiet pytest && pytest tests/ -q"

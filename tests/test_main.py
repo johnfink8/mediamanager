@@ -304,10 +304,10 @@ def test_query_items_filtering(run_graphql):
     session.commit()
     session.close()
 
-    # Query items (should return all items, since no temporary filter is passed except type)
+    # Query items for the "mv" type — items() no longer takes a filters list
     query = """
-    query ItemListQuery($filters: [Filter!]) {
-        items(filters: $filters) {
+    query ItemListQuery($itemType: String) {
+        items(itemType: $itemType) {
             id
             nodes {
                 id
@@ -319,7 +319,7 @@ def test_query_items_filtering(run_graphql):
         }
     }
     """
-    result = run_graphql(query, {"filters": [{"type": "mv"}]})
+    result = run_graphql(query, {"itemType": "mv"})
     assert "data" in result
     nodes = result["data"]["items"]["nodes"]
     titles = {n["title"] for n in nodes}
