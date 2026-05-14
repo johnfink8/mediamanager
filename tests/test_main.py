@@ -131,8 +131,8 @@ def test_index_returns_html(client_and_db):
 
 def test_query_items(run_graphql):
     query = """
-    query ItemListQuery($filters: [Filter!]) {
-        items(filters: $filters) {
+    query ItemListQuery($itemType: String) {
+        items(itemType: $itemType) {
             id
             nodes {
                 id
@@ -146,7 +146,7 @@ def test_query_items(run_graphql):
         }
     }
     """
-    result = run_graphql(query, {"filters": [{"type": "mv"}]})
+    result = run_graphql(query, {"itemType": "mv"})
     assert "data" in result
     assert "items" in result["data"]
     assert "nodes" in result["data"]["items"]
