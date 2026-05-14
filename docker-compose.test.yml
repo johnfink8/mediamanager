@@ -9,7 +9,7 @@ services:
     volumes:
       - ./my.cnf:/etc/my.cnf
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-ppassw0rd"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-ppassw0rd"]
       interval: 5s
       timeout: 5s
       retries: 12
