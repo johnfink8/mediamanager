@@ -604,7 +604,9 @@ def test_check_movies_creates_ignore_items(monkeypatch):
         def __init__(self, text):
             self.text = text
 
-    monkeypatch.setattr("requests.get", lambda url, params=None: MockResponse(xml))
+    monkeypatch.setattr(
+        "requests.get", lambda url, params=None, **kwargs: MockResponse(xml)
+    )
 
     # Mock radarr_query to return a movie lookup with year and genres
     def mock_radarr_query(endpoint, method=None, **kwargs):
@@ -613,6 +615,7 @@ def test_check_movies_creates_ignore_items(monkeypatch):
                 {
                     "year": "2022",
                     "title": "Test Movie",
+                    "tmdbId": "999",
                     "genres": ["Comedy"],
                     "originalLanguage": "English",
                     "status": "released",
@@ -670,7 +673,9 @@ def test_check_shows_fetches_cast(monkeypatch):
         def __init__(self, text):
             self.text = text
 
-    monkeypatch.setattr("requests.get", lambda url, params=None: MockResponse(xml))
+    monkeypatch.setattr(
+        "requests.get", lambda url, params=None, **kwargs: MockResponse(xml)
+    )
 
     def mock_query_series(tvdb):
         assert tvdb == "12345"
@@ -698,11 +703,11 @@ def test_check_shows_fetches_cast(monkeypatch):
     monkeypatch.setattr("indexer_utils.vid_utils.get_tv_cast", mock_get_tv_cast)
     monkeypatch.setattr("indexer_utils.vid_utils.get_tv_id", lambda tvdb: "56789")
 
-    def mock_annotate(item_type, uid, title, attrs):
+    async def mock_annotate(item_type, uid, title, attrs, **kwargs):
         assert attrs["cast"] == ["Actor One", "Actor Two"]
         return attrs
 
-    monkeypatch.setattr("indexer_utils.vid_utils.annotate_with_ai", mock_annotate)
+    monkeypatch.setattr("indexer_utils.vid_utils.annotate_with_ai_async", mock_annotate)
 
     check_shows(days=1)
 
@@ -888,7 +893,10 @@ def test_movie_recommendation_query(run_graphql, monkeypatch):
         history = payload.get("history")
         assert history and history[0]["title"] == "Dark Space"
         assert history[0]["preference"] == "NEVER"
-        return {"imdb_id": "tt0000002", "reason": "Fits the space adventure vibe."}
+        return (
+            {"imdb_id": "tt0000002", "reason": "Fits the space adventure vibe."},
+            None,
+        )
 
     monkeypatch.setattr("indexer_utils.recommendations.call_openai_json", fake_openai)
 
@@ -963,7 +971,7 @@ def test_movie_recommendation_uses_radarr_base_for_posters(run_graphql, monkeypa
     )
     monkeypatch.setattr(
         "indexer_utils.recommendations.call_openai_json",
-        lambda system_prompt, payload: {"imdb_id": "tt0000003"},
+        lambda system_prompt, payload: ({"imdb_id": "tt0000003"}, None),
     )
 
     query = """
