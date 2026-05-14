@@ -86,31 +86,25 @@ def run_graphql(client_and_db):
     return _run
 
 
-def test_check_new_and_titles(client_and_db, monkeypatch):
-    client, calls = client_and_db
+def test_check_new_and_titles(monkeypatch):
+    from indexer_utils import jobs
 
-    # Patch check_movies, check_shows, get_movie_titles, get_show_titles in indexer_utils.main
+    calls: list = []
     monkeypatch.setattr(
-        "indexer_utils.main.check_movies",
-        lambda days: calls.append(("check_movies", days)),
+        jobs, "check_movies", lambda days: calls.append(("check_movies", days))
     )
     monkeypatch.setattr(
-        "indexer_utils.main.check_shows",
-        lambda days: calls.append(("check_shows", days)),
+        jobs, "check_shows", lambda days: calls.append(("check_shows", days))
     )
     monkeypatch.setattr(
-        "indexer_utils.main.get_movie_titles",
-        lambda: calls.append(("get_movie_titles",)),
+        jobs, "get_movie_titles", lambda: calls.append(("get_movie_titles",))
     )
     monkeypatch.setattr(
-        "indexer_utils.main.get_show_titles", lambda: calls.append(("get_show_titles",))
+        jobs, "get_show_titles", lambda: calls.append(("get_show_titles",))
     )
+    monkeypatch.setattr(jobs, "_signal_event", lambda item_type: None)
 
-    # Test check_new endpoint
-    calls.clear()
-    res_new = client.get("/check_new/")
-    assert res_new.status_code == 200
-    assert res_new.json() == {"status": "done"}
+    jobs.run_check_new_items()
     expected_movie_calls = [
         ("check_movies", 1),
         ("check_movies", 4),
@@ -120,11 +114,8 @@ def test_check_new_and_titles(client_and_db, monkeypatch):
     assert calls[:3] == expected_movie_calls
     assert calls[3:6] == expected_show_calls
 
-    # Test check_titles endpoint
     calls.clear()
-    res_titles = client.get("/check_titles/")
-    assert res_titles.status_code == 200
-    assert res_titles.json() == {"status": "done"}
+    jobs.run_check_titles()
     assert ("get_movie_titles",) in calls
     assert ("get_show_titles",) in calls
 
