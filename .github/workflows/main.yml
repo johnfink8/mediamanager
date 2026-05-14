@@ -34,7 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Prepare env
-        run: cp .env.sample .env
+        run: cp .env.sample .env && cp .env.sample .env.test
       - name: Run pytest
         run: docker compose -f docker-compose.test.yml run --build --rm pytest
       - name: Cleanup
@@ -49,6 +49,9 @@ jobs:
         run: cp .env.sample .env && cp .env.sample .env.test
       - name: Run Playwright suite
         run: docker compose -f docker-compose.test.yml run --build --rm playwright
+      - name: Dump container logs
+        if: failure()
+        run: docker compose -f docker-compose.test.yml logs --no-color
       - name: Cleanup
         if: always()
         run: docker compose -f docker-compose.test.yml down -v
