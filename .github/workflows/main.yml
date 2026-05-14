@@ -1,55 +1,50 @@
+name: CI
+
 on:
+  pull_request:
+    branches: [main]
   push:
-    branches:
-      - "**"
+    branches: [main]
+
 jobs:
-  build:
-    if: github.ref != 'refs/heads/main'
-    runs-on: self-hosted
+  lint-python:
+    runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff format --check
+      - run: ruff check --no-fix
 
-      - name: Lint Python 
-        run: |
-          python3.12 -m venv .venv
-          source .venv/bin/activate
-          pip install ruff
-          ruff format --check
-          ruff check --no-fix
+  lint-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build frontend image
+        run: docker build -t builder:${{ github.sha }} --target build .
+      - name: Lint JS/TS
+        run: docker run --rm builder:${{ github.sha }} npm run lint
 
-      - name: Build frontend image and lint JS/TS
-        run: |
-          docker build -t builder:${{ github.sha }} --target build .
-          docker run --rm builder:${{ github.sha }} npm run lint
-
-      - name: Build production image
-        run: |
-          SRC=/opt/servermonitor
-          cp .env.sample .env
-          cp "$SRC/nginx.conf" .
-          cp "$SRC/ssh.conf" .
-          cp "$SRC/auth.conf" .
-          cp "$SRC/auth.users" .
-          cp "$SRC/authelia.conf" .
-          cp -r "$SRC/ssl" ./ssl
-          docker build -t mediamanager:${{ github.sha }} --target host .
-
-      - name: Run E2E tests
-        run: |
-          cp .env.sample .env.test
-          docker compose -f docker-compose.test.yml run --build --rm playwright
-
-      - name: Cleanup test containers
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run pytest
+        run: docker compose -f docker-compose.test.yml run --build --rm pytest
+      - name: Cleanup
         if: always()
         run: docker compose -f docker-compose.test.yml down -v
 
-  deploy:
-    if: github.ref == 'refs/heads/main'
-    runs-on: self-hosted
+  e2e-tests:
+    runs-on: ubuntu-latest
     steps:
-      - name: Run deployment script
-        run: |
-          cd /opt/servermonitor
-          git pull
-          docker compose up -d --build nginx
+      - uses: actions/checkout@v4
+      - name: Prepare env
+        run: cp .env.sample .env.test
+      - name: Run Playwright suite
+        run: docker compose -f docker-compose.test.yml run --build --rm playwright
+      - name: Cleanup
+        if: always()
+        run: docker compose -f docker-compose.test.yml down -v
