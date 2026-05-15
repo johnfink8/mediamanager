@@ -86,31 +86,25 @@ def run_graphql(client_and_db):
     return _run
 
 
-def test_check_new_and_titles(client_and_db, monkeypatch):
-    client, calls = client_and_db
+def test_check_new_and_titles(monkeypatch):
+    from indexer_utils import jobs
 
-    # Patch check_movies, check_shows, get_movie_titles, get_show_titles in indexer_utils.main
+    calls: list = []
     monkeypatch.setattr(
-        "indexer_utils.main.check_movies",
-        lambda days: calls.append(("check_movies", days)),
+        jobs, "check_movies", lambda days: calls.append(("check_movies", days))
     )
     monkeypatch.setattr(
-        "indexer_utils.main.check_shows",
-        lambda days: calls.append(("check_shows", days)),
+        jobs, "check_shows", lambda days: calls.append(("check_shows", days))
     )
     monkeypatch.setattr(
-        "indexer_utils.main.get_movie_titles",
-        lambda: calls.append(("get_movie_titles",)),
+        jobs, "get_movie_titles", lambda: calls.append(("get_movie_titles",))
     )
     monkeypatch.setattr(
-        "indexer_utils.main.get_show_titles", lambda: calls.append(("get_show_titles",))
+        jobs, "get_show_titles", lambda: calls.append(("get_show_titles",))
     )
+    monkeypatch.setattr(jobs, "_signal_event", lambda item_type: None)
 
-    # Test check_new endpoint
-    calls.clear()
-    res_new = client.get("/check_new/")
-    assert res_new.status_code == 200
-    assert res_new.json() == {"status": "done"}
+    jobs.run_check_new_items()
     expected_movie_calls = [
         ("check_movies", 1),
         ("check_movies", 4),
@@ -120,11 +114,8 @@ def test_check_new_and_titles(client_and_db, monkeypatch):
     assert calls[:3] == expected_movie_calls
     assert calls[3:6] == expected_show_calls
 
-    # Test check_titles endpoint
     calls.clear()
-    res_titles = client.get("/check_titles/")
-    assert res_titles.status_code == 200
-    assert res_titles.json() == {"status": "done"}
+    jobs.run_check_titles()
     assert ("get_movie_titles",) in calls
     assert ("get_show_titles",) in calls
 
@@ -140,8 +131,8 @@ def test_index_returns_html(client_and_db):
 
 def test_query_items(run_graphql):
     query = """
-    query ItemListQuery($filters: [Filter!]) {
-        items(filters: $filters) {
+    query ItemListQuery($itemType: String) {
+        items(itemType: $itemType) {
             id
             nodes {
                 id
@@ -155,7 +146,7 @@ def test_query_items(run_graphql):
         }
     }
     """
-    result = run_graphql(query, {"filters": [{"type": "mv"}]})
+    result = run_graphql(query, {"itemType": "mv"})
     assert "data" in result
     assert "items" in result["data"]
     assert "nodes" in result["data"]["items"]
@@ -313,10 +304,10 @@ def test_query_items_filtering(run_graphql):
     session.commit()
     session.close()
 
-    # Query items (should return all items, since no temporary filter is passed except type)
+    # Query items for the "mv" type — items() no longer takes a filters list
     query = """
-    query ItemListQuery($filters: [Filter!]) {
-        items(filters: $filters) {
+    query ItemListQuery($itemType: String) {
+        items(itemType: $itemType) {
             id
             nodes {
                 id
@@ -328,7 +319,7 @@ def test_query_items_filtering(run_graphql):
         }
     }
     """
-    result = run_graphql(query, {"filters": [{"type": "mv"}]})
+    result = run_graphql(query, {"itemType": "mv"})
     assert "data" in result
     nodes = result["data"]["items"]["nodes"]
     titles = {n["title"] for n in nodes}
@@ -613,7 +604,9 @@ def test_check_movies_creates_ignore_items(monkeypatch):
         def __init__(self, text):
             self.text = text
 
-    monkeypatch.setattr("requests.get", lambda url, params=None: MockResponse(xml))
+    monkeypatch.setattr(
+        "requests.get", lambda url, params=None, **kwargs: MockResponse(xml)
+    )
 
     # Mock radarr_query to return a movie lookup with year and genres
     def mock_radarr_query(endpoint, method=None, **kwargs):
@@ -622,6 +615,7 @@ def test_check_movies_creates_ignore_items(monkeypatch):
                 {
                     "year": "2022",
                     "title": "Test Movie",
+                    "tmdbId": "999",
                     "genres": ["Comedy"],
                     "originalLanguage": "English",
                     "status": "released",
@@ -679,7 +673,9 @@ def test_check_shows_fetches_cast(monkeypatch):
         def __init__(self, text):
             self.text = text
 
-    monkeypatch.setattr("requests.get", lambda url, params=None: MockResponse(xml))
+    monkeypatch.setattr(
+        "requests.get", lambda url, params=None, **kwargs: MockResponse(xml)
+    )
 
     def mock_query_series(tvdb):
         assert tvdb == "12345"
@@ -707,11 +703,11 @@ def test_check_shows_fetches_cast(monkeypatch):
     monkeypatch.setattr("indexer_utils.vid_utils.get_tv_cast", mock_get_tv_cast)
     monkeypatch.setattr("indexer_utils.vid_utils.get_tv_id", lambda tvdb: "56789")
 
-    def mock_annotate(item_type, uid, title, attrs):
+    async def mock_annotate(item_type, uid, title, attrs, **kwargs):
         assert attrs["cast"] == ["Actor One", "Actor Two"]
         return attrs
 
-    monkeypatch.setattr("indexer_utils.vid_utils.annotate_with_ai", mock_annotate)
+    monkeypatch.setattr("indexer_utils.vid_utils.annotate_with_ai_async", mock_annotate)
 
     check_shows(days=1)
 
@@ -897,7 +893,10 @@ def test_movie_recommendation_query(run_graphql, monkeypatch):
         history = payload.get("history")
         assert history and history[0]["title"] == "Dark Space"
         assert history[0]["preference"] == "NEVER"
-        return {"imdb_id": "tt0000002", "reason": "Fits the space adventure vibe."}
+        return (
+            {"imdb_id": "tt0000002", "reason": "Fits the space adventure vibe."},
+            None,
+        )
 
     monkeypatch.setattr("indexer_utils.recommendations.call_openai_json", fake_openai)
 
@@ -972,7 +971,7 @@ def test_movie_recommendation_uses_radarr_base_for_posters(run_graphql, monkeypa
     )
     monkeypatch.setattr(
         "indexer_utils.recommendations.call_openai_json",
-        lambda system_prompt, payload: {"imdb_id": "tt0000003"},
+        lambda system_prompt, payload: ({"imdb_id": "tt0000003"}, None),
     )
 
     query = """
