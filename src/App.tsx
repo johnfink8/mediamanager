@@ -15,7 +15,9 @@ import { RelayEnvironmentProvider } from "react-relay";
 import { createClient } from "graphql-ws";
 
 const wsClient = createClient({
-    url: "ws://localhost:8000/graphql",
+    url: `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${
+        window.location.host
+    }/graphql`,
 });
 
 const createEnvironment = () => {
