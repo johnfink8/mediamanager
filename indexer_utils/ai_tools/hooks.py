@@ -40,8 +40,9 @@ class AuditHooks(RunHooks[ToolContext]):
         self.turns = 0
         self.tool_calls = 0
         self.tool_log: List[Dict[str, Any]] = []
-        # tool name -> start monotonic time; tools can in principle run
-        # concurrently within a turn, so key by tool name + call count.
+        # tool_call_id -> start monotonic time. The SDK runs function tools
+        # concurrently within a turn, so keying by tool.name would collide
+        # whenever the model emits the same tool twice in one turn.
         self._starts: Dict[str, float] = {}
 
     async def on_llm_start(
@@ -76,11 +77,16 @@ class AuditHooks(RunHooks[ToolContext]):
         agent: Agent[ToolContext],
         tool: Tool,
     ) -> None:
+        # Check + increment must be free of awaits so concurrent on_tool_start
+        # invocations within a turn can't both pass the cap.
         if self.tool_calls + 1 > self.max_tool_calls:
             raise ToolCallBudgetExceeded(
                 f"agent exceeded {self.max_tool_calls} tool calls"
             )
-        self._starts[tool.name] = time.monotonic()
+        self.tool_calls += 1
+        call_id = getattr(context, "tool_call_id", None)
+        if call_id is not None:
+            self._starts[call_id] = time.monotonic()
 
     async def on_tool_end(
         self,
@@ -89,9 +95,11 @@ class AuditHooks(RunHooks[ToolContext]):
         tool: Tool,
         result: str,
     ) -> None:
-        started = self._starts.pop(tool.name, time.monotonic())
-        duration_ms = int((time.monotonic() - started) * 1000)
-        self.tool_calls += 1
+        call_id = getattr(context, "tool_call_id", None)
+        started = self._starts.pop(call_id, None) if call_id is not None else None
+        duration_ms = (
+            int((time.monotonic() - started) * 1000) if started is not None else None
+        )
         preview = result if len(result) <= 800 else result[:800] + " …"
         self.tool_log.append(
             {
@@ -102,10 +110,10 @@ class AuditHooks(RunHooks[ToolContext]):
             }
         )
         logger.info(
-            "%s tool=%s ms=%d -> %s",
+            "%s tool=%s ms=%s -> %s",
             self.log_tag,
             tool.name,
-            duration_ms,
+            duration_ms if duration_ms is not None else "?",
             preview,
         )
 
