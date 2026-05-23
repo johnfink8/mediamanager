@@ -4,59 +4,105 @@ All three return the same ``{results, decision_counts}`` shape so the agent
 sees one vocabulary regardless of where the data came from.
 """
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+from agents import RunContextWrapper
 
 from ..models import IgnoreItem
 from ..session import db_session
 from ..weaviate_client import asearch_by_synopsis
-from .base import Tool, ToolContext, ToolResult
+from .base import ToolContext
+from .safe_tool import safe_tool
 from .shared import (
-    SHARED_FILTER_PROPS,
     attrs_get_genres,
     decision,
     empty_decision_counts,
     enforce_result_budget,
-    extract_filters,
     query_db_items,
     row_passes_filters,
     summarize_item,
 )
 
-SEARCH_SYNOPSIS_SCHEMA: Dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "query": {
-            "type": "string",
-            "description": (
-                "Free-text description of the kind of item you want to find "
-                "neighbors for. Examples: 'gritty cold-war espionage thriller', "
-                "'animated coming-of-age comedy with strong female lead'."
-            ),
-        },
-        "limit": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 25,
-            "description": "Max results. Default 10.",
-        },
-        **SHARED_FILTER_PROPS,
-    },
-    "required": ["query"],
-}
+
+def _filter_dict(
+    language: Optional[str],
+    director: Optional[str],
+    runtime_min: Optional[int],
+    runtime_max: Optional[int],
+    rating_min: Optional[float],
+    votes_min: Optional[int],
+    year_min: Optional[int],
+    year_max: Optional[int],
+) -> Dict[str, Any]:
+    """Repack named filter args into the shape ``row_passes_filters`` expects."""
+    return {
+        k: v
+        for k, v in {
+            "language": language,
+            "director": director,
+            "runtime_min": runtime_min,
+            "runtime_max": runtime_max,
+            "rating_min": rating_min,
+            "votes_min": votes_min,
+            "year_min": year_min,
+            "year_max": year_max,
+        }.items()
+        if v is not None and v != ""
+    }
 
 
-async def _t_search_synopsis(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult:
-    query = str(input_.get("query") or "").strip()
+@safe_tool
+async def search_similar_by_synopsis(
+    wrapper: RunContextWrapper[ToolContext],
+    query: str,
+    limit: int = 10,
+    language: Optional[str] = None,
+    director: Optional[str] = None,
+    runtime_min: Optional[int] = None,
+    runtime_max: Optional[int] = None,
+    rating_min: Optional[float] = None,
+    votes_min: Optional[int] = None,
+    year_min: Optional[int] = None,
+    year_max: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Free-text semantic search over the user's catalog.
+
+    Use this to find items that resemble a vibe, theme, or premise (not exact
+    metadata matches). Each row has a `decision` field (added | rejected |
+    pending) plus a `decision_counts` summary across the result set.
+
+    Args:
+        query: Free-text description of the kind of item you want to find
+            neighbours for (e.g. 'gritty cold-war espionage thriller').
+        limit: Max results, 1-25. Default 10.
+        language: Original language, case-insensitive substring (e.g. 'en').
+        director: Director substring (movies only).
+        runtime_min: Min runtime in minutes (movies: total; TV: per-episode).
+        runtime_max: Max runtime in minutes.
+        rating_min: Minimum rating value (0-10 scale).
+        votes_min: Minimum rating-vote count.
+        year_min: Earliest release year.
+        year_max: Latest release year.
+    """
+    ctx = wrapper.context
+    query = (query or "").strip()
     if not query:
-        return ToolResult(output={"error": "query is required"})
-    limit = int(input_.get("limit") or 10)
-    limit = max(1, min(limit, 25))
+        return {"error": "query is required"}
+    limit = max(1, min(int(limit or 10), 25))
 
     raw = await asearch_by_synopsis(query, limit, ctx.item_type)
     uids = [r["uid"] for r in raw if r.get("uid")]
     db_rows = query_db_items(ctx.item_type, uids)
-    filters = extract_filters(input_)
+    filters = _filter_dict(
+        language,
+        director,
+        runtime_min,
+        runtime_max,
+        rating_min,
+        votes_min,
+        year_min,
+        year_max,
+    )
 
     candidate_uid = ctx.candidate.get("uid")
     results: List[Dict[str, Any]] = []
@@ -69,9 +115,6 @@ async def _t_search_synopsis(input_: Dict[str, Any], ctx: ToolContext) -> ToolRe
         if row is not None and not row_passes_filters(row, filters):
             continue
         if row is None and filters:
-            # No DB row → can't evaluate filters → omit. This avoids
-            # silently returning unfilterable hits when the agent asked
-            # for a constraint.
             continue
         item: Dict[str, Any] = {
             "uid": uid,
@@ -82,58 +125,69 @@ async def _t_search_synopsis(input_: Dict[str, Any], ctx: ToolContext) -> ToolRe
         }
         if row is not None:
             summary = summarize_item(row)
-            decision = summary["decision"]
-            counts[decision] += 1
+            counts[summary["decision"]] += 1
             for k, v in summary.items():
                 if k not in ("uid", "title"):
                     item[k] = v
         results.append(item)
-    output = {"results": results, "decision_counts": counts}
-    return ToolResult(
-        output=enforce_result_budget(
-            output, "search_similar_by_synopsis", candidate_uid
-        )
+    return enforce_result_budget(
+        {"results": results, "decision_counts": counts},
+        "search_similar_by_synopsis",
+        candidate_uid,
     )
 
 
-SEARCH_GENRE_SCHEMA: Dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "genres": {
-            "type": "array",
-            "items": {"type": "string"},
-            "minItems": 1,
-            "description": "Genre names. Items matching ANY genre are returned.",
-        },
-        "added_only": {
-            "type": "boolean",
-            "description": "If true, restrict to items the user added. Default false.",
-        },
-        "limit": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 50,
-            "description": "Max results. Default 15.",
-        },
-        **SHARED_FILTER_PROPS,
-    },
-    "required": ["genres"],
-}
+@safe_tool
+async def search_by_genre(
+    wrapper: RunContextWrapper[ToolContext],
+    genres: List[str],
+    added_only: bool = False,
+    limit: int = 15,
+    language: Optional[str] = None,
+    director: Optional[str] = None,
+    runtime_min: Optional[int] = None,
+    runtime_max: Optional[int] = None,
+    rating_min: Optional[float] = None,
+    votes_min: Optional[int] = None,
+    year_min: Optional[int] = None,
+    year_max: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Find items in the user's catalog that match one or more genres.
 
+    Use to gauge whether the user's added items overlap with the candidate's
+    genres.
 
-async def _t_search_genre(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult:
-    genres_raw = input_.get("genres") or []
-    if not isinstance(genres_raw, list) or not genres_raw:
-        return ToolResult(output={"error": "genres must be a non-empty array"})
-    wanted = {str(g).strip().lower() for g in genres_raw if str(g).strip()}
+    Args:
+        genres: Genre names. Items matching ANY genre are returned.
+        added_only: If true, restrict to items the user added.
+        limit: Max results, 1-50. Default 15.
+        language: Original language, case-insensitive substring.
+        director: Director substring (movies only).
+        runtime_min: Min runtime in minutes.
+        runtime_max: Max runtime in minutes.
+        rating_min: Minimum rating value (0-10).
+        votes_min: Minimum rating-vote count.
+        year_min: Earliest release year.
+        year_max: Latest release year.
+    """
+    ctx = wrapper.context
+    if not genres:
+        return {"error": "genres must be a non-empty array"}
+    wanted = {str(g).strip().lower() for g in genres if str(g).strip()}
     if not wanted:
-        return ToolResult(output={"error": "no valid genres provided"})
-    added_only = bool(input_.get("added_only"))
-    limit = int(input_.get("limit") or 15)
-    limit = max(1, min(limit, 50))
+        return {"error": "no valid genres provided"}
+    limit = max(1, min(int(limit or 15), 50))
+    filters = _filter_dict(
+        language,
+        director,
+        runtime_min,
+        runtime_max,
+        rating_min,
+        votes_min,
+        year_min,
+        year_max,
+    )
 
-    filters = extract_filters(input_)
     candidate_uid = ctx.candidate.get("uid")
     matches: List[Dict[str, Any]] = []
     counts = empty_decision_counts()
@@ -152,50 +206,66 @@ async def _t_search_genre(input_: Dict[str, Any], ctx: ToolContext) -> ToolResul
             counts[decision(row)] += 1
             if len(matches) < limit:
                 matches.append(summarize_item(row))
-    output = {"results": matches, "decision_counts": counts}
-    return ToolResult(
-        output=enforce_result_budget(output, "search_by_genre", candidate_uid)
+    return enforce_result_budget(
+        {"results": matches, "decision_counts": counts},
+        "search_by_genre",
+        candidate_uid,
     )
 
 
-SEARCH_NETWORK_SCHEMA: Dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "network": {
-            "type": "string",
-            "description": (
-                "Network or studio name. Examples: 'Apple TV+', 'HBO', "
-                "'Netflix', 'A24'. Case-insensitive substring match against "
-                "network (TV) or studio (movies)."
-            ),
-        },
-        "added_only": {
-            "type": "boolean",
-            "description": "If true, restrict to items the user added. Default false.",
-        },
-        "limit": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 50,
-            "description": "Max results. Default 15.",
-        },
-        **SHARED_FILTER_PROPS,
-    },
-    "required": ["network"],
-}
+@safe_tool
+async def search_by_network(
+    wrapper: RunContextWrapper[ToolContext],
+    network: str,
+    added_only: bool = False,
+    limit: int = 15,
+    language: Optional[str] = None,
+    director: Optional[str] = None,
+    runtime_min: Optional[int] = None,
+    runtime_max: Optional[int] = None,
+    rating_min: Optional[float] = None,
+    votes_min: Optional[int] = None,
+    year_min: Optional[int] = None,
+    year_max: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Find items in the user's catalog by network (TV) or studio (movies).
 
+    Examples: 'Apple TV+', 'HBO', 'A24'. Use this when the candidate has a
+    distinctive platform — platform is often a strong positive or negative
+    taste signal. Combine with added_only=true to see whether the user has
+    historically liked output from that platform.
 
-async def _t_search_network(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult:
-    name_raw = str(input_.get("network") or "").strip()
+    Args:
+        network: Network or studio name; case-insensitive substring match
+            against network (TV) or studio (movies).
+        added_only: If true, restrict to items the user added.
+        limit: Max results, 1-50. Default 15.
+        language: Original language substring.
+        director: Director substring (movies only).
+        runtime_min: Min runtime in minutes.
+        runtime_max: Max runtime in minutes.
+        rating_min: Minimum rating value (0-10).
+        votes_min: Minimum rating-vote count.
+        year_min: Earliest release year.
+        year_max: Latest release year.
+    """
+    ctx = wrapper.context
+    name_raw = (network or "").strip()
     if not name_raw:
-        return ToolResult(output={"error": "network is required"})
+        return {"error": "network is required"}
     needle = name_raw.lower()
-    added_only = bool(input_.get("added_only"))
-    limit = int(input_.get("limit") or 15)
-    limit = max(1, min(limit, 50))
+    limit = max(1, min(int(limit or 15), 50))
+    filters = _filter_dict(
+        language,
+        director,
+        runtime_min,
+        runtime_max,
+        rating_min,
+        votes_min,
+        year_min,
+        year_max,
+    )
 
-    filters = extract_filters(input_)
     candidate_uid = ctx.candidate.get("uid")
     matches: List[Dict[str, Any]] = []
     counts = empty_decision_counts()
@@ -216,46 +286,8 @@ async def _t_search_network(input_: Dict[str, Any], ctx: ToolContext) -> ToolRes
             counts[decision(row)] += 1
             if len(matches) < limit:
                 matches.append(summarize_item(row))
-    output = {"results": matches, "decision_counts": counts}
-    return ToolResult(
-        output=enforce_result_budget(output, "search_by_network", candidate_uid)
+    return enforce_result_budget(
+        {"results": matches, "decision_counts": counts},
+        "search_by_network",
+        candidate_uid,
     )
-
-
-SEARCH_SYNOPSIS_TOOL = Tool(
-    name="search_similar_by_synopsis",
-    description=(
-        "Free-text semantic search over the user's catalog. Use this "
-        "to find items that resemble a vibe, theme, or premise (not "
-        "exact metadata matches). Each row has a `decision` field "
-        "(added | rejected | pending) plus a `decision_counts` "
-        "summary across the result set."
-    ),
-    input_schema=SEARCH_SYNOPSIS_SCHEMA,
-    execute=_t_search_synopsis,
-)
-
-SEARCH_GENRE_TOOL = Tool(
-    name="search_by_genre",
-    description=(
-        "Find items in the user's catalog that match one or more "
-        "genres. Use to gauge whether the user's added items overlap "
-        "with the candidate's genres."
-    ),
-    input_schema=SEARCH_GENRE_SCHEMA,
-    execute=_t_search_genre,
-)
-
-SEARCH_NETWORK_TOOL = Tool(
-    name="search_by_network",
-    description=(
-        "Find items in the user's catalog by network (TV) or studio "
-        "(movies). Examples: 'Apple TV+', 'HBO', 'A24'. Use this when "
-        "the candidate has a distinctive platform — platform is often "
-        "a strong positive or negative taste signal. Combine with "
-        "added_only=true to see whether the user has historically "
-        "liked output from that platform."
-    ),
-    input_schema=SEARCH_NETWORK_SCHEMA,
-    execute=_t_search_network,
-)

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from decouple import config
-from openai import AsyncOpenAI, OpenAI
+from openai import OpenAI
 
 from indexer_utils.tmdb import (
     get_movie_cast,
@@ -16,7 +16,7 @@ from indexer_utils.tmdb import (
     get_tv_id,
 )
 
-from .ai_tools import REGISTRY, AgentRunResult, ToolContext, run_agent
+from .ai_tools import AgentRunResult, ToolContext, run_recommendation
 from .log import item_context
 from .models import IgnoreItem
 from .radarr_utils import radarr_query
@@ -59,11 +59,6 @@ RECOMMENDATION_PROMPTS = {
 }
 
 _openai_client: Optional[OpenAI] = None
-# NOTE: AsyncOpenAI is intentionally NOT cached. httpx transports are bound
-# to whichever event loop opened them, and this module is called from both
-# the FastAPI loop (mutations) and short-lived loops created by
-# ``asyncio.run`` inside scheduled-job threads. A global cache crossed the
-# streams and fired ``Event loop is closed`` at runtime.
 
 
 def _to_list_of_str(value: Any) -> List[str]:
@@ -126,20 +121,6 @@ def get_openai_client() -> Optional[OpenAI]:
         return _openai_client
     except Exception:
         logger.exception("Failed to initialize OpenAI client")
-        return None
-
-
-def make_async_openai_client() -> Optional[AsyncOpenAI]:
-    """Build a fresh AsyncOpenAI client tied to the current event loop.
-
-    Callers are responsible for closing it (use ``async with`` or
-    ``await client.close()`` in a ``finally`` block).
-    """
-    try:
-        api_key = config("OPENAI_API_KEY")
-        return AsyncOpenAI(api_key=api_key)
-    except Exception:
-        logger.exception("Failed to initialize async OpenAI client")
         return None
 
 
@@ -379,24 +360,15 @@ async def annotate_with_ai_async(
     uid: str,
     title: str,
     attrs: Dict[str, Any],
-    *,
-    client: Optional[AsyncOpenAI] = None,
 ) -> Dict[str, Any]:
     """Async agentic recommendation flow.
 
     Steps: (1) hydrate cast/release_count, (2) generate synopsis + upsert to
-    Weaviate, (3) run the OpenAI tool-calling agent until ``submit_recommendation``,
-    (4) write a single consolidated ``ai`` block back to ``attrs``.
-
-    If ``client`` is provided, it is reused for the agent loop (lets a batch
-    caller share one connection pool across many candidates). If omitted, a
-    fresh client is built and closed within this call so the caller doesn't
-    have to manage its lifecycle.
+    Weaviate, (3) run the recommendation Agent (openai-agents SDK), (4) write
+    a single consolidated ``ai`` block back to ``attrs``.
     """
     with item_context(f"{item_type}:{uid}"):
-        return await _annotate_with_ai_async_inner(
-            item_type, uid, title, attrs, client=client
-        )
+        return await _annotate_with_ai_async_inner(item_type, uid, title, attrs)
 
 
 async def _annotate_with_ai_async_inner(
@@ -404,8 +376,6 @@ async def _annotate_with_ai_async_inner(
     uid: str,
     title: str,
     attrs: Dict[str, Any],
-    *,
-    client: Optional[AsyncOpenAI] = None,
 ) -> Dict[str, Any]:
     import time as _time
 
@@ -481,14 +451,11 @@ async def _annotate_with_ai_async_inner(
 
     base_ai = dict(attrs.get("ai") or {})
 
-    owns_client = client is None
-    if client is None:
-        client = make_async_openai_client()
-    if client is None:
+    if not config("OPENAI_API_KEY", default=""):
         run = AgentRunResult(
             failure={
                 "code": "client_not_configured",
-                "message": "OpenAI async client not configured",
+                "message": "OPENAI_API_KEY not configured",
                 "stage": "client",
             }
         )
@@ -512,23 +479,15 @@ async def _annotate_with_ai_async_inner(
         },
     )
 
-    try:
-        run = await run_agent(
-            client=client,
-            model=OPENAI_MODEL,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            registry=REGISTRY,
-            ctx=ctx,
-            max_turns=AGENT_MAX_TURNS,
-            max_tool_calls=AGENT_MAX_TOOL_CALLS,
-        )
-    finally:
-        if owns_client:
-            try:
-                await client.close()
-            except Exception:
-                logger.exception("failed to close ad-hoc AsyncOpenAI client")
+    run = await run_recommendation(
+        item_type=item_type,
+        model=OPENAI_MODEL,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        ctx=ctx,
+        max_turns=AGENT_MAX_TURNS,
+        max_tool_calls=AGENT_MAX_TOOL_CALLS,
+    )
 
     attrs_out = dict(attrs)
     attrs_out["ai"] = _ai_details_from_run(

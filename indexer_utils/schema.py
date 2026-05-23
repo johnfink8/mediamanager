@@ -13,7 +13,6 @@ from strawberry.scalars import ID, JSON
 
 from indexer_utils.ai_recs import (
     annotate_with_ai_async,
-    make_async_openai_client,
     refresh_visible_item_attributes,
 )
 from indexer_utils.check_feedback import get_check_history
@@ -852,32 +851,20 @@ class Mutation:
         if not prepared:
             return []
 
-        # Phase 2: run agent for each item, sharing one OpenAI client.
+        # Phase 2: run agent for each item, gated by AI_ANNOTATE_CONCURRENCY.
         from indexer_utils.vid_utils import AI_ANNOTATE_CONCURRENCY
 
         semaphore = asyncio.Semaphore(AI_ANNOTATE_CONCURRENCY)
-        openai_client = make_async_openai_client()
 
         async def _annotate(p: Dict[str, Any]) -> Dict[str, Any]:
             async with semaphore:
                 return await annotate_with_ai_async(
-                    p["item_type"],
-                    p["uid"],
-                    p["title"],
-                    p["attrs"],
-                    client=openai_client,
+                    p["item_type"], p["uid"], p["title"], p["attrs"]
                 )
 
-        try:
-            results = await asyncio.gather(
-                *(_annotate(p) for p in prepared), return_exceptions=True
-            )
-        finally:
-            if openai_client is not None:
-                try:
-                    await openai_client.close()
-                except Exception:
-                    logger.exception("failed to close AsyncOpenAI client")
+        results = await asyncio.gather(
+            *(_annotate(p) for p in prepared), return_exceptions=True
+        )
 
         # Phase 3: write enriched attrs back.
         with db_session() as session:
