@@ -235,15 +235,26 @@ def _build_search(recorder: SimulationRecorder) -> Callable:
     """Stand in for ``vector_search.asearch_by_synopsis`` under SQLite.
 
     Returns the seeded items of the matching ``item_type`` as plausible
-    neighbors. ``searches.py`` filters to ``added=True`` post-fetch, so
-    rejected items in the fixture are dropped before they reach the LLM.
+    neighbors. Honors ``added_only`` and ``exclude_uid`` so the simulation
+    matches the SQL-side filters the real tool uses.
     """
 
-    async def _fake(query_text: str, k: int, item_type: str) -> List[Dict[str, Any]]:
+    async def _fake(
+        query_text: str,
+        k: int,
+        item_type: str,
+        *,
+        added_only: bool = False,
+        exclude_uid: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         seed = fx.SEED_MOVIES if item_type == "mv" else fx.SEED_SHOWS
         results: List[Dict[str, Any]] = []
         for idx, item in enumerate(seed):
-            if idx >= k:
+            if added_only and not item.get("added"):
+                continue
+            if exclude_uid is not None and item["uid"] == exclude_uid:
+                continue
+            if len(results) >= k:
                 break
             results.append(
                 {
@@ -251,7 +262,7 @@ def _build_search(recorder: SimulationRecorder) -> Callable:
                     "title": item["title"],
                     # Synthetic distances: monotonically increasing so the
                     # ordering is deterministic but distinct.
-                    "distance": 0.1 + idx * 0.05,
+                    "distance": 0.1 + len(results) * 0.05,
                 }
             )
         return results
