@@ -1,9 +1,8 @@
 """Lifecycle hooks: per-call audit log + tool-budget tripwire.
 
-The SDK doesn't have a native ``max_tool_calls`` cap (it has ``max_turns``).
-We add one via ``on_tool_start`` so the legacy ``AI_AGENT_MAX_TOOL_CALLS``
-env var still bounds work — and so a model that tries to fire many tools in
-a single turn can't slip past ``max_turns`` without our notice.
+The SDK has ``max_turns`` but no cumulative tool-call cap. ``on_tool_start``
+fills that gap so ``AI_AGENT_MAX_TOOL_CALLS`` bounds total work, even when a
+single turn fires several tools in parallel.
 """
 
 import logging
@@ -29,7 +28,7 @@ class ToolCallBudgetExceeded(RuntimeError):
 
 
 class AuditHooks(RunHooks[ToolContext]):
-    """Records per-tool-call timing + outcome for the legacy ``tool_log`` field.
+    """Records per-tool-call timing + outcome onto an in-memory ``tool_log``.
 
     Also enforces ``max_tool_calls`` by raising ``ToolCallBudgetExceeded``
     before dispatch when the budget would be breached.

@@ -1,13 +1,15 @@
 """Recommendation Agent factory + ``run_recommendation`` entry point.
 
-This replaces the hand-rolled tool-calling loop. We build a per-item-type
-``Agent`` (movies get the theatrical-window tool; TV gets the TV-window
-tool; everything else is shared) with a Pydantic ``output_type``, then call
-``Runner.run`` and adapt the result back into the legacy
-``AgentRunResult`` shape that ``ai_recs._ai_details_from_run`` consumes.
+Builds a per-item-type ``Agent`` — movies see ``search_recent_releases``,
+TV sees ``search_recent_tv``, the rest of the toolset is shared — with a
+Pydantic ``Recommendation`` as the structured output type.
+``run_recommendation`` drives ``Runner.run`` and returns an
+``AgentRunResult`` carrying the structured submission plus per-run audit
+data (turns, tool calls, tool log, failure reason).
 
-Tracing is disabled — the project doesn't want data flowing to OpenAI's
-tracing dashboard. Per-call audit data is captured via ``AuditHooks`` instead.
+Tracing is disabled via ``RunConfig`` — the project doesn't want data
+flowing to OpenAI's tracing dashboard. Per-call audit data is captured via
+``AuditHooks``.
 """
 
 import logging
@@ -44,7 +46,7 @@ class Recommendation(BaseModel):
 
 @dataclass
 class AgentRunResult:
-    """Back-compat shape consumed by ``ai_recs._ai_details_from_run``."""
+    """Structured submission + audit data for one recommendation run."""
 
     submission: Optional[Dict[str, Any]] = None
     turns: int = 0
@@ -104,10 +106,10 @@ async def run_recommendation(
 
     # Build a fresh httpx-backed client per run and close it before this task
     # returns. The SDK would otherwise lazily build (and never close) a
-    # process-default AsyncOpenAI, leaking the socket on each asyncio.run
-    # exit. The original ai_recs code had the same per-run pattern for the
-    # same reason — and ``asyncio.run`` callers from scheduler threads need
-    # event-loop-bound transports.
+    # process-default AsyncOpenAI, leaking the socket on each ``asyncio.run``
+    # exit. Per-run scoping also keeps httpx transports bound to the loop
+    # that opened them — required when scheduler threads spin up short-lived
+    # loops via ``asyncio.run``.
     openai_client = AsyncOpenAI(api_key=config("OPENAI_API_KEY"))
     provider = OpenAIProvider(openai_client=openai_client)
     run_config = RunConfig(tracing_disabled=True, model_provider=provider)
