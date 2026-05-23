@@ -9,19 +9,13 @@ Usage:
     # Full fixture set
     ./venv/bin/python scripts/simulate_check.py both
 
-Connects to the real local MySQL (read-only — writes are intercepted), the
-real local Weaviate (read-only — upserts are intercepted), and the real
-OpenAI API. Indexer / Radarr / Sonarr / Plex / TMDB are mocked from
-``indexer_utils.testing.fixtures``.
+Uses an in-memory SQLite seeded from ``indexer_utils.testing.fixtures`` for
+relational data; vector search is stubbed (SQLite can't run a pgvector
+cosine query). Indexer / Radarr / Sonarr / Plex / TMDB are mocked. OpenAI
+chat completions are real.
 
 Pre-flight:
-    docker compose up -d db weaviate         # bring up backing services
-    export WEAVIATE_HOST=localhost           # docker-compose maps 8080
     export OPENAI_API_KEY=...                # required, real calls
-
-If Weaviate is unreachable the ``search_similar_by_synopsis`` tool will
-return an error and the agent will pivot to ``search_by_genre`` /
-``get_item_details`` — the simulation still completes.
 """
 
 from __future__ import annotations
@@ -113,11 +107,8 @@ def _print_recorder(recorder: SimulationRecorder) -> None:
     print(f"radarr_calls     : {len(recorder.radarr_calls)}")
     print(f"sonarr_calls     : {len(recorder.sonarr_calls)}")
     print(f"plex_lookups     : {len(recorder.plex_lookups)}")
-    print(f"weaviate upserts : {len(recorder.upsert_calls)} (intercepted, not written)")
+    print(f"vector upserts   : {len(recorder.upsert_calls)} (intercepted, not written)")
     print(f"sqlite seed      : {recorder.seed_summary or '-'}")
-    print(f"weaviate seed    : {recorder.weaviate_seed_summary or '-'}")
-    if recorder.weaviate_error:
-        print(f"weaviate error   : {recorder.weaviate_error}")
 
 
 def _run(kind: str, max_items: int) -> SimulationRecorder:

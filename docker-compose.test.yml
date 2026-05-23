@@ -1,15 +1,12 @@
 services:
   db:
-    image: mysql:9.4.0
+    image: pgvector/pgvector:pg16
     environment:
-      MYSQL_ROOT_PASSWORD: passw0rd
-      MYSQL_DATABASE: indexer_utils
-      MYSQL_USER: indexer_utils
-      MYSQL_PASSWORD: passw0rd
-    volumes:
-      - ./my.cnf:/etc/my.cnf
+      POSTGRES_DB: indexer_utils
+      POSTGRES_USER: indexer_utils
+      POSTGRES_PASSWORD: passw0rd
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-ppassw0rd"]
+      test: ["CMD-SHELL", "pg_isready -U indexer_utils -d indexer_utils"]
       interval: 5s
       timeout: 5s
       retries: 12
@@ -22,16 +19,6 @@ services:
       interval: 3s
       timeout: 3s
       retries: 10
-
-  weaviate:
-    image: cr.weaviate.io/semitechnologies/weaviate:1.32.2
-    command: ["--host", "0.0.0.0", "--port", "8080", "--scheme", "http"]
-    environment:
-      QUERY_DEFAULTS_LIMIT: 25
-      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
-      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
-      ENABLE_API_BASED_MODULES: "true"
-      CLUSTER_HOSTNAME: "node1"
 
   db_init:
     build:
@@ -56,8 +43,6 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
-      weaviate:
-        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/"]
       interval: 5s

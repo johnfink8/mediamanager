@@ -23,7 +23,7 @@ from .models import IgnoreItem
 from .radarr_utils import radarr_query
 from .session import db_session
 from .sonarr_utils import query_series
-from .weaviate_client import upsert_item_attrs
+from .vector_search import aupsert_item_vector
 
 logger = logging.getLogger(__name__)
 
@@ -350,7 +350,6 @@ def _ai_details_from_run(
 ) -> Dict[str, Any]:
     details = dict(base_ai)
     details.setdefault("model", OPENAI_MODEL)
-    details.setdefault("weaviate_uuid", base_ai.get("weaviate_uuid"))
     details["synopsis"] = candidate_synopsis
     details["tool_log"] = run.tool_log
     details["turns"] = run.turns
@@ -394,9 +393,10 @@ async def annotate_with_ai_async(
 ) -> Dict[str, Any]:
     """Async agentic recommendation flow.
 
-    Steps: (1) hydrate cast/release_count, (2) generate synopsis + upsert to
-    Weaviate, (3) run the recommendation Agent (openai-agents SDK), (4) write
-    a single consolidated ``ai`` block back to ``attrs``.
+    Steps: (1) hydrate cast/release_count, (2) generate synopsis + embed it
+    into the pgvector ``synopsis_vector`` column, (3) run the recommendation
+    Agent (openai-agents SDK), (4) write a single consolidated ``ai`` block
+    back to ``attrs``.
     """
     with item_context(f"{item_type}:{uid}"):
         return await _annotate_with_ai_async_inner(item_type, uid, title, attrs)
@@ -476,9 +476,7 @@ async def _annotate_with_ai_async_inner(
             if len(candidate_synopsis) > 480
             else candidate_synopsis,
         )
-    attrs = await asyncio.to_thread(
-        upsert_item_attrs, attrs, item_type, uid, title, candidate_synopsis
-    )
+    attrs = await aupsert_item_vector(attrs, item_type, uid, title, candidate_synopsis)
 
     base_ai = dict(attrs.get("ai") or {})
 

@@ -1,13 +1,14 @@
 requests
 dnspython
 webviewhandler>=0.2
-mysqlclient
+psycopg[binary]>=3.1
+pgvector>=0.3
 cinemagoer==2022.12.27
 tvdb_v4_official
 python-decouple
 redis
 fastapi[all]
-sqlalchemy>=2.0.0 
+sqlalchemy>=2.0.0
 jinja2
 gunicorn
 strawberry-graphql[fastapi,cli]==0.275.2
@@ -16,5 +17,4 @@ mypy
 alembic
 openai>=1.0.0
 openai-agents>=0.17.0
-weaviate-client==4.16.6
 apscheduler>=3.10,<4
