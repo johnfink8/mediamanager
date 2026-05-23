@@ -17,9 +17,11 @@ from indexer_utils.tmdb import (
 )
 
 from .ai_tools import AgentRunResult, ToolContext, run_recommendation
+from .library_profile import compute_candidate_match, compute_library_profile
 from .log import item_context
 from .models import IgnoreItem
 from .radarr_utils import radarr_query
+from .session import db_session
 from .sonarr_utils import query_series
 from .weaviate_client import upsert_item_attrs
 
@@ -286,28 +288,57 @@ def _build_user_payload(
     genres = _to_list_of_str(attrs.get("genres"))
     lang = _to_list_of_str(attrs.get("originalLanguage"))
     year = _year_from_attrs(attrs)
-    payload: Dict[str, Any] = {
-        "item_type": item_type,
-        "candidate": {
-            "title": title,
-            "uid": uid,
-            "year": year,
-            "genres": genres,
-            "language": lang,
-            "synopsis": candidate_synopsis,
-            "cast": attrs.get("cast"),
-            "director": attrs.get("director"),
-            "network": attrs.get("network"),
-            "studio": attrs.get("studio"),
-            "runtime": attrs.get("runtime"),
-            "rating_value": attrs.get("rating_value"),
-            "rating_votes": attrs.get("rating_votes"),
-        },
+    candidate: Dict[str, Any] = {
+        "title": title,
+        "uid": uid,
+        "year": year,
+        "genres": genres,
+        "language": lang,
+        "synopsis": candidate_synopsis,
+        "cast": attrs.get("cast"),
+        "director": attrs.get("director"),
+        "network": attrs.get("network"),
+        "studio": attrs.get("studio"),
+        "runtime": attrs.get("runtime"),
     }
+    # Per-source ratings — only include sources actually populated for this
+    # candidate. See indexer_utils/ai_tools/shared.py for the field-name
+    # conventions (kept aligned with search-tool output).
+    rating = attrs.get("rating_value")
+    if rating is not None:
+        candidate["rating"] = rating
+        if attrs.get("rating_votes") is not None:
+            candidate["rating_votes"] = attrs.get("rating_votes")
+    for label, value_key, votes_key in [
+        ("imdb", "imdbuser_value", "imdbuser_votes"),
+        ("tmdb", "tmdbuser_value", "tmdbuser_votes"),
+        ("trakt", "traktuser_value", "traktuser_votes"),
+    ]:
+        val = attrs.get(value_key)
+        if val is not None:
+            candidate[f"{label}_rating"] = val
+            v = attrs.get(votes_key)
+            if v is not None:
+                candidate[f"{label}_votes"] = v
+    for label, value_key in [
+        ("rt", "rottenTomatoesuser_value"),
+        ("metacritic", "metacriticuser_value"),
+    ]:
+        val = attrs.get(value_key)
+        if val is not None:
+            candidate[label] = val
+    payload: Dict[str, Any] = {"item_type": item_type, "candidate": candidate}
     if item_type == "mv":
-        payload["candidate"]["release_count"] = (attrs.get("ai") or {}).get(
-            "release_count"
-        )
+        candidate["release_count"] = (attrs.get("ai") or {}).get("release_count")
+
+    # Pre-resolve aggregate taste signal so the agent doesn't have to derive
+    # it from per-tool counts. See ``indexer_utils.library_profile`` for the
+    # motivation — short version: absolute per-genre counts are unbounded
+    # and uncalibrated; relative composition is the honest signal.
+    with db_session() as session:
+        profile = compute_library_profile(session, item_type)
+    payload["library_profile"] = profile
+    payload["candidate_match"] = compute_candidate_match(profile, attrs)
     return payload
 
 
