@@ -120,12 +120,24 @@ async def aupsert_item_vector(
     )
 
 
-def search_by_synopsis(query_text: str, k: int, item_type: str) -> List[Dict[str, Any]]:
+def search_by_synopsis(
+    query_text: str,
+    k: int,
+    item_type: str,
+    *,
+    added_only: bool = False,
+    exclude_uid: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """Return the top-k nearest items by cosine distance.
 
-    Result shape matches the legacy Weaviate response: ``uid``, ``title``,
-    ``distance`` (lower = closer). Callers add the ``added=True`` filter
-    themselves — see ``ai_tools/searches.py``.
+    Result shape: ``{"uid", "title", "distance"}`` (lower = closer).
+
+    ``added_only`` and ``exclude_uid`` push the agent-tool's two universal
+    filters into SQL so ``LIMIT k`` is actually the top-k of *eligible*
+    items, not "top-k of everything, minus rejects" — the latter silently
+    shrinks the result set whenever a rejected item lands in the K nearest.
+    Default-off so diagnostic callers (e.g. ``vector_simulate_distance``)
+    still see the whole index.
     """
     try:
         vec = _embed(query_text)
@@ -134,18 +146,22 @@ def search_by_synopsis(query_text: str, k: int, item_type: str) -> List[Dict[str
         return []
     if vec is None:
         return []
+    stmt = (
+        select(
+            IgnoreItem.uid,
+            IgnoreItem.title,
+            IgnoreItem.synopsis_vector.cosine_distance(vec).label("distance"),
+        )
+        .where(IgnoreItem.item_type == item_type)
+        .where(IgnoreItem.synopsis_vector.is_not(None))
+    )
+    if added_only:
+        stmt = stmt.where(IgnoreItem.added.is_(True))
+    if exclude_uid is not None:
+        stmt = stmt.where(IgnoreItem.uid != exclude_uid)
+    stmt = stmt.order_by(IgnoreItem.synopsis_vector.cosine_distance(vec)).limit(k)
     with db_session() as session:
-        rows = session.execute(
-            select(
-                IgnoreItem.uid,
-                IgnoreItem.title,
-                IgnoreItem.synopsis_vector.cosine_distance(vec).label("distance"),
-            )
-            .where(IgnoreItem.item_type == item_type)
-            .where(IgnoreItem.synopsis_vector.is_not(None))
-            .order_by(IgnoreItem.synopsis_vector.cosine_distance(vec))
-            .limit(k)
-        ).all()
+        rows = session.execute(stmt).all()
     return [
         {"uid": uid, "title": title, "distance": float(distance)}
         for uid, title, distance in rows
@@ -153,9 +169,21 @@ def search_by_synopsis(query_text: str, k: int, item_type: str) -> List[Dict[str
 
 
 async def asearch_by_synopsis(
-    query_text: str, k: int, item_type: str
+    query_text: str,
+    k: int,
+    item_type: str,
+    *,
+    added_only: bool = False,
+    exclude_uid: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    return await asyncio.to_thread(search_by_synopsis, query_text, k, item_type)
+    return await asyncio.to_thread(
+        search_by_synopsis,
+        query_text,
+        k,
+        item_type,
+        added_only=added_only,
+        exclude_uid=exclude_uid,
+    )
 
 
 def get_nearest_neighbors(

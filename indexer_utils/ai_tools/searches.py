@@ -133,7 +133,17 @@ async def search_similar_by_synopsis(
         return {"error": "query is required"}
     limit = max(1, min(int(limit or 10), 25))
 
-    raw = await asearch_by_synopsis(query, limit, ctx.item_type)
+    candidate_uid = ctx.candidate.get("uid")
+    # `added=True` and self-exclusion are unconditional invariants of this
+    # tool — push them into the SQL ORDER BY so `LIMIT k` reflects k
+    # eligible neighbors, not k raw nearest minus whatever post-filter drops.
+    raw = await asearch_by_synopsis(
+        query,
+        limit,
+        ctx.item_type,
+        added_only=True,
+        exclude_uid=candidate_uid,
+    )
     uids = [r["uid"] for r in raw if r.get("uid")]
     db_rows = query_db_items(ctx.item_type, uids)
     filters = _filter_dict(
@@ -155,16 +165,15 @@ async def search_similar_by_synopsis(
         year_max,
     )
 
-    candidate_uid = ctx.candidate.get("uid")
     results: List[Dict[str, Any]] = []
     for hit in raw:
         uid = hit.get("uid")
-        if not uid or uid == candidate_uid:
+        if not uid:
             continue
         row = db_rows.get(uid)
-        # Added-only: skip vector hits that aren't in the user's library
-        # (either no DB row at all, or a row the user hasn't added).
-        if row is None or not row.added:
+        if row is None:
+            # Vector hit with no relational row — shouldn't happen, but skip
+            # rather than burning the slot.
             continue
         if not row_passes_filters(row, filters):
             continue
