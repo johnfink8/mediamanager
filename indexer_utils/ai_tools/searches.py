@@ -1,4 +1,4 @@
-"""Search tools: synopsis (Weaviate), genre (DB), network/studio (DB).
+"""Search tools: synopsis (pgvector), genre (DB), network/studio (DB).
 
 All three search *added* items only — they're for finding concrete library
 examples that match a query, not for deriving taste signals. Aggregate
@@ -17,7 +17,7 @@ from agents import RunContextWrapper
 
 from ..models import IgnoreItem
 from ..session import db_session
-from ..weaviate_client import asearch_by_synopsis
+from ..vector_search import asearch_by_synopsis
 from .base import ToolContext
 from .safe_tool import safe_tool
 from .shared import (
@@ -162,7 +162,7 @@ async def search_similar_by_synopsis(
         if not uid or uid == candidate_uid:
             continue
         row = db_rows.get(uid)
-        # Added-only: skip Weaviate hits that aren't in the user's library
+        # Added-only: skip vector hits that aren't in the user's library
         # (either no DB row at all, or a row the user hasn't added).
         if row is None or not row.added:
             continue

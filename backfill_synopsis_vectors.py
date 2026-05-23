@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""Backfill ``synopsis_vector`` on ``indexer_utils_ignoreitem``.
+
+Walks items that don't yet have a vector (or all items with ``--reindex-all``),
+makes sure each has an AI-generated synopsis, embeds it, and writes the
+result into pgvector via ``vector_search.upsert_item_vector``.
+"""
+
 import argparse
 import json
 import logging
@@ -6,14 +13,14 @@ from datetime import datetime
 from typing import List, Optional
 
 from decouple import config
-from sqlalchemy import Integer, and_, func, or_
+from sqlalchemy import Integer, and_, func, or_, text
 from sqlalchemy.orm.attributes import flag_modified
 
 from indexer_utils.ai_recs import generate_synopsis_for_candidate
 from indexer_utils.filters import should_ignore_by_rules
 from indexer_utils.models import FilterRule, IgnoreItem
 from indexer_utils.session import db_session
-from indexer_utils.weaviate_client import get_weaviate_client, upsert_item_attrs
+from indexer_utils.vector_search import upsert_item_vector
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -48,9 +55,10 @@ def backfill(
     dry_run: bool,
     force: bool,
     reindex_all: bool,
-    check_weaviate: bool,
+    check_vectors: bool,
     query_rules: bool,
     since: int,
+    added_only: bool,
 ) -> None:
     if not config("OPENAI_API_KEY", default=None):
         print(
@@ -58,21 +66,19 @@ def backfill(
         )
         return
 
-    coll_name = "IgnoreItemMV" if item_type == "mv" else "IgnoreItemTV"
-    client = get_weaviate_client()
-    coll = client.collections.get(coll_name)
-    item_ids = [r.properties.get("uid") for r in coll.query.fetch_objects().objects]
-    client.close()
-
     session = db_session()
     query = session.query(IgnoreItem)
     query = query.filter(IgnoreItem.item_type == item_type)
-    logger.info(f"Querying {item_type} items")
-    if item_ids and not check_weaviate:
-        logger.info(
-            f"Excluding {len(item_ids)} items that already have a weaviate UUID"
+    if added_only:
+        # ``search_similar_by_synopsis`` filters to added=True post-fetch, so
+        # vectors on rejected rows are dead weight at query time. For a
+        # cutover backfill this is also what keeps cost bounded.
+        query = query.filter(
+            IgnoreItem.added.is_(True),
+            IgnoreItem.attributes["ai"]["synopsis"].isnot(None),
         )
-        query = query.filter(~IgnoreItem.uid.in_(item_ids))
+        logger.info("Restricting to added=True items with stored synopses")
+    logger.info(f"Querying {item_type} items")
 
     if query_rules:
         # Exclude items that would be disqualified by rules by pushing rules into SQL
@@ -129,15 +135,25 @@ def backfill(
             query = query.filter(~or_(*disq_clauses))
 
     if since:
-        query = query.filter(IgnoreItem.attributes["year"] >= since)
+        # JSONB ``year`` is mostly an int but legacy rows have stored lists
+        # (``[2022]``) and the occasional raw string. Gate the ``::int`` cast
+        # behind a regex so non-numeric values silently fall out of the
+        # filter instead of aborting the whole backfill on the first one.
+        query = query.filter(
+            text(
+                "(CASE WHEN (attributes->>'year') ~ '^-?[0-9]+$' "
+                "THEN (attributes->>'year')::int END) >= :since_year"
+            )
+        ).params(since_year=since)
 
-    # Only backfill items not yet upserted to Weaviate unless check mode is enabled.
-    if check_weaviate:
-        logger.info("Checking items that already have a weaviate UUID")
-        query = query.filter(IgnoreItem.attributes["ai"]["weaviate_uuid"].isnot(None))
+    # Vector-presence gate (postgres-side; the column is deferred but
+    # still usable in WHERE clauses).
+    if check_vectors:
+        logger.info("Checking items that already have a synopsis vector")
+        query = query.filter(IgnoreItem.synopsis_vector.is_not(None))
     elif not reindex_all:
-        logger.info("Excluding items that already have a weaviate UUID")
-        query = query.filter(IgnoreItem.attributes["ai"]["weaviate_uuid"].is_(None))
+        logger.info("Excluding items that already have a synopsis vector")
+        query = query.filter(IgnoreItem.synopsis_vector.is_(None))
     query = query.order_by(IgnoreItem.id.desc())
     if limit:
         logger.info(f"Limiting to {limit} items")
@@ -145,18 +161,10 @@ def backfill(
     items = query.all()
     logger.info(f"Found {len(items)} items to process")
     updated_count = 0
-    check_client = None
-    check_coll = None
-
-    if check_weaviate:
-        check_client = get_weaviate_client()
-        check_coll_name = "IgnoreItemMV" if item_type == "mv" else "IgnoreItemTV"
-        check_coll = check_client.collections.get(check_coll_name)
 
     for item in items:
         logger.info(f"Processing item {item.uid}")
         attrs = item.attributes or {}
-        # Apply FilterRule logic: skip items disqualified by rules
         try:
             if query_rules and should_ignore_by_rules(item):
                 logger.info(
@@ -164,7 +172,6 @@ def backfill(
                 )
                 continue
         except Exception as e:
-            # Be conservative; if rule evaluation fails, skip the item
             logger.error(f"Error evaluating rules for item {item.uid}: {e}")
             continue
 
@@ -174,22 +181,6 @@ def backfill(
         language = _to_list_of_str((attrs).get("originalLanguage"))
 
         synopsis = attrs.get("ai", {}).get("synopsis")
-
-        if check_weaviate:
-            weaviate_uuid = attrs.get("ai", {}).get("weaviate_uuid")
-            if not weaviate_uuid:
-                logger.info(
-                    f"Skipping item {item.uid}: missing weaviate UUID in check mode"
-                )
-                continue
-            if check_coll and check_coll.data.exists(uuid=weaviate_uuid):
-                logger.info(
-                    f"Skipping item {item.uid}: Weaviate object {weaviate_uuid} exists"
-                )
-                continue
-            logger.info(
-                f"Weaviate object {weaviate_uuid} for item {item.uid} does not exist; reindexing"
-            )
 
         if force or synopsis is None:
             logger.info(f"Generating synopsis for {item.uid}")
@@ -201,14 +192,19 @@ def backfill(
                 ai["synopsis"] = synopsis
                 attrs["ai"] = ai
 
-        # Index into Weaviate (store vector external to MySQL)
+        # Drop the dead pointer from the Weaviate era.
+        ai = attrs.get("ai")
+        if isinstance(ai, dict) and "weaviate_uuid" in ai:
+            ai.pop("weaviate_uuid", None)
+            attrs["ai"] = ai
+
         if synopsis:
             try:
-                attrs = upsert_item_attrs(
+                attrs = upsert_item_vector(
                     attrs, item.item_type, item.uid, title, synopsis
                 )
             except Exception as e:
-                logger.error(f"Failed to upsert into Weaviate for {item.uid}: {e}")
+                logger.error(f"Failed to write vector for {item.uid}: {e}")
                 raise
 
         if dry_run:
@@ -224,15 +220,12 @@ def backfill(
                 )
             )
         else:
-            logger.info(f"Updating item {item.uid}:{attrs}")
+            logger.info(f"Updating item {item.uid}")
             item.attributes = attrs
             flag_modified(item, "attributes")
             session.add(item)
             session.commit()
             updated_count += 1
-
-    if check_client:
-        check_client.close()
 
     print(f"Backfill complete. Updated {updated_count} item(s).")
 
@@ -249,17 +242,19 @@ def main() -> None:
         "--dry-run", action="store_true", help="Preview changes without saving"
     )
     parser.add_argument(
-        "--force", action="store_true", help="Regenerate even if already present"
+        "--force",
+        action="store_true",
+        help="Regenerate synopsis even if already present",
     )
     parser.add_argument(
         "--reindex-all",
         action="store_true",
-        help="Reindex all items even if they already have a weaviate UUID",
+        help="Re-embed all items even if they already have a synopsis vector",
     )
     parser.add_argument(
-        "--check-weaviate",
+        "--check-vectors",
         action="store_true",
-        help="Validate existing weaviate UUIDs and reindex missing objects",
+        help="Walk items that already have a vector (e.g. to sanity-check the index)",
     )
     parser.add_argument(
         "--skip-rules",
@@ -271,6 +266,14 @@ def main() -> None:
         type=int,
         help="Only process items since this year",
     )
+    parser.add_argument(
+        "--added-only",
+        action="store_true",
+        help=(
+            "Only embed items the user added with an existing stored synopsis. "
+            "Targets exactly what the search tool returns and keeps cost bounded."
+        ),
+    )
     args = parser.parse_args()
 
     backfill(
@@ -279,9 +282,10 @@ def main() -> None:
         args.dry_run,
         args.force,
         args.reindex_all,
-        args.check_weaviate,
+        args.check_vectors,
         not args.skip_rules,
         int(args.since or datetime.now().year),
+        args.added_only,
     )
 
 

@@ -27,7 +27,7 @@ def upgrade() -> None:
         "indexer_utils_ignoreitem",
         sa.Column("defer_until", sa.DateTime(), nullable=True),
     )
-    op.execute("UPDATE indexer_utils_ignoreitem SET shown = 1 WHERE added = 1")
+    op.execute("UPDATE indexer_utils_ignoreitem SET shown = true WHERE added = true")
 
 
 def downgrade() -> None:

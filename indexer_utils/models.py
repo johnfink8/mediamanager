@@ -1,20 +1,28 @@
 import enum
 from datetime import datetime
-from typing import Iterable, List, Optional, Sequence, Type
+from typing import Any, Iterable, List, Optional, Sequence, Type
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     JSON,
     Boolean,
     DateTime,
     Enum,
     Integer,
+    LargeBinary,
     String,
     Text,
     or_,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from indexer_utils.session import Base, db_session
+
+# OpenAI text-embedding-3-small dimensionality. Mirrors the constant in
+# alembic/versions/add_pgvector_synopsis.py so the model and the
+# migration stay in lockstep.
+SYNOPSIS_VECTOR_DIMS = 1536
 
 
 class IgnoreItem(Base):
@@ -30,12 +38,20 @@ class IgnoreItem(Base):
     title: Mapped[str] = mapped_column(String(255), default="")
     checked_title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     poster_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    attributes: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    attributes: Mapped[Optional[dict]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=True
+    )
     created_at: Mapped[Optional[int]] = mapped_column(
         Integer, nullable=True
     )  # Unix timestamp, default None
     shown: Mapped[bool] = mapped_column(Boolean, default=False)
     defer_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # Deferred: 6KB per row, only loaded when a search/index path asks for it.
+    synopsis_vector: Mapped[Optional[Any]] = mapped_column(
+        Vector(SYNOPSIS_VECTOR_DIMS).with_variant(LargeBinary(), "sqlite"),
+        nullable=True,
+        deferred=True,
+    )
 
     def save(self) -> None:
         session = Session.object_session(self)
