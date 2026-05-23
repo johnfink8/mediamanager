@@ -88,8 +88,6 @@ async def get_item_details(
             "director": attrs.get("director"),
             "runtime": attrs.get("runtime"),
             "language": attrs.get("originalLanguage"),
-            "rating_value": attrs.get("rating_value"),
-            "rating_votes": attrs.get("rating_votes"),
             "synopsis": clip(ai.get("synopsis"), SYNOPSIS_CLIP),
             "view_count": None,
             "last_viewed_at": None,
@@ -97,6 +95,30 @@ async def get_item_details(
             "user_rating": None,
             "plex_status": "unknown",
         }
+        # Per-source ratings — only include populated ones (kept aligned
+        # with shared.summarize_item's output shape).
+        if attrs.get("rating_value") is not None:
+            details["rating"] = attrs.get("rating_value")
+            if attrs.get("rating_votes") is not None:
+                details["rating_votes"] = attrs.get("rating_votes")
+        for label, value_key, votes_key in [
+            ("imdb", "imdbuser_value", "imdbuser_votes"),
+            ("tmdb", "tmdbuser_value", "tmdbuser_votes"),
+            ("trakt", "traktuser_value", "traktuser_votes"),
+        ]:
+            val = attrs.get(value_key)
+            if val is not None:
+                details[f"{label}_rating"] = val
+                v = attrs.get(votes_key)
+                if v is not None:
+                    details[f"{label}_votes"] = v
+        for label, value_key in [
+            ("rt", "rottenTomatoesuser_value"),
+            ("metacritic", "metacriticuser_value"),
+        ]:
+            val = attrs.get(value_key)
+            if val is not None:
+                details[label] = val
 
     if ctx.item_type == "mv" and title_for_plex:
         year = attrs.get("year")

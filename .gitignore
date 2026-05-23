@@ -92,3 +92,5 @@ github_deploy*
 secrets
 authelia_config
 weaviate_data
+*.tar.gz
+local
