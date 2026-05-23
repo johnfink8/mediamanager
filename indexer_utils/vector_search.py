@@ -73,11 +73,14 @@ def upsert_item_vector(
 ) -> Dict[str, Any]:
     """Embed the candidate and persist the vector on the row.
 
-    Returns ``attrs`` unchanged (the legacy Weaviate version stuffed a
-    ``weaviate_uuid`` into ``attrs.ai``; that bookkeeping is gone).
-    Silently no-ops if there's nothing to embed or OpenAI is unavailable
-    — annotation should not fail just because the vector couldn't be
-    written.
+    If a matching ``IgnoreItem`` row already exists, the vector is written
+    directly via UPDATE. If no row matches yet — the new-candidate ingest
+    path annotates *before* ``IgnoreItem.create``, see
+    ``vid_utils._arun_movie_candidates`` — the vector is stashed into
+    ``attrs["_synopsis_vector_tmp"]`` so the caller can attach it after
+    insert. Silently no-ops if there's nothing to embed or OpenAI is
+    unavailable; annotation should not fail just because the vector
+    couldn't be written.
     """
     text_to_embed = _embedding_source(title, synopsis)
     if not text_to_embed:
@@ -90,13 +93,18 @@ def upsert_item_vector(
     if vec is None:
         return attrs
     with db_session() as session:
-        session.execute(
+        result = session.execute(
             update(IgnoreItem)
             .where(IgnoreItem.uid == uid)
             .where(IgnoreItem.item_type == item_type)
             .values(synopsis_vector=vec)
         )
         session.commit()
+    if result.rowcount == 0:
+        # Row doesn't exist yet — hand the vector off to the caller for
+        # attach-after-create. ``vid_utils`` looks for this key and pops it
+        # onto the row after ``IgnoreItem.create``.
+        attrs["_synopsis_vector_tmp"] = vec
     return attrs
 
 

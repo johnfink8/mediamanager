@@ -463,8 +463,9 @@ async def _afinish_show_candidate(
     async with semaphore:
         enriched_attrs = await annotate_with_ai_async("tv", tvdb, title, attrs)
 
-    def _create() -> None:
-        IgnoreItem.create(
+    def _create_and_attach() -> None:
+        vec = enriched_attrs.pop("_synopsis_vector_tmp", None)
+        created = IgnoreItem.create(
             title=title,
             uid=tvdb,
             ignore=False,
@@ -472,8 +473,11 @@ async def _afinish_show_candidate(
             item_type="tv",
             attributes=enriched_attrs,
         )
+        if vec is not None:
+            created.synopsis_vector = vec
+            created.save()
 
-    await asyncio.to_thread(_create)
+    await asyncio.to_thread(_create_and_attach)
     return "Flagged for review", False
 
 
