@@ -135,9 +135,16 @@ def backfill(
             query = query.filter(~or_(*disq_clauses))
 
     if since:
-        query = query.filter(text("(attributes->>'year')::int >= :since_year")).params(
-            since_year=since
-        )
+        # JSONB ``year`` is mostly an int but legacy rows have stored lists
+        # (``[2022]``) and the occasional raw string. Gate the ``::int`` cast
+        # behind a regex so non-numeric values silently fall out of the
+        # filter instead of aborting the whole backfill on the first one.
+        query = query.filter(
+            text(
+                "(CASE WHEN (attributes->>'year') ~ '^-?[0-9]+$' "
+                "THEN (attributes->>'year')::int END) >= :since_year"
+            )
+        ).params(since_year=since)
 
     # Vector-presence gate (postgres-side; the column is deferred but
     # still usable in WHERE clauses).
