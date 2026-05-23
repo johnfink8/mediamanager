@@ -14,7 +14,7 @@ _SessionFactory: Optional[sessionmaker[Session]] = None
 
 def get_db_url() -> str:
     return (
-        f"mysql://{config('DB_USER')}:{config('DB_PASSWORD')}"
+        f"postgresql+psycopg://{config('DB_USER')}:{config('DB_PASSWORD')}"
         + f"@{config('DB_HOST')}/{config('DB_NAME')}"
     )
 
