@@ -134,9 +134,6 @@ async def search_similar_by_synopsis(
     limit = max(1, min(int(limit or 10), 25))
 
     candidate_uid = ctx.candidate.get("uid")
-    # `added=True` and self-exclusion are unconditional invariants of this
-    # tool — push them into the SQL ORDER BY so `LIMIT k` reflects k
-    # eligible neighbors, not k raw nearest minus whatever post-filter drops.
     raw = await asearch_by_synopsis(
         query,
         limit,
@@ -172,8 +169,6 @@ async def search_similar_by_synopsis(
             continue
         row = db_rows.get(uid)
         if row is None:
-            # Vector hit with no relational row — shouldn't happen, but skip
-            # rather than burning the slot.
             continue
         if not row_passes_filters(row, filters):
             continue

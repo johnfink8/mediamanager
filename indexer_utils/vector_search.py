@@ -131,13 +131,8 @@ def search_by_synopsis(
     """Return the top-k nearest items by cosine distance.
 
     Result shape: ``{"uid", "title", "distance"}`` (lower = closer).
-
-    ``added_only`` and ``exclude_uid`` push the agent-tool's two universal
-    filters into SQL so ``LIMIT k`` is actually the top-k of *eligible*
-    items, not "top-k of everything, minus rejects" — the latter silently
-    shrinks the result set whenever a rejected item lands in the K nearest.
-    Default-off so diagnostic callers (e.g. ``vector_simulate_distance``)
-    still see the whole index.
+    ``added_only`` filters to library items; ``exclude_uid`` drops a
+    single uid from the result set.
     """
     try:
         vec = _embed(query_text)
