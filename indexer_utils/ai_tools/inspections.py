@@ -13,14 +13,17 @@ test harness can patch them with ``patch.object(inspections, ...)``.
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
+
+from agents import RunContextWrapper
 
 from ..models import IgnoreItem, MovieRecommendationRecord
 from ..plex_utils import aget_plex_details, aget_recently_played
 from ..radarr_utils import aget_movie
 from ..session import db_session
 from ..sonarr_utils import aget_series
-from .base import Tool, ToolContext, ToolResult
+from .base import ToolContext
+from .safe_tool import safe_tool
 from .shared import (
     CAST_LIMIT,
     PLEX_SUMMARY_CLIP,
@@ -36,30 +39,30 @@ from .shared import (
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# get_item_details
-# ---------------------------------------------------------------------------
+@safe_tool
+async def get_item_details(
+    wrapper: RunContextWrapper[ToolContext],
+    uid: str,
+) -> Dict[str, Any]:
+    """Look up full details for one item by uid: synopsis, cast, ratings, language.
 
-GET_DETAILS_SCHEMA: Dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "uid": {
-            "type": "string",
-            "description": (
-                "IMDB id (movies, e.g. 'tt0111161') or TVDB id (shows). "
-                "Use uids returned by other search tools."
-            ),
-        },
-    },
-    "required": ["uid"],
-}
+    For movies, also returns user-watch metrics (view_count, last_viewed_at,
+    audience_rating, user_rating) and plex_status. plex_status values:
+    'in_library' (currently in Plex; check view_count for real engagement —
+    high count = strong like), 'missing_from_library' (added in DB but no
+    longer in Plex; likely deleted — strong negative signal),
+    'not_in_library' (never added; absence carries no signal), 'unknown'
+    (not queried, e.g. shows). Use after a search tool surfaces a uid you
+    want to dig into.
 
-
-async def _t_get_details(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult:
-    uid = str(input_.get("uid") or "").strip()
+    Args:
+        uid: IMDB id (movies, e.g. 'tt0111161') or TVDB id (shows). Use uids
+            returned by other search tools.
+    """
+    ctx = wrapper.context
+    uid = (uid or "").strip()
     if not uid:
-        return ToolResult(output={"error": "uid is required"})
+        return {"error": "uid is required"}
 
     with db_session() as session:
         row = (
@@ -68,9 +71,7 @@ async def _t_get_details(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult
             .first()
         )
         if row is None:
-            return ToolResult(
-                output={"error": f"no {ctx.item_type} item with uid {uid}"}
-            )
+            return {"error": f"no {ctx.item_type} item with uid {uid}"}
         attrs = row.attributes or {}
         ai = attrs.get("ai") or {}
         added_flag = bool(row.added)
@@ -90,8 +91,6 @@ async def _t_get_details(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult
             "rating_value": attrs.get("rating_value"),
             "rating_votes": attrs.get("rating_votes"),
             "synopsis": clip(ai.get("synopsis"), SYNOPSIS_CLIP),
-            # Plex signals — promoted to top level because view_count is one
-            # of the strongest indicators of real engagement.
             "view_count": None,
             "last_viewed_at": None,
             "audience_rating": None,
@@ -123,47 +122,32 @@ async def _t_get_details(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult
             if extras:
                 details["plex_extras"] = extras
         else:
-            # Item not currently in Plex. If the user previously added it,
-            # the most likely explanation is deletion — a strong negative
-            # signal. If they never added it, absence carries no signal.
             details["plex_status"] = (
                 "missing_from_library" if added_flag else "not_in_library"
             )
 
-    return ToolResult(
-        output=enforce_result_budget(
-            details, "get_item_details", ctx.candidate.get("uid")
-        )
-    )
+    return enforce_result_budget(details, "get_item_details", ctx.candidate.get("uid"))
 
 
-# ---------------------------------------------------------------------------
-# get_user_history
-# ---------------------------------------------------------------------------
+@safe_tool
+async def get_user_history(
+    wrapper: RunContextWrapper[ToolContext],
+    limit: int = 15,
+) -> Dict[str, Any]:
+    """Recent user activity: items recently watched and prior recommendation feedback.
 
-GET_HISTORY_SCHEMA: Dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "limit": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 50,
-            "description": "Max entries per source. Default 15.",
-        },
-    },
-}
+    Returns recently-played Plex entries and recommendation feedback rows
+    (LIKE / NOT_NOW / NEVER). Use to calibrate against current taste rather
+    than stale catalog state.
 
-
-async def _t_get_history(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult:
-    limit = int(input_.get("limit") or 15)
-    limit = max(1, min(limit, 50))
+    Args:
+        limit: Max entries per source. Default 15.
+    """
+    ctx = wrapper.context
+    limit = max(1, min(int(limit or 15), 50))
 
     plex_history: List[Dict[str, Any]] = []
     try:
-        # Plex's /status/sessions/history/all ignores ``maxResults`` and
-        # returns the full history — slice client-side or we drown in
-        # thousands of entries.
         plays = await aget_recently_played(limit)
         for entry in plays[:limit]:
             plex_history.append(
@@ -192,56 +176,14 @@ async def _t_get_history(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult
     except Exception:
         logger.exception("get_user_history: recommendation history fetch failed")
 
-    output = {
-        "recently_watched": plex_history,
-        "recent_recommendations": rec_history,
-    }
-    return ToolResult(
-        output=enforce_result_budget(
-            output, "get_user_history", ctx.candidate.get("uid")
-        )
+    return enforce_result_budget(
+        {"recently_watched": plex_history, "recent_recommendations": rec_history},
+        "get_user_history",
+        ctx.candidate.get("uid"),
     )
 
 
-# ---------------------------------------------------------------------------
-# check_added_history
-# ---------------------------------------------------------------------------
-
-CHECK_ADDED_HISTORY_SCHEMA: Dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "limit": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 50,
-            "description": "Max items to return. Default 15.",
-        },
-        "days_back": {
-            "type": "integer",
-            "minimum": 1,
-            "description": (
-                "Only include items added within the last N days. "
-                "Optional; default returns the most recent regardless of age."
-            ),
-        },
-        "item_type": {
-            "type": "string",
-            "enum": ["mv", "tv", "any"],
-            "description": (
-                "Filter by media type. Default uses the candidate's type "
-                "(mv or tv); pass 'any' to span both."
-            ),
-        },
-    },
-}
-
-
 def _plex_view_count(attrs: Dict[str, Any]) -> Optional[int]:
-    """Return Plex viewCount merged into ``attrs`` by the periodic library
-    scan. ``None`` means the row hasn't been matched against Plex yet (scan
-    hasn't run, or item isn't in Plex). ``0`` means matched but unwatched.
-    """
     raw = attrs.get("viewCount")
     if isinstance(raw, bool):
         return None
@@ -280,7 +222,6 @@ def _parse_iso_date(value: Any) -> Optional[datetime]:
 
 
 def _movie_release_date(movie: Dict[str, Any]) -> Optional[str]:
-    """Best-guess public-availability date from a Radarr movie payload."""
     for key in ("digitalRelease", "physicalRelease", "inCinemas"):
         raw = movie.get(key)
         if not raw:
@@ -292,11 +233,6 @@ def _movie_release_date(movie: Dict[str, Any]) -> Optional[str]:
 
 
 def _movie_release_status(movie: Dict[str, Any]) -> str:
-    """released | unreleased | unknown — based on Radarr release dates/status.
-
-    Radarr's ``status`` field (announced/inCinemas/released/deleted) is the
-    primary signal; release dates back-fill it when missing.
-    """
     status = str(movie.get("status") or "").lower()
     if status == "released":
         return "released"
@@ -317,7 +253,6 @@ def _movie_release_status(movie: Dict[str, Any]) -> str:
 async def _movie_followup(item: IgnoreItem) -> Dict[str, Any]:
     attrs = item.attributes or {}
     movie = await aget_movie(item.uid)
-
     out: Dict[str, Any] = {
         "uid": item.uid,
         "title": item.title,
@@ -411,14 +346,44 @@ def _empty_followup_summary() -> Dict[str, int]:
     }
 
 
-async def _t_check_added_history(
-    input_: Dict[str, Any], ctx: ToolContext
-) -> ToolResult:
-    limit = int(input_.get("limit") or 15)
-    limit = max(1, min(limit, 50))
-    days_back_raw = input_.get("days_back")
-    days_back = int(days_back_raw) if days_back_raw is not None else None
-    requested_type = str(input_.get("item_type") or ctx.item_type).lower()
+@safe_tool
+async def check_added_history(
+    wrapper: RunContextWrapper[ToolContext],
+    limit: int = 15,
+    days_back: Optional[int] = None,
+    item_type: Optional[Literal["mv", "tv", "any"]] = None,
+) -> Dict[str, Any]:
+    """Review past recommendations the user accepted, and how each one panned out.
+
+    Use this to calibrate against your own track record: items you suggested,
+    the user added, and then either watched, ignored, or are still waiting on.
+
+    download_status: 'downloaded' (available to watch), 'missing' (not yet
+    available), 'partial' (some episodes available, TV only), 'not_tracked'
+    (no longer being tracked), 'unknown'. release_status: 'released',
+    'unreleased' (accepted before public availability — a 'missing' download
+    here is NOT a negative signal), 'unknown'.
+
+    view_count > 0: watched to completion at least once — strong positive
+    signal. view_count == 0 with last_viewed_at null on a released,
+    downloaded item: in the library but never opened — negative signal
+    (especially if the item has been available a while). view_count == 0
+    with last_viewed_at set: started but didn't finish — mild negative, the
+    user dropped out. view_count is null: not in the library / not yet
+    scanned — no signal either way.
+
+    Defaults to the candidate's item_type; pass item_type='any' to span both.
+
+    Args:
+        limit: Max items to return, 1-50. Default 15.
+        days_back: Only include items added within the last N days. Optional.
+        item_type: Filter by media type. Defaults to the candidate's type;
+            pass 'any' to span both.
+    """
+    ctx = wrapper.context
+    limit = max(1, min(int(limit or 15), 50))
+    days_back = int(days_back) if days_back is not None else None
+    requested_type = item_type or ctx.item_type
     if requested_type not in ("mv", "tv", "any"):
         requested_type = ctx.item_type
 
@@ -436,14 +401,12 @@ async def _t_check_added_history(
         if cutoff_ts is not None:
             q = q.filter(IgnoreItem.created_at >= cutoff_ts)
         rows = q.order_by(IgnoreItem.created_at.desc()).limit(limit).all()
-        # Detach what we need; sessions close on block exit and the async
-        # fan-out below would otherwise re-touch expired ORM objects.
         snapshots: List[IgnoreItem] = list(rows)
         for r in snapshots:
             session.expunge(r)
 
     if not snapshots:
-        return ToolResult(output={"results": [], "summary": _empty_followup_summary()})
+        return {"results": [], "summary": _empty_followup_summary()}
 
     tasks = []
     for item in snapshots:
@@ -470,68 +433,8 @@ async def _t_check_added_history(
         if entry.get("view_count"):
             summary["watched_movies"] += 1
 
-    output = {"results": rendered, "summary": summary}
-    return ToolResult(
-        output=enforce_result_budget(
-            output, "check_added_history", ctx.candidate.get("uid")
-        )
+    return enforce_result_budget(
+        {"results": rendered, "summary": summary},
+        "check_added_history",
+        ctx.candidate.get("uid"),
     )
-
-
-GET_DETAILS_TOOL = Tool(
-    name="get_item_details",
-    description=(
-        "Look up full details for one item by uid: synopsis, cast, "
-        "ratings, language. For movies, also returns user-watch "
-        "metrics (view_count, last_viewed_at, audience_rating, "
-        "user_rating) and plex_status. plex_status values: "
-        "'in_library' (currently in Plex; check view_count for real "
-        "engagement — high count = strong like), "
-        "'missing_from_library' (added in DB but no longer in Plex; "
-        "likely deleted — strong negative signal), "
-        "'not_in_library' (never added; absence carries no signal), "
-        "'unknown' (not queried, e.g. shows). Use after a search "
-        "tool surfaces a uid you want to dig into."
-    ),
-    input_schema=GET_DETAILS_SCHEMA,
-    execute=_t_get_details,
-)
-
-GET_HISTORY_TOOL = Tool(
-    name="get_user_history",
-    description=(
-        "Recent user activity: items recently watched and prior "
-        "recommendation feedback (LIKE / NOT_NOW / NEVER). Use to "
-        "calibrate against current taste rather than stale catalog state."
-    ),
-    input_schema=GET_HISTORY_SCHEMA,
-    execute=_t_get_history,
-)
-
-CHECK_ADDED_HISTORY_TOOL = Tool(
-    name="check_added_history",
-    description=(
-        "Review past recommendations the user accepted, and how each one "
-        "panned out. Use this to calibrate against your own track record: "
-        "items you suggested, the user added, and then either watched, "
-        "ignored, or are still waiting on. "
-        "download_status: 'downloaded' (available to watch), 'missing' "
-        "(not yet available), 'partial' (some episodes available, TV "
-        "only), 'not_tracked' (no longer being tracked), 'unknown'. "
-        "release_status: 'released', 'unreleased' (accepted before "
-        "public availability — a 'missing' download here is NOT a "
-        "negative signal), 'unknown'. "
-        "view_count > 0: watched to completion at least once — strong "
-        "positive signal. view_count == 0 with last_viewed_at null on "
-        "a released, downloaded item: in the library but never opened "
-        "— negative signal (especially if the item has been available "
-        "a while). view_count == 0 with last_viewed_at set: started "
-        "but didn't finish — mild negative, the user dropped out. "
-        "view_count is null: not in the library / not yet scanned — "
-        "no signal either way. "
-        "Defaults to the candidate's item_type; pass item_type='any' "
-        "to span both."
-    ),
-    input_schema=CHECK_ADDED_HISTORY_SCHEMA,
-    execute=_t_check_added_history,
-)

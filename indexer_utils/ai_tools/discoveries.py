@@ -1,28 +1,28 @@
 """Subagent-backed discovery tools: window reports and per-title buzz lookup.
 
-Unlike the other tools in this package, these make a nested LLM call
-rather than reading project state. Each hands a small research task to
-OpenAI's Responses API with the hosted ``web_search`` tool enabled, asks
-it to consult domain-appropriate sources (Box Office Mojo + Wikipedia
-for theatrical windows; Nielsen-via-Variety + Wikipedia for TV windows;
-Rotten Tomatoes + Metacritic + IMDb + community discussion for the
-per-title buzz lookup), and returns the prose dossier directly to the
-recommendation agent. No JSON post-processing — the consumer is another
-LLM that reads prose fluently, so imposing a schema would just add
-latency, cost, and parse-failure modes without helping the reader.
+Unlike the other tools in this package, these make a nested LLM call rather
+than reading project state. Each delegates to an inner Agent equipped with
+the hosted ``WebSearchTool`` and returns the prose dossier directly to the
+recommendation agent. No JSON post-processing — the consumer is another LLM
+that reads prose fluently, so imposing a schema would just add latency, cost,
+and parse-failure modes without helping the reader.
 """
 
 import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 from zoneinfo import ZoneInfo
 
+from agents import Agent, RunConfig, RunContextWrapper, Runner
+from agents.models.openai_provider import OpenAIProvider
+from agents.tool import WebSearchTool
 from decouple import config
 from openai import AsyncOpenAI
 
 from ..redis_client import get_redis_client, redis_get_json, redis_set_json
-from .base import Tool, ToolContext, ToolResult
+from .base import ToolContext
+from .safe_tool import safe_tool
 from .shared import enforce_result_budget
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
@@ -30,110 +30,44 @@ _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 logger = logging.getLogger(__name__)
 
 # Box Office Mojo's weekend chart is stable enough that the cheapest
-# mini tier handles it. Bump to "gpt-5.1" (same price tier as 4o was)
-# if research quality on tricky weeks slips.
+# mini tier handles it. Bump to "gpt-5.1" if research quality slips.
 MODEL = "gpt-5.4-mini"
 
-# Outer cap on the prose report. The recommendation loop's per-tool
-# budget is ~24KB; a typical dossier is well under 4KB, so this is just
-# a safety net for runaway responses.
 REPORT_CHAR_CAP = 12000
 
-# Cache the dossier in Redis so repeated calls within a window don't
-# pay the LLM + web_search cost. The cache key includes ``today`` so
-# the day-rollover gives us free invalidation; the TTL just bounds
-# Redis memory and protects against within-day source updates. Bump the
-# version suffix on prompt/schema changes to flush old entries.
+# Cache the dossier in Redis so repeated calls within a window don't pay the
+# LLM + web_search cost. Bump the version suffix on prompt/schema changes.
 CACHE_TTL_SECONDS = 6 * 60 * 60
 CACHE_KEY_VERSION = "v1"
 
-# US release day rolls over latest on the West Coast — Pacific keeps
-# the cache key and the queried windows stable for a UTC host during
-# late-Sunday-US hours, which would otherwise tip into Monday.
+# US release day rolls over latest on the West Coast — Pacific keeps the
+# cache key and the queried windows stable for a UTC host during late-Sunday-US
+# hours, which would otherwise tip into Monday.
 _TODAY_TZ = ZoneInfo("America/Los_Angeles")
 
-
-def _window_schema(top_n_description: str) -> Dict[str, Any]:
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "weeks_back": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 8,
-                "default": 2,
-                "description": "How many weeks before today to include.",
-            },
-            "weeks_forward": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 8,
-                "default": 2,
-                "description": (
-                    "How many weeks after today to include for upcoming releases."
-                ),
-            },
-            "top_n": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 30,
-                "default": 20,
-                "description": top_n_description,
-            },
-            "focus": {
-                "type": "string",
-                "maxLength": 120,
-                "description": (
-                    "Optional free-text bias for the selection (e.g. 'horror', "
-                    "'family-friendly', 'awards contenders'). "
-                    "Empty string for none."
-                ),
-            },
-        },
-    }
-
-
-SEARCH_RECENT_RELEASES_SCHEMA = _window_schema("Cap on the weekend chart size.")
-SEARCH_RECENT_TV_SCHEMA = _window_schema("Cap on the streaming chart size.")
-
-SEARCH_TITLE_BUZZ_SCHEMA: Dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "title": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 200,
-            "description": "Exact title to look up.",
-        },
-        "year": {
-            "type": "integer",
-            "minimum": 1900,
-            "maximum": 2100,
-            "description": (
-                "Release year for disambiguation. Strongly preferred — "
-                "remakes and franchise entries collide on title alone."
-            ),
-        },
-        "item_type": {
-            "type": "string",
-            "enum": ["mv", "tv"],
-            "description": (
-                "Whether the title is a movie ('mv') or TV series ('tv'). "
-                "Optional; defaults to the agent's current item type."
-            ),
-        },
-    },
-    "required": ["title"],
-}
-
-# Loaded at import time, matching ``ai_recs.RECOMMENDATION_PROMPTS``. We
-# inline the read instead of reusing ``ai_recs.load_prompt`` because
-# importing from ai_recs would cycle through ``ai_tools/__init__``.
+# Loaded at import time, matching ``ai_recs.RECOMMENDATION_PROMPTS``.
 _MOVIES_SYSTEM_PROMPT = (_PROMPTS_DIR / "search_recent_releases.md").read_text()
 _TV_SYSTEM_PROMPT = (_PROMPTS_DIR / "search_recent_tv.md").read_text()
 _BUZZ_SYSTEM_PROMPT = (_PROMPTS_DIR / "search_title_buzz.md").read_text()
+
+_MOVIES_AGENT = Agent(
+    name="search_recent_releases",
+    model=MODEL,
+    instructions=_MOVIES_SYSTEM_PROMPT,
+    tools=[WebSearchTool()],
+)
+_TV_AGENT = Agent(
+    name="search_recent_tv",
+    model=MODEL,
+    instructions=_TV_SYSTEM_PROMPT,
+    tools=[WebSearchTool()],
+)
+_BUZZ_AGENT = Agent(
+    name="search_title_buzz",
+    model=MODEL,
+    instructions=_BUZZ_SYSTEM_PROMPT,
+    tools=[WebSearchTool()],
+)
 
 
 def _build_movies_prompt(
@@ -240,8 +174,11 @@ def _build_buzz_prompt(
         [
             f"Today is {today.isoformat()}.",
             (
-                f"Look up review consensus, ratings, and online buzz "
-                f"for the {type_word}: {title}{year_part}."
+                f"Look up reception and taste-adjacency for the "
+                f"{type_word}: {title}{year_part}. The downstream agent is "
+                f"matching this to a specific user's library, not asking "
+                f"whether it's a good film — surface the signals that "
+                f"question needs."
             ),
             "",
             "Cover:",
@@ -261,8 +198,14 @@ def _build_buzz_prompt(
             "the dominant takes — what people love, what they "
             "complain about. Quote phrases verbatim where it sharpens "
             "the read.",
-            "- 1-2 sentence overall verdict on whether a typical "
-            "viewer in 2026 would find this worth their time.",
+            "- 3-6 taste-adjacent titles: works this is commonly "
+            "compared to, recommended alongside, or cited next to. "
+            "Pull from Rotten Tomatoes 'If you like…', Letterboxd "
+            "'similar films', IMDb 'More like this', and recurring "
+            "comparisons in reviews / Reddit / social chatter "
+            "('X meets Y', 'for fans of Z'). Briefly note WHY each "
+            "comparison is drawn — genre, tone, director, premise, "
+            "shared cast.",
             "",
             "Method: hit Rotten Tomatoes, Metacritic, and IMDb pages "
             "for the title directly; sample relevant Reddit threads "
@@ -305,8 +248,8 @@ def _buzz_cache_key(
 
 async def _fetch_dossier(
     *,
+    agent: Agent[Any],
     cache_key: str,
-    system_prompt: str,
     user_prompt: str,
     today: date,
     log_tag: str,
@@ -317,200 +260,218 @@ async def _fetch_dossier(
         logger.info("%s cache hit key=%s", log_tag, cache_key)
         return cached
 
-    # Build a fresh AsyncOpenAI client per call. ai_recs.make_async_openai_client
-    # has the same body, but importing from ai_recs would cycle through
-    # ai_tools' own __init__. The httpx transport in AsyncOpenAI is bound to
-    # the current event loop, so caching across calls is unsafe anyway.
-    try:
-        client = AsyncOpenAI(api_key=config("OPENAI_API_KEY"))
-    except Exception as exc:
-        logger.exception("failed to initialize subagent OpenAI client")
-        return {"error": f"OpenAI client init failed: {exc}"}
-
+    # Per-call client so the httpx transport is bound to this event loop
+    # and closed before the task exits — see indexer_utils/ai_tools/agent.py
+    # for the same pattern in the parent loop.
+    openai_client = AsyncOpenAI(api_key=config("OPENAI_API_KEY"))
+    provider = OpenAIProvider(openai_client=openai_client)
+    run_config = RunConfig(tracing_disabled=True, model_provider=provider)
     try:
         try:
-            resp = await client.responses.create(
-                model=MODEL,
-                tools=[{"type": "web_search"}],
-                instructions=system_prompt,
-                input=user_prompt,
+            # max_turns is generous — the inner agent may run several
+            # web_search rounds before producing the dossier. Two is enough in
+            # practice but we give it four so a slow research path doesn't
+            # tripwire.
+            result = await Runner.run(
+                agent,
+                user_prompt,
+                max_turns=4,
+                run_config=run_config,
             )
-        except Exception as exc:
-            logger.exception("%s subagent failed", log_tag)
-            return {"error": f"{exc.__class__.__name__}: {exc}"}
-    finally:
-        try:
-            await client.close()
-        except Exception:
-            logger.exception("failed to close subagent AsyncOpenAI client")
+        finally:
+            # OpenAIProvider.aclose intentionally leaves the AsyncOpenAI
+            # client open (in case it's shared), so we close it ourselves.
+            await provider.aclose()
+            await openai_client.close()
+    except Exception as exc:
+        logger.exception("%s subagent failed", log_tag)
+        return {"error": f"{exc.__class__.__name__}: {exc}"}
 
-    dossier = getattr(resp, "output_text", None) or ""
-    if not dossier.strip():
+    dossier = str(result.final_output or "").strip()
+    if not dossier:
         return {"error": "subagent returned empty dossier"}
 
-    payload = {
-        "as_of": today.isoformat(),
-        "report": dossier[:REPORT_CHAR_CAP],
-    }
+    payload = {"as_of": today.isoformat(), "report": dossier[:REPORT_CHAR_CAP]}
     redis_set_json(redis, cache_key, payload, CACHE_TTL_SECONDS)
     return payload
 
 
-PromptBuilder = Callable[..., str]
+@safe_tool
+async def search_recent_releases(
+    wrapper: RunContextWrapper[ToolContext],
+    weeks_back: int = 2,
+    weeks_forward: int = 2,
+    top_n: int = 20,
+    focus: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Check whether the candidate is a current theatrical release worth a closer look.
+
+    Most catalog candidates are obscure and won't appear here at all; finding
+    the candidate's title in the report is itself a strong positive signal —
+    scan the weekend box-office chart, upcoming releases, and notable limited
+    releases for it before anything else. Returns {as_of, report} where
+    report is a prose dossier on US theatrical releases for a window around
+    today (Box Office Mojo + Wikipedia, via a web-research subagent).
+
+    Use when the candidate is a recent or soon-to-arrive theatrical film —
+    not for catalog/streaming items. Window defaults to ±2 weeks; raise
+    weeks_back / weeks_forward for a wider net. One call per session; the
+    report is expensive (LLM + web fetches).
+
+    Args:
+        weeks_back: How many weeks before today to include (0-8).
+        weeks_forward: How many weeks after today to include (0-8).
+        top_n: Cap on the weekend chart size (1-30).
+        focus: Optional free-text bias for the selection (e.g. 'horror',
+            'awards contenders').
+    """
+    ctx = wrapper.context
+    weeks_back = max(0, min(8, int(weeks_back or 2)))
+    weeks_forward = max(0, min(8, int(weeks_forward or 2)))
+    top_n = max(1, min(30, int(top_n or 20)))
+    focus_clean = (focus or "").strip() or None
+
+    today = datetime.now(_TODAY_TZ).date()
+    user_prompt = _build_movies_prompt(
+        today=today,
+        weeks_back=weeks_back,
+        weeks_forward=weeks_forward,
+        top_n=top_n,
+        focus=focus_clean,
+    )
+    cache_key = _cache_key(
+        prefix="search_recent_releases",
+        today=today,
+        weeks_back=weeks_back,
+        weeks_forward=weeks_forward,
+        top_n=top_n,
+        focus=focus_clean,
+    )
+    payload = await _fetch_dossier(
+        agent=_MOVIES_AGENT,
+        cache_key=cache_key,
+        user_prompt=user_prompt,
+        today=today,
+        log_tag="search_recent_releases",
+    )
+    return enforce_result_budget(
+        payload, "search_recent_releases", ctx.candidate.get("uid")
+    )
 
 
-def _make_handler(
-    *,
-    name: str,
-    system_prompt: str,
-    prompt_builder: PromptBuilder,
-) -> Callable[[Dict[str, Any], ToolContext], Awaitable[ToolResult]]:
-    async def _handler(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult:
-        weeks_back = max(0, min(8, int(input_.get("weeks_back") or 2)))
-        weeks_forward = max(0, min(8, int(input_.get("weeks_forward") or 2)))
-        top_n = max(1, min(30, int(input_.get("top_n") or 20)))
-        focus = (input_.get("focus") or "").strip() or None
+@safe_tool
+async def search_recent_tv(
+    wrapper: RunContextWrapper[ToolContext],
+    weeks_back: int = 2,
+    weeks_forward: int = 2,
+    top_n: int = 20,
+    focus: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Check whether the candidate is a current TV release worth a closer look.
 
-        today = datetime.now(_TODAY_TZ).date()
-        user_prompt = prompt_builder(
-            today=today,
-            weeks_back=weeks_back,
-            weeks_forward=weeks_forward,
-            top_n=top_n,
-            focus=focus,
-        )
-        cache_key = _cache_key(
-            prefix=name,
-            today=today,
-            weeks_back=weeks_back,
-            weeks_forward=weeks_forward,
-            top_n=top_n,
-            focus=focus,
-        )
-        payload = await _fetch_dossier(
-            cache_key=cache_key,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            today=today,
-            log_tag=name,
-        )
-        candidate_uid = ctx.candidate.get("uid") if ctx.candidate else None
-        return ToolResult(output=enforce_result_budget(payload, name, candidate_uid))
+    Most catalog candidates are obscure and won't appear here at all; finding
+    the candidate's title in the report is itself a strong positive signal —
+    scan the Nielsen streaming top 10, premiere calendar, and notable limited
+    premieres for it before anything else. Returns {as_of, report} where
+    report is a prose dossier on US TV releases and streaming buzz for a
+    window around today (Nielsen via Variety/THR + Wikipedia, via a
+    web-research subagent).
 
-    return _handler
+    Use when the candidate is a recent or soon-to-arrive TV series — not for
+    movie items. Window defaults to ±2 weeks; raise weeks_back /
+    weeks_forward for a wider net. One call per session; the report is
+    expensive (LLM + web fetches).
 
+    Args:
+        weeks_back: How many weeks before today to include (0-8).
+        weeks_forward: How many weeks after today to include (0-8).
+        top_n: Cap on the streaming chart size (1-30).
+        focus: Optional free-text bias for the selection.
+    """
+    ctx = wrapper.context
+    weeks_back = max(0, min(8, int(weeks_back or 2)))
+    weeks_forward = max(0, min(8, int(weeks_forward or 2)))
+    top_n = max(1, min(30, int(top_n or 20)))
+    focus_clean = (focus or "").strip() or None
 
-_t_search_recent_releases = _make_handler(
-    name="search_recent_releases",
-    system_prompt=_MOVIES_SYSTEM_PROMPT,
-    prompt_builder=_build_movies_prompt,
-)
-
-_t_search_recent_tv = _make_handler(
-    name="search_recent_tv",
-    system_prompt=_TV_SYSTEM_PROMPT,
-    prompt_builder=_build_tv_prompt,
-)
-
-
-SEARCH_RECENT_RELEASES_TOOL = Tool(
-    name="search_recent_releases",
-    description=(
-        "Check whether the candidate is a current theatrical release "
-        "worth a closer look. Most catalog candidates are obscure and "
-        "won't appear here at all; finding the candidate's title in "
-        "the report is itself a strong positive signal — scan the "
-        "weekend box-office chart, upcoming releases, and notable "
-        "limited releases for it before anything else. Returns "
-        "{as_of, report} where report is a prose dossier on US "
-        "theatrical releases for a window around today (Box Office "
-        "Mojo + Wikipedia, via a web-research subagent). Use when the "
-        "candidate is a recent or soon-to-arrive theatrical film — "
-        "not for catalog/streaming items. Window defaults to ±2 "
-        "weeks; raise weeks_back / weeks_forward for a wider net. "
-        "One call per session; the report is expensive (LLM + web "
-        "fetches)."
-    ),
-    input_schema=SEARCH_RECENT_RELEASES_SCHEMA,
-    execute=_t_search_recent_releases,
-    applies_to=("mv",),
-)
+    today = datetime.now(_TODAY_TZ).date()
+    user_prompt = _build_tv_prompt(
+        today=today,
+        weeks_back=weeks_back,
+        weeks_forward=weeks_forward,
+        top_n=top_n,
+        focus=focus_clean,
+    )
+    cache_key = _cache_key(
+        prefix="search_recent_tv",
+        today=today,
+        weeks_back=weeks_back,
+        weeks_forward=weeks_forward,
+        top_n=top_n,
+        focus=focus_clean,
+    )
+    payload = await _fetch_dossier(
+        agent=_TV_AGENT,
+        cache_key=cache_key,
+        user_prompt=user_prompt,
+        today=today,
+        log_tag="search_recent_tv",
+    )
+    return enforce_result_budget(payload, "search_recent_tv", ctx.candidate.get("uid"))
 
 
-SEARCH_RECENT_TV_TOOL = Tool(
-    name="search_recent_tv",
-    description=(
-        "Check whether the candidate is a current TV release worth a "
-        "closer look. Most catalog candidates are obscure and won't "
-        "appear here at all; finding the candidate's title in the "
-        "report is itself a strong positive signal — scan the Nielsen "
-        "streaming top 10, premiere calendar, and notable limited "
-        "premieres for it before anything else. Returns {as_of, "
-        "report} where report is a prose dossier on US TV releases "
-        "and streaming buzz for a window around today (Nielsen via "
-        "Variety/THR + Wikipedia, via a web-research subagent). Use "
-        "when the candidate is a recent or soon-to-arrive TV series "
-        "— not for movie items. Window defaults to ±2 weeks; raise "
-        "weeks_back / weeks_forward for a wider net. One call per "
-        "session; the report is expensive (LLM + web fetches)."
-    ),
-    input_schema=SEARCH_RECENT_TV_SCHEMA,
-    execute=_t_search_recent_tv,
-    applies_to=("tv",),
-)
+@safe_tool
+async def search_title_buzz(
+    wrapper: RunContextWrapper[ToolContext],
+    title: str,
+    year: Optional[int] = None,
+    item_type: Optional[Literal["mv", "tv"]] = None,
+) -> Dict[str, Any]:
+    """Deep-dive on reception and taste-adjacency for a specific title.
 
+    Returns {as_of, report} where report is a prose dossier with Rotten
+    Tomatoes / Metacritic / IMDb scores, critic and audience consensus, online
+    chatter (Reddit, Letterboxd, trade reviews), AND 3–6 taste-adjacent titles
+    the work is commonly compared to or recommended alongside — with the
+    reason for each comparison so you can match against the user's library.
 
-async def _t_search_title_buzz(input_: Dict[str, Any], ctx: ToolContext) -> ToolResult:
-    title = (input_.get("title") or "").strip()
+    Use when you want more than "is it on a current chart" — e.g. you need a
+    reception read, a sense of where it lands with audiences vs critics, or
+    (most useful here) a list of titles to cross-reference against what the
+    user has already added. One call per candidate is plenty; the report is
+    expensive (LLM + web fetches). Pass the year when known to disambiguate
+    remakes and franchise entries.
+
+    Args:
+        title: Exact title to look up.
+        year: Release year for disambiguation; strongly preferred.
+        item_type: 'mv' for movie or 'tv' for series. Defaults to the
+            recommendation agent's current item type.
+    """
+    ctx = wrapper.context
+    title = (title or "").strip()
     if not title:
-        return ToolResult(output={"error": "title is required"})
+        return {"error": "title is required"}
 
-    year_raw = input_.get("year")
     try:
-        year: Optional[int] = int(year_raw) if year_raw is not None else None
+        year_int: Optional[int] = int(year) if year is not None else None
     except (TypeError, ValueError):
-        year = None
+        year_int = None
 
-    item_type = input_.get("item_type")
-    if item_type not in ("mv", "tv"):
-        item_type = ctx.item_type
+    resolved_type = item_type if item_type in ("mv", "tv") else ctx.item_type
 
     today = datetime.now(_TODAY_TZ).date()
     user_prompt = _build_buzz_prompt(
-        today=today, title=title, year=year, item_type=item_type
+        today=today, title=title, year=year_int, item_type=resolved_type
     )
     cache_key = _buzz_cache_key(
-        today=today, title=title, year=year, item_type=item_type
+        today=today, title=title, year=year_int, item_type=resolved_type
     )
     payload = await _fetch_dossier(
+        agent=_BUZZ_AGENT,
         cache_key=cache_key,
-        system_prompt=_BUZZ_SYSTEM_PROMPT,
         user_prompt=user_prompt,
         today=today,
         log_tag="search_title_buzz",
     )
-    candidate_uid = ctx.candidate.get("uid") if ctx.candidate else None
-    return ToolResult(
-        output=enforce_result_budget(payload, "search_title_buzz", candidate_uid)
-    )
-
-
-SEARCH_TITLE_BUZZ_TOOL = Tool(
-    name="search_title_buzz",
-    description=(
-        "Deep-dive on review consensus and online buzz for a specific "
-        "movie or TV title. Returns {as_of, report} where report is a "
-        "prose dossier with Rotten Tomatoes / Metacritic / IMDb scores, "
-        "the critic-consensus blurb, audience reception, and online "
-        "chatter (Reddit, Letterboxd, trade reviews). Use when you "
-        "need more than 'is it on a current chart' — e.g. the "
-        "candidate looks promising and you want a reception read "
-        "before recommending, or you're weighing how it lands with "
-        "audiences vs critics, or comparing against a director's / "
-        "showrunner's prior work. One call per candidate is plenty; "
-        "the report is expensive (LLM + web fetches). Pass the year "
-        "when known to disambiguate remakes and franchise entries."
-    ),
-    input_schema=SEARCH_TITLE_BUZZ_SCHEMA,
-    execute=_t_search_title_buzz,
-)
+    return enforce_result_budget(payload, "search_title_buzz", ctx.candidate.get("uid"))

@@ -6,3 +6,5 @@ Attach a quantitative signal to every title in the dossier:
 - Established shows that have aired for at least one season almost always have IMDb ratings — actively search for them rather than skipping. Reserve "no rating found" for genuinely unrated titles (brand-new shows that haven't aired yet, or very obscure regional series).
 
 Pick the most recent Nielsen chart that actually has data; if the current week hasn't been published yet, fall back to the previous week. Never invent titles, networks/streamers, viewership numbers, or ratings. Output a brief plain-text dossier — no markdown tables, no JSON. Another LLM will read this directly, so favor clarity and compactness over decorative formatting.
+
+Do not address the reader, offer follow-ups, or ask whether more is wanted. End with the last fact. There is no conversational partner on the other side.

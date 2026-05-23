@@ -12,7 +12,7 @@ import tvdb_v4_official
 from decouple import config
 from imdb import Cinemagoer
 
-from .ai_recs import annotate_with_ai_async, make_async_openai_client
+from .ai_recs import annotate_with_ai_async
 from .check_feedback import record_check_result
 from .filters import should_ignore_by_rules
 from .models import IgnoreItem
@@ -65,7 +65,6 @@ def clean_radarr() -> None:
 async def _afinish_movie_candidate(
     candidate: Dict[str, Any],
     semaphore: asyncio.Semaphore,
-    openai_client: Any,
 ) -> Tuple[str, Optional[bool]]:
     """Run AI annotation, Plex check, and DB write for one candidate.
 
@@ -80,7 +79,7 @@ async def _afinish_movie_candidate(
 
     async with semaphore:
         enriched_attrs = await annotate_with_ai_async(
-            "mv", imdb_id, annotation_title, attrs, client=openai_client
+            "mv", imdb_id, annotation_title, attrs
         )
 
     note = "Flagged for review"
@@ -136,11 +135,10 @@ async def _arun_movie_candidates(
     if not pending:
         return []
     semaphore = asyncio.Semaphore(AI_ANNOTATE_CONCURRENCY)
-    openai_client = make_async_openai_client()
 
     async def wrap(c: Dict[str, Any]) -> Tuple[str, str, Optional[bool]]:
         try:
-            note, ignored = await _afinish_movie_candidate(c, semaphore, openai_client)
+            note, ignored = await _afinish_movie_candidate(c, semaphore)
             return c["imdb_id"], note, ignored
         except Exception:
             logger.exception("AI annotation failed for %s", c["imdb_id"])
@@ -151,14 +149,7 @@ async def _arun_movie_candidates(
         len(pending),
         AI_ANNOTATE_CONCURRENCY,
     )
-    try:
-        return await asyncio.gather(*(wrap(c) for c in pending))
-    finally:
-        if openai_client is not None:
-            try:
-                await openai_client.close()
-            except Exception:
-                logger.exception("failed to close batch AsyncOpenAI client")
+    return await asyncio.gather(*(wrap(c) for c in pending))
 
 
 def check_movies(days: int) -> None:
@@ -464,16 +455,13 @@ def add_attr(attrs: Dict[str, Any], show: Dict[str, Any], key: str) -> None:
 async def _afinish_show_candidate(
     candidate: Dict[str, Any],
     semaphore: asyncio.Semaphore,
-    openai_client: Any,
 ) -> Tuple[str, Optional[bool]]:
     tvdb: str = candidate["tvdb"]
     title: str = candidate["title"]
     attrs: Dict[str, Any] = candidate["attrs"]
 
     async with semaphore:
-        enriched_attrs = await annotate_with_ai_async(
-            "tv", tvdb, title, attrs, client=openai_client
-        )
+        enriched_attrs = await annotate_with_ai_async("tv", tvdb, title, attrs)
 
     def _create() -> None:
         IgnoreItem.create(
@@ -495,11 +483,10 @@ async def _arun_show_candidates(
     if not pending:
         return []
     semaphore = asyncio.Semaphore(AI_ANNOTATE_CONCURRENCY)
-    openai_client = make_async_openai_client()
 
     async def wrap(c: Dict[str, Any]) -> Tuple[str, str, Optional[bool]]:
         try:
-            note, ignored = await _afinish_show_candidate(c, semaphore, openai_client)
+            note, ignored = await _afinish_show_candidate(c, semaphore)
             return c["tvdb"], note, ignored
         except Exception:
             logger.exception("AI annotation failed for %s", c["tvdb"])
@@ -510,14 +497,7 @@ async def _arun_show_candidates(
         len(pending),
         AI_ANNOTATE_CONCURRENCY,
     )
-    try:
-        return await asyncio.gather(*(wrap(c) for c in pending))
-    finally:
-        if openai_client is not None:
-            try:
-                await openai_client.close()
-            except Exception:
-                logger.exception("failed to close batch AsyncOpenAI client")
+    return await asyncio.gather(*(wrap(c) for c in pending))
 
 
 def check_shows(days: int) -> None:
