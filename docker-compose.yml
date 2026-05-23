@@ -56,7 +56,6 @@ services:
     depends_on:
       - redis
       - db
-      - weaviate
     networks: [proxy]
   builder:
     build:
@@ -72,7 +71,6 @@ services:
     depends_on:
       - redis
       - db
-      - weaviate
     volumes:
       - .:/opt/servermonitor
     ports:
@@ -105,43 +103,19 @@ services:
       - 6379:6379
     networks: [proxy]
   db:
-    image: mysql:9.4.0
+    image: pgvector/pgvector:pg16
     volumes:
-      - mysql_data:/var/lib/mysql
-      - ./my.cnf:/etc/my.cnf
+      - pg_data:/var/lib/postgresql/data
     environment:
-      - MYSQL_ROOT_PASSWORD=passw0rd
-      - MYSQL_DATABASE=indexer_utils
-      - MYSQL_USER=indexer_utils
-      - MYSQL_PASSWORD=passw0rd
+      - POSTGRES_DB=indexer_utils
+      - POSTGRES_USER=indexer_utils
+      - POSTGRES_PASSWORD=passw0rd
     ports:
-      - 3306:3306
+      - 5432:5432
     restart: unless-stopped
     networks: [proxy]
-  weaviate:
-    command:
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8080"
-      - --scheme
-      - http
-    image: cr.weaviate.io/semitechnologies/weaviate:1.32.2
-    ports:
-      - 8080:8080
-      - 50051:50051
-    volumes:
-      - ./weaviate_data:/var/lib/weaviate
-    restart: on-failure:0
-    environment:
-      QUERY_DEFAULTS_LIMIT: 25
-      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
-      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
-      ENABLE_API_BASED_MODULES: "true"
-      CLUSTER_HOSTNAME: "node1"
-    networks: [proxy]
 volumes:
-  mysql_data:
+  pg_data:
 
 networks:
   proxy:

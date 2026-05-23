@@ -1,8 +1,8 @@
 """Application-wide APScheduler instance and admin helpers.
 
-The scheduler uses a ``SQLAlchemyJobStore`` backed by the same MySQL
-database the rest of the app uses, plus a MySQL named lock
-(``GET_LOCK``) for leader election so:
+The scheduler uses a ``SQLAlchemyJobStore`` backed by the same postgres
+database the rest of the app uses, plus a postgres advisory lock
+(``pg_try_advisory_lock``) for leader election so:
 
 * Only **one** worker fires jobs at a time, even though every worker
   imports this module — APScheduler has no built-in cross-process
@@ -20,6 +20,7 @@ human-readable names + descriptions of the jobs the admin UI lists.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 import time
@@ -94,9 +95,18 @@ JOB_DESCRIPTIONS: Dict[str, JobDescription] = {
 # admin GraphQL API still works for reads/writes against the jobstore.
 LEADER_LOCK_NAME = "mediamanager_apscheduler_leader"
 
-# How long to wait between leader heartbeats. MySQL's ``wait_timeout``
-# defaults to 8h; the heartbeat keeps the lock-holding connection alive
-# so the lock isn't reaped during long quiet periods.
+
+def _lock_key(name: str) -> int:
+    """Map a stable string to the signed bigint pg_advisory_lock expects."""
+    digest = hashlib.sha1(name.encode()).digest()[:8]
+    return int.from_bytes(digest, "big", signed=True)
+
+
+LEADER_LOCK_KEY = _lock_key(LEADER_LOCK_NAME)
+
+# How long to wait between leader heartbeats. Postgres session-level
+# advisory locks aren't released on idle but the heartbeat doubles as
+# a liveness check on the lock-holding connection.
 LEADER_HEARTBEAT_SECONDS = 300
 
 # Cap on how long the leader will wait between jobstore polls. Cross-
@@ -271,11 +281,12 @@ def is_leader() -> bool:
 
 
 def _try_acquire_leader_lock() -> bool:
-    """Non-blocking ``GET_LOCK`` attempt on a dedicated connection.
+    """Non-blocking ``pg_try_advisory_lock`` attempt on a dedicated connection.
 
     Returns ``True`` iff this worker now owns the lock. A separate
-    engine + a single, held-open connection are used so the lock isn't
-    accidentally released by SQLAlchemy pool churn.
+    engine + a single, held-open connection are used because
+    postgres session-level advisory locks are scoped to the connection;
+    releasing the connection releases the lock.
     """
     global _lock_engine, _lock_conn
     engine = create_engine(
@@ -284,17 +295,16 @@ def _try_acquire_leader_lock() -> bool:
     conn = engine.connect()
     try:
         result = conn.execute(
-            text("SELECT GET_LOCK(:n, 0)"), {"n": LEADER_LOCK_NAME}
+            text("SELECT pg_try_advisory_lock(:k)"), {"k": LEADER_LOCK_KEY}
         ).scalar()
     except Exception:
         conn.close()
         engine.dispose()
         raise
-    if result == 1:
+    if result is True:
         _lock_engine = engine
         _lock_conn = conn
         return True
-    # Either another worker holds it (0) or an error occurred (NULL).
     conn.close()
     engine.dispose()
     return False
@@ -303,9 +313,8 @@ def _try_acquire_leader_lock() -> bool:
 def _start_leader_heartbeat() -> None:
     """Start a daemon thread that pings the lock connection periodically.
 
-    Without this, MySQL's ``wait_timeout`` (default 28800s) eventually
-    closes the idle connection holding the lock, releasing it and
-    causing a split-brain election on the next worker boot.
+    Doubles as a liveness check: if the held connection dies, the
+    follower election can take over on the next worker boot.
     """
     global _heartbeat_thread
     _heartbeat_stop.clear()
@@ -334,9 +343,11 @@ def _release_leader_lock() -> None:
         _heartbeat_thread = None
     if _lock_conn is not None:
         try:
-            _lock_conn.execute(text("SELECT RELEASE_LOCK(:n)"), {"n": LEADER_LOCK_NAME})
+            _lock_conn.execute(
+                text("SELECT pg_advisory_unlock(:k)"), {"k": LEADER_LOCK_KEY}
+            )
         except Exception:
-            logger.exception("RELEASE_LOCK failed")
+            logger.exception("pg_advisory_unlock failed")
         try:
             _lock_conn.close()
         except Exception:
