@@ -94,9 +94,6 @@ async def _afinish_movie_candidate(
             result.get("title"),
         )
         plex_movie = None
-        plex_lookup_failed = True
-    else:
-        plex_lookup_failed = False
 
     if plex_movie:
         note = f"{note} (already in Plex)"
@@ -104,6 +101,9 @@ async def _afinish_movie_candidate(
 
     logger.info("New movie found %s", normalized_title)
 
+    # The embedding is computed during annotation and is unrelated to the
+    # Plex-presence check, so persist it whether or not that lookup succeeded.
+    vec = enriched_attrs.pop("_synopsis_vector_tmp", None)
     created = await IgnoreItem.create(
         title=normalized_title,
         uid=imdb_id,
@@ -113,11 +113,9 @@ async def _afinish_movie_candidate(
         attributes=enriched_attrs,
         poster_url=poster,
     )
-    if not plex_lookup_failed:
-        vec = enriched_attrs.pop("_synopsis_vector_tmp", None)
-        if vec is not None:
-            created.synopsis_vector = vec
-            await created.save()
+    if vec is not None:
+        created.synopsis_vector = vec
+        await created.save()
     return note, False
 
 
