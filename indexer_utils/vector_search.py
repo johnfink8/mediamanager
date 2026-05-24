@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 
 from decouple import config
 from openai import AsyncOpenAI
-from sqlalchemy import Select, select, update
+from sqlalchemy import Integer, Select, String, and_, cast, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import IgnoreItem
@@ -26,6 +26,25 @@ from .session import db_session
 logger = logging.getLogger(__name__)
 
 EMBEDDING_MODEL = config("OPENAI_EMBEDDING_MODEL", default="text-embedding-3-small")
+
+# Neighbours are constrained to the candidate's release window so the count
+# means the same thing regardless of how recent the candidate is. Inbound
+# candidates are always current releases, which sit in a mostly-passed-on
+# neighbourhood; comparing them against same-era titles (rather than the
+# decades-old library) keeps the signal era-consistent.
+NEIGHBOR_YEAR_WINDOW = 2
+_YEAR_RE = r"^[0-9]+$"
+
+
+def _year_between(lo: int, hi: int) -> Any:
+    """``attributes->>'year'`` cast to int and bounded to ``[lo, hi]``.
+
+    Guarded by a regex so non-numeric stored years drop out instead of
+    raising a postgres cast error (mirrors ``ai_tools.shared._numeric_clause``).
+    """
+    expr = cast(IgnoreItem.attributes.op("->>")("year"), String)
+    return and_(expr.op("~")(_YEAR_RE), cast(expr, Integer).between(lo, hi))
+
 
 _openai_client: Optional[AsyncOpenAI] = None
 
@@ -108,36 +127,73 @@ async def synopsis_neighbor_summary(
     item_type: str,
     uid: str,
     candidate_vec: List[float],
+    candidate_year: Optional[int] = None,
     k: int = 20,
     n_show: int = 6,
+    year_window: int = NEIGHBOR_YEAR_WINDOW,
 ) -> Optional[Dict[str, Any]]:
-    """Of the ``k`` titles most similar to the candidate by synopsis, how many
-    the user added.
+    """Of the ``k`` *decided* titles most similar to the candidate by synopsis,
+    how many the user kept — read against the user's keep rate for that era.
 
     The strongest taste signal we have: it measures whether the user actually
     keeps things like *this* candidate, independent of how the genre is
-    labelled. Returns ``added_of_top`` (count added among the nearest ``k``)
-    plus the closest ``n_show`` titles with their added flag, or ``None`` when
-    the corpus has nothing to compare against.
+    labelled. Two constraints make the raw count honest:
+
+    * **decided only** (``ignore=True``) — a still-in-queue candidate is
+      neither kept nor passed, so it must not count as a negative. Keeps the
+      signal stable if the review queue ever backs up.
+    * **same release era** (``candidate_year ± year_window``) — inbound
+      candidates are always current releases and live in a mostly-passed-on
+      neighbourhood; bounding to the candidate's window stops a decades-old,
+      heavily-kept library from inflating or distorting the count.
+
+    Returns ``added_of_top`` (kept among the nearest ``k``), ``k``,
+    ``base_rate`` (the user's keep rate across the *same* decided + same-era
+    pool — so the consumer reads ``added_of_top`` on the curve, not as an
+    absolute), the ``era`` window, and the closest ``n_show`` titles. ``None``
+    when the corpus has nothing to compare against. Falls back to an
+    era-unbounded pool when ``candidate_year`` is missing.
     """
+    where = [
+        IgnoreItem.item_type == item_type,
+        IgnoreItem.synopsis_vector.is_not(None),
+        IgnoreItem.uid != uid,
+        IgnoreItem.ignore.is_(True),
+    ]
+    era: Optional[List[int]] = None
+    if candidate_year is not None:
+        lo, hi = candidate_year - year_window, candidate_year + year_window
+        where.append(_year_between(lo, hi))
+        era = [lo, hi]
+
     dist = IgnoreItem.synopsis_vector.cosine_distance(candidate_vec).label("d")
+    title = func.coalesce(IgnoreItem.checked_title, IgnoreItem.title).label("title")
     rows = (
         await session.execute(
-            select(IgnoreItem.title, IgnoreItem.added, dist)
-            .where(
-                IgnoreItem.item_type == item_type,
-                IgnoreItem.synopsis_vector.is_not(None),
-                IgnoreItem.uid != uid,
-            )
-            .order_by(dist)
-            .limit(k)
+            select(title, IgnoreItem.added, dist).where(*where).order_by(dist).limit(k)
         )
     ).all()
     if not rows:
         return None
+
+    # Same pool, no limit: the user's typical keep rate for this era. The
+    # consumer compares added_of_top against this rather than reading a low
+    # absolute count as a veto.
+    totals = (
+        await session.execute(
+            select(
+                func.count().label("n"),
+                func.count().filter(IgnoreItem.added.is_(True)).label("kept"),
+            ).where(*where)
+        )
+    ).one()
+    base_rate = totals.kept / totals.n if totals.n else None
+
     return {
         "added_of_top": sum(1 for _, added, _ in rows if added),
         "k": len(rows),
+        "base_rate": round(base_rate, 3) if base_rate is not None else None,
+        "era": era,
         "nearest": [
             {"title": title, "added": bool(added), "distance": round(float(d), 3)}
             for title, added, d in rows[:n_show]

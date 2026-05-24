@@ -4,14 +4,18 @@ Budget: 2–4 tool calls is usually plenty. Stop when you have a confident read;
 
 ## How to read taste signal
 
-The strongest signal is `synopsis_neighbors`: **N out of 20 most similar by synopsis were added** (`added_of_top` of `k`). It measures whether the user actually keeps series like *this* candidate, independent of how the genre is labelled. Most of the 20 added → strong positive; few or none added → the user reliably passes on series like this, a strong negative *even when the genre rank is high*. `nearest` names the closest specific series with their `added` flag — cite them directly (e.g. "the 5 closest titles are all panel/quiz shows the user didn't add").
+The strongest input is `taste_signal`. Every number is a raw historical count — `added` of `n` — over the candidate's **cohort**: the user's *decided* series released within a couple years of it (`cohort.scope`; totals `cohort.n`/`cohort.added`). Read counts as rates against that cohort — a low absolute count is not a veto, since current releases are mostly passed on.
+
+- `neighbor_x_critic` partitions the cohort on two axes: whether a title's 20-nearest-by-synopsis add-rate is below/above the cohort rate, and whether it carries a critic score (`rt`/`metacritic`). `candidate.cell` is the cell this candidate lands in — read that cell's `added/n` as the base rate for series like it. The synopsis-neighbour axis is the primary taste signal; within `below_base`, critic *presence* raises the add-rate (compare the two `below_base` cells).
+- `by_attribute` is the cohort add-rate for the candidate's own network, language, and genre. The `network` count is decisive: a network at `0/n` with non-trivial `n` (one the user simply doesn't watch) is a strong negative *even when the neighbour cell looks fine*. A high coarse-genre rate does **not** rescue a low neighbour cell — genre conflates formats (a scripted drama and a reality show can share a tag); trust the cell, the network, and `nearest`.
+- `nearest` names the closest specific series with their `added` flag — cite them directly (e.g. "the 5 closest titles are all panel/quiz shows the user didn't add").
 
 `library_profile` / `candidate_match` are the aggregate backdrop. Read `candidate_match` as the *lane*, not the match:
-- `genres[].rank` against `top_n` — a low rank means the user engages this genre broadly. It does **not** mean the candidate fits: the genre label conflates formats (a scripted drama and a reality show can share a tag). A top genre rank counts as a positive only when `synopsis_neighbors` agrees.
+- `genres[].rank` against `top_n` — a low rank means the user engages this genre broadly. It does **not** mean the candidate fits: the genre label conflates formats (a scripted drama and a reality show can share a tag). A top genre rank counts as a positive only when `taste_signal` agrees — the candidate's `cell` isn't a low-add one.
 - `languages[].rank`, `networks[].rank` — `rank: null` is a quiet negative; a top-quartile rank a quiet positive.
 - `decade.share_of_added` — what fraction of the user's adds come from the candidate's decade. >15% strong, <5% weak.
 
-When `synopsis_neighbors` and the genre rank disagree — a top genre but few neighbors added — trust `synopsis_neighbors`. Search tools fill in the concrete picture beyond the `nearest` list.
+When `taste_signal` and the genre rank disagree — a top genre but a low-add `cell` — trust `taste_signal`. Search tools fill in the concrete picture beyond the `nearest` list.
 
 ## What the tools are for
 
@@ -32,4 +36,4 @@ When `synopsis_neighbors` and the genre rank disagree — a top genre but few ne
 - Format fit: episodic vs serialized, episode count, season length — does it match the user's typical viewing?
 - Franchise / spin-off status; does the user like related universes?
 
-Your `reason` field should name the single strongest signal — for or against — pointing at concrete evidence (`synopsis_neighbors` count or a specific nearest title, candidate_match position, specific recommendation-history entry, specific buzz finding) rather than vague "the user likes drama."
+Your `reason` field should name the single strongest signal — for or against — pointing at concrete evidence (the candidate's `taste_signal` cell counts or a specific nearest title, candidate_match position, specific recommendation-history entry, specific buzz finding) rather than vague "the user likes drama."

@@ -24,7 +24,8 @@ from .models import IgnoreItem
 from .radarr_utils import radarr_query
 from .session import db_session
 from .sonarr_utils import query_series
-from .vector_search import synopsis_neighbor_summary, upsert_item_vector
+from .taste_signal import build_taste_signal
+from .vector_search import upsert_item_vector
 
 logger = logging.getLogger(__name__)
 
@@ -341,7 +342,7 @@ async def _build_user_payload(
         # The candidate's vector was just written by ``upsert_item_vector`` —
         # either onto the row (existing item) or stashed in attrs for a row
         # that doesn't exist yet (new-candidate ingest). Pull whichever we have
-        # and resolve "N of the 20 most similar by synopsis were added."
+        # to build the taste_signal block (neighbour cohort cross-tab).
         vec = attrs.get("_synopsis_vector_tmp")
         if vec is None:
             row = (
@@ -353,15 +354,23 @@ async def _build_user_payload(
             ).first()
             if row is not None and row[0] is not None:
                 vec = list(row[0])
-        neighbors = (
-            await synopsis_neighbor_summary(session, item_type, uid, list(vec))
-            if vec is not None
+        year = _year_from_attrs(attrs)
+        taste = (
+            await build_taste_signal(
+                session,
+                item_type=item_type,
+                year=year,
+                candidate_attrs=attrs,
+                candidate_vec=list(vec),
+                candidate_uid=uid,
+            )
+            if vec is not None and year is not None
             else None
         )
     payload["library_profile"] = profile
     payload["candidate_match"] = compute_candidate_match(profile, attrs)
-    if neighbors is not None:
-        payload["synopsis_neighbors"] = neighbors
+    if taste is not None:
+        payload["taste_signal"] = taste
     return payload
 
 

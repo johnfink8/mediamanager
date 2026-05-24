@@ -33,6 +33,7 @@ Full-stack media manager app: **FastAPI + Strawberry GraphQL** backend (Python),
   - `ai_tools/` — the openai-agents-SDK recommendation Agent and its tools
   - `prompts/` — system prompts for the recommendation agent + discovery subagents (`.md`)
   - `vector_search.py` — pgvector embedding + synopsis-similarity queries
+  - `taste_signal.py` — builds the `taste_signal` payload block (neighbour×critic cohort cross-tab + per-attribute add-rates), Redis-cached by era
 - `src/` — React/TypeScript frontend (Relay, MUI)
 - `alembic/` — DB migrations
 - `tests/` — Python unit tests (run against a real pgvector Postgres, see below)
@@ -47,6 +48,7 @@ Postgres 16 with the **pgvector** extension (`pgvector/pgvector:pg16` image). Th
 - `indexer_utils/session.py` — `db_session()` returns an `AsyncSession`; always `async with db_session() as session:`. The engine/sessionmaker are cached module-level singletons. Model classmethods (`IgnoreItem.create`, `.filter`, `MovieRecommendationRecord.recent_history`, …) are all `async`.
 - `indexer_utils/models.py` — `IgnoreItem` (the catalog row; `attributes` is a Postgres `JSONB` blob, `synopsis_vector` is a **deferred** `Vector(1536)` column), `MovieRecommendationRecord` (recommendation history + LIKE/NOT_NOW/NEVER feedback), `FilterRule`.
 - **Test DB isolation**: `session.py` checks `sys.argv` for `pytest` and swaps `DB_NAME`→`TEST_DB_NAME`, so the same `.env` serves both the app and the suite without ever pointing tests at the real DB. Don't pass DB env vars on the command line.
+- **Don't read/grep `.env`** to discover DB config — reads of it are permission-denied, and you don't need it: `decouple`/`session.py` already load it. Any script using `db_session()` connects to the real DB automatically (and the running container is `mediamanager-db-1`).
 - The MySQL + Weaviate → Postgres + pgvector swap is **done** (commit `253e198`), and the one-shot migration tooling has been removed. Don't reintroduce either dependency.
 
 ## Recommendation Pipeline
@@ -55,7 +57,7 @@ Entry point: `annotate_with_ai_async(item_type, uid, title, attrs)` in `indexer_
 
 1. Hydrates metadata (TMDB cast/director/release-count via `tmdb.py`).
 2. Generates a short synopsis (plain OpenAI JSON call) and embeds `title + synopsis` into the pgvector `synopsis_vector` column (`vector_search.upsert_item_vector`). For brand-new candidates the row doesn't exist yet, so the vector is stashed in `attrs["_synopsis_vector_tmp"]` and attached after insert.
-3. Builds a user payload including a pre-computed `library_profile` (aggregate taste, see `library_profile.py`) and a `synopsis_neighbors` summary ("N of the 20 nearest-by-synopsis titles were added").
+3. Builds a user payload including a pre-computed `library_profile` (aggregate taste, see `library_profile.py`) and a `taste_signal` block (`taste_signal.py`): raw historical add counts over the candidate's decided ±2yr same-type cohort, broken out by the synopsis-neighbour × critic-presence cross-tab and per-attribute (network/language/genre). The model reads counts as rates itself; the cohort cross-tab is Redis-cached by `(item_type, year)`.
 4. Runs the recommendation **Agent** and writes a single consolidated `ai` block back onto `attrs` (verdict, score, reason, synopsis, tool log, turn/tool-call counts, failure info).
 
 The agent itself lives in `indexer_utils/ai_tools/` and is built on the **openai-agents SDK** (`openai-agents` package):
