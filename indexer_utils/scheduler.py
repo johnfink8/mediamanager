@@ -155,10 +155,10 @@ class _MigrationOwnedJobStore(SQLAlchemyJobStore):  # type: ignore[misc]
     Upstream's ``start()`` calls ``self.jobs_t.create(engine, True)`` on
     every scheduler boot. ``checkfirst=True`` does an inspect + CREATE in
     two non-atomic steps, so when several gunicorn workers boot in
-    parallel one of them races and crashes with
-    ``Table 'apscheduler_jobs' already exists`` (MySQL error 1050). The
-    migration ``add_plex_scan_job`` already owns the DDL — skip the
-    redundant create.
+    parallel one of them races and crashes with a duplicate-table error
+    (postgres ``DuplicateTable``: ``relation "apscheduler_jobs" already
+    exists``). The migration ``add_plex_scan_job`` already owns the DDL —
+    skip the redundant create.
     """
 
     def start(self, scheduler: Any, alias: str) -> None:

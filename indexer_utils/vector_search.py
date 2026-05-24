@@ -54,7 +54,7 @@ async def _embed(text: str) -> Optional[List[float]]:
 
 
 def _embedding_source(title: str, synopsis: Optional[str]) -> str:
-    """Concatenate the fields Weaviate's text2vec-openai used."""
+    """Concatenate the fields that get embedded: title + synopsis."""
     parts = [p for p in (title, synopsis) if p]
     return " ".join(parts)
 
