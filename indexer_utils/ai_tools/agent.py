@@ -39,9 +39,26 @@ logger = logging.getLogger(__name__)
 class Recommendation(BaseModel):
     """Final structured verdict on a candidate."""
 
-    recommend: bool
-    score: float = Field(ge=0.0, le=1.0)
-    reason: str = Field(max_length=240)
+    recommend: bool = Field(
+        description="True if the candidate should be surfaced to the user.",
+    )
+    score: float = Field(
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Recommendation strength, 0.0–1.0, monotonic with `recommend`. "
+            "Use score ≥ 0.5 when recommend=true (0.6 marginal, 0.9 strong); "
+            "score < 0.5 when recommend=false (0.1 definite no, 0.4 close "
+            "call). The pending-candidate list is sorted by score regardless "
+            "of `recommend`, so a high score paired with recommend=false "
+            "would surface a rejected pick at the top of the user's queue — "
+            "keep the two aligned."
+        ),
+    )
+    reason: str = Field(
+        max_length=240,
+        description="Single strongest signal driving the verdict, naming concrete evidence.",
+    )
 
 
 @dataclass
