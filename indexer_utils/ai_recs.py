@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from decouple import config
 from openai import OpenAI
+from sqlalchemy import select
 
 from indexer_utils.tmdb import (
     get_movie_cast,
@@ -23,7 +24,7 @@ from .models import IgnoreItem
 from .radarr_utils import radarr_query
 from .session import db_session
 from .sonarr_utils import query_series
-from .vector_search import upsert_item_vector
+from .vector_search import synopsis_neighbor_summary, upsert_item_vector
 
 logger = logging.getLogger(__name__)
 
@@ -337,8 +338,30 @@ async def _build_user_payload(
     # and uncalibrated; relative composition is the honest signal.
     async with db_session() as session:
         profile = await compute_library_profile(session, item_type)
+        # The candidate's vector was just written by ``upsert_item_vector`` —
+        # either onto the row (existing item) or stashed in attrs for a row
+        # that doesn't exist yet (new-candidate ingest). Pull whichever we have
+        # and resolve "N of the 20 most similar by synopsis were added."
+        vec = attrs.get("_synopsis_vector_tmp")
+        if vec is None:
+            row = (
+                await session.execute(
+                    select(IgnoreItem.synopsis_vector)
+                    .where(IgnoreItem.uid == uid, IgnoreItem.item_type == item_type)
+                    .limit(1)
+                )
+            ).first()
+            if row is not None and row[0] is not None:
+                vec = list(row[0])
+        neighbors = (
+            await synopsis_neighbor_summary(session, item_type, uid, list(vec))
+            if vec is not None
+            else None
+        )
     payload["library_profile"] = profile
     payload["candidate_match"] = compute_candidate_match(profile, attrs)
+    if neighbors is not None:
+        payload["synopsis_neighbors"] = neighbors
     return payload
 
 

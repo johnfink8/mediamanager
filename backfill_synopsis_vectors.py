@@ -2,8 +2,10 @@
 """Backfill ``synopsis_vector`` on ``indexer_utils_ignoreitem``.
 
 Walks items that don't yet have a vector (or all items with ``--reindex-all``),
-makes sure each has an AI-generated synopsis, embeds it, and writes the
-result into pgvector via ``vector_search.upsert_item_vector``.
+embeds each item's ``attributes["synopsis"]``, and writes the result into
+pgvector via ``vector_search.upsert_item_vector``. Items missing a synopsis get
+one generated via ``gpt-5.5`` first — unless ``--require-synopsis`` is set, in
+which case they're skipped (embed-only, no generation).
 """
 
 import argparse
@@ -14,12 +16,12 @@ from datetime import datetime
 from typing import List, Optional
 
 from decouple import config
-from sqlalchemy import Integer, and_, func, or_, select, text
+from sqlalchemy import select, text
 from sqlalchemy.orm.attributes import flag_modified
 
 from indexer_utils.ai_recs import agenerate_synopsis_for_candidate
 from indexer_utils.filters import should_ignore_by_rules
-from indexer_utils.models import FilterRule, IgnoreItem
+from indexer_utils.models import IgnoreItem
 from indexer_utils.session import db_session
 from indexer_utils.vector_search import upsert_item_vector
 
@@ -60,6 +62,7 @@ async def backfill(
     query_rules: bool,
     since: int,
     added_only: bool,
+    require_synopsis: bool,
 ) -> None:
     if not config("OPENAI_API_KEY", default=None):
         print(
@@ -70,68 +73,25 @@ async def backfill(
     async with db_session() as session:
         stmt = select(IgnoreItem).where(IgnoreItem.item_type == item_type)
         if added_only:
+            stmt = stmt.where(IgnoreItem.added.is_(True))
+            logger.info("Restricting to added=True items")
+        if require_synopsis:
+            # ``->>`` (``.astext``) so a JSON-null synopsis counts as absent.
             stmt = stmt.where(
-                IgnoreItem.added.is_(True),
-                IgnoreItem.attributes["ai"]["synopsis"].isnot(None),
+                IgnoreItem.attributes["synopsis"].astext.isnot(None)
+                | IgnoreItem.attributes["ai"]["synopsis"].is_not(None)
             )
-            logger.info("Restricting to added=True items with stored synopses")
+            logger.info(
+                "Restricting to items with a stored synopsis (embed only, no generation)"
+            )
         logger.info(f"Querying {item_type} items")
 
-        if query_rules:
-            rules = list(
-                (
-                    await session.execute(
-                        select(FilterRule).filter_by(enabled=True, item_type=item_type)
-                    )
-                ).scalars()
-            )
-
-            disq_clauses = []
-            logger.info(f"Querying {len(rules)} FilterRules")
-            for r in rules:
-                if r.attribute in [
-                    "type",
-                    "uid",
-                    "title",
-                    "checked_title",
-                    "poster_url",
-                    "added",
-                    "ignore",
-                ]:
-                    field = getattr(IgnoreItem, r.attribute)
-                else:
-                    field = IgnoreItem.attributes[r.attribute]
-                op = r.operator
-                val = r.value
-                cond = None
-                if op == "eq":
-                    cond = field.contains(val)
-                elif op == "neq":
-                    cond = ~field.contains(val)
-                elif op == "in":
-                    values = [v.strip() for v in val.split(",")]
-                    cond = or_(*[field.contains(v) for v in values])
-                elif op == "not_in":
-                    values = [v.strip() for v in val.split(",")]
-                    cond = and_(*[~field.contains(v) for v in values])
-                elif op == "lt":
-                    cond = func.cast(field[0], Integer) < int(val)
-                elif op == "gt":
-                    cond = func.cast(field[0], Integer) > int(val)
-                elif op == "lte":
-                    cond = func.cast(field[0], Integer) <= int(val)
-                elif op == "gte":
-                    cond = func.cast(field[0], Integer) >= int(val)
-                elif op == "contains":
-                    cond = field.contains(val)
-                elif op == "not_contains":
-                    cond = ~field.contains(val)
-                else:
-                    continue
-                disq_clauses.append(and_(IgnoreItem.item_type == r.item_type, cond))
-
-            if disq_clauses:
-                stmt = stmt.where(~or_(*disq_clauses))
+        # FilterRule disqualification is enforced per-item below via
+        # ``should_ignore_by_rules`` — the same check the ingest pipeline uses.
+        # There's no SQL pre-filter: the candidate set is already small, and the
+        # inline translation that used to live here emitted JSONB ``@>`` against
+        # bare strings (and had drifted out of sync with the operator names in
+        # ``indexer_utils.filters``).
 
         if since:
             # JSONB ``year`` is mostly an int but legacy rows have stored lists
@@ -177,17 +137,17 @@ async def backfill(
             genres = _to_list_of_str((attrs).get("genres"))
             language = _to_list_of_str((attrs).get("originalLanguage"))
 
-            synopsis = attrs.get("ai", {}).get("synopsis")
+            synopsis = attrs.get("synopsis") or attrs.get("ai", {}).get("synopsis")
 
-            if force or synopsis is None:
+            # --require-synopsis never generates: it only embeds the synopses
+            # that already exist (the cheap path that skips gpt-5.5 entirely).
+            if not require_synopsis and (force or synopsis is None):
                 logger.info(f"Generating synopsis for {item.uid}")
                 synopsis, _synopsis_failure = await agenerate_synopsis_for_candidate(
                     title, year, genres, language, item.item_type
                 )
                 if synopsis:
-                    ai = attrs.get("ai", {})
-                    ai["synopsis"] = synopsis
-                    attrs["ai"] = ai
+                    attrs["synopsis"] = synopsis
 
             # Drop the dead pointer from the Weaviate era.
             ai = attrs.get("ai")
@@ -267,8 +227,18 @@ def main() -> None:
         "--added-only",
         action="store_true",
         help=(
-            "Only embed items the user added with an existing stored synopsis. "
-            "Targets exactly what the search tool returns and keeps cost bounded."
+            "Restrict to items the user added — the corpus the synopsis search "
+            "queries. Pair with --require-synopsis to embed only those that "
+            "already have a synopsis."
+        ),
+    )
+    parser.add_argument(
+        "--require-synopsis",
+        action="store_true",
+        help=(
+            "Only process items that already have a stored synopsis; never "
+            "generate one. Use to embed the existing synopsis corpus without "
+            "triggering gpt-5.5 synopsis generation for the no-synopsis tail."
         ),
     )
     args = parser.parse_args()
@@ -284,6 +254,7 @@ def main() -> None:
             not args.skip_rules,
             int(args.since or datetime.now().year),
             args.added_only,
+            args.require_synopsis,
         )
     )
 
