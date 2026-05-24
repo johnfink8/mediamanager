@@ -104,23 +104,20 @@ async def _afinish_movie_candidate(
 
     logger.info("New movie found %s", normalized_title)
 
-    def _create_and_attach() -> None:
-        created = IgnoreItem.create(
-            title=normalized_title,
-            uid=imdb_id,
-            ignore=False,
-            shown=True,
-            item_type="mv",
-            attributes=enriched_attrs,
-            poster_url=poster,
-        )
-        if not plex_lookup_failed:
-            vec = enriched_attrs.pop("_synopsis_vector_tmp", None)
-            if vec is not None:
-                created.synopsis_vector = vec
-                created.save()
-
-    await asyncio.to_thread(_create_and_attach)
+    created = await IgnoreItem.create(
+        title=normalized_title,
+        uid=imdb_id,
+        ignore=False,
+        shown=True,
+        item_type="mv",
+        attributes=enriched_attrs,
+        poster_url=poster,
+    )
+    if not plex_lookup_failed:
+        vec = enriched_attrs.pop("_synopsis_vector_tmp", None)
+        if vec is not None:
+            created.synopsis_vector = vec
+            await created.save()
     return note, False
 
 
@@ -152,7 +149,7 @@ async def _arun_movie_candidates(
     return await asyncio.gather(*(wrap(c) for c in pending))
 
 
-def check_movies(days: int) -> None:
+async def check_movies(days: int) -> None:
     started_at = datetime.utcnow()
     checked_movies: List[Dict[str, Any]] = []
     success = False
@@ -229,7 +226,7 @@ def check_movies(days: int) -> None:
             seen.add(imdb)
             imdb_id = "tt%07i" % int(imdb)
 
-            if IgnoreItem.exists("mv", imdb_id):
+            if await IgnoreItem.exists("mv", imdb_id):
                 add_checked_item(
                     imdb_id, normalized_title, "Already recorded in ignore list"
                 )
@@ -303,12 +300,12 @@ def check_movies(days: int) -> None:
                 attrs.update(get_ratings_attrs(ratings))
 
             temp_item = IgnoreItem(item_type="mv", uid=imdb_id, attributes=attrs)
-            ignore = should_ignore_by_rules(temp_item)
+            ignore = await should_ignore_by_rules(temp_item)
             poster = result.get("remotePoster")
 
             if ignore:
                 # Filter rules short-circuit AI; create the ignore record now.
-                IgnoreItem.create(
+                await IgnoreItem.create(
                     title=normalized_title,
                     uid=imdb_id,
                     ignore=True,
@@ -334,7 +331,7 @@ def check_movies(days: int) -> None:
                 }
             )
 
-        async_results = asyncio.run(_arun_movie_candidates(pending_async))
+        async_results = await _arun_movie_candidates(pending_async)
         for imdb_id, note, ignored in async_results:
             normalized_title = next(
                 (
@@ -370,10 +367,11 @@ def check_movies(days: int) -> None:
         )
 
 
-def get_show_titles() -> None:
+async def get_show_titles() -> None:
     """uses tvdb_v4_api to get titles and posters for shows"""
     db = tvdb_v4_official.TVDB(TVDB_API_KEY)
-    for item in IgnoreItem.filter(item_type="tv", ignore=False, checked_title=None):
+    items = await IgnoreItem.filter(item_type="tv", ignore=False, checked_title=None)
+    for item in items:
         logger.info(f"Checking title {item.title}[{item.uid}]")
         try:
             series = db.get_series(item.uid)
@@ -391,14 +389,15 @@ def get_show_titles() -> None:
                 logger.info(
                     f"Saving poster_url {item.poster_url} for TV item {item.uid}"
                 )
-            item.save()
+            await item.save()
         except Exception:
             logger.exception(f"Unable to TVDB search for {item.uid}")
 
 
-def get_movie_titles() -> None:
+async def get_movie_titles() -> None:
     ia = Cinemagoer()
-    for item in IgnoreItem.filter(item_type="mv", ignore=False, checked_title=None):
+    items = await IgnoreItem.filter(item_type="mv", ignore=False, checked_title=None)
+    for item in items:
         uid = item.uid[2:]
         logger.info(f"Checking title {item.title}[{item.uid}]")
         try:
@@ -413,7 +412,7 @@ def get_movie_titles() -> None:
                 logger.info(
                     f"Saving poster_url {item.poster_url} for movie item {item.uid}"
                 )
-            item.save()
+            await item.save()
             logger.info(f"Real title {movie['title']}")
         except Exception:
             logger.exception(f"Unable to IMDB search for {item.uid}")
@@ -463,21 +462,18 @@ async def _afinish_show_candidate(
     async with semaphore:
         enriched_attrs = await annotate_with_ai_async("tv", tvdb, title, attrs)
 
-    def _create_and_attach() -> None:
-        vec = enriched_attrs.pop("_synopsis_vector_tmp", None)
-        created = IgnoreItem.create(
-            title=title,
-            uid=tvdb,
-            ignore=False,
-            shown=True,
-            item_type="tv",
-            attributes=enriched_attrs,
-        )
-        if vec is not None:
-            created.synopsis_vector = vec
-            created.save()
-
-    await asyncio.to_thread(_create_and_attach)
+    vec = enriched_attrs.pop("_synopsis_vector_tmp", None)
+    created = await IgnoreItem.create(
+        title=title,
+        uid=tvdb,
+        ignore=False,
+        shown=True,
+        item_type="tv",
+        attributes=enriched_attrs,
+    )
+    if vec is not None:
+        created.synopsis_vector = vec
+        await created.save()
     return "Flagged for review", False
 
 
@@ -504,7 +500,7 @@ async def _arun_show_candidates(
     return await asyncio.gather(*(wrap(c) for c in pending))
 
 
-def check_shows(days: int) -> None:
+async def check_shows(days: int) -> None:
     started_at = datetime.utcnow()
     checked_shows: List[Dict[str, Any]] = []
     success = False
@@ -567,7 +563,7 @@ def check_shows(days: int) -> None:
                 continue
             seen.add(tvdb)
 
-            if IgnoreItem.exists("tv", tvdb):
+            if await IgnoreItem.exists("tv", tvdb):
                 add_checked_show(tvdb, title, "Already recorded in ignore list")
                 continue
             if already_have(tvdb):
@@ -603,9 +599,9 @@ def check_shows(days: int) -> None:
             ):
                 add_attr(attrs, show, key)
             temp_item = IgnoreItem(item_type="tv", uid=tvdb, attributes=attrs)
-            ignore = should_ignore_by_rules(temp_item)
+            ignore = await should_ignore_by_rules(temp_item)
             if ignore:
-                IgnoreItem.create(
+                await IgnoreItem.create(
                     title=title,
                     uid=tvdb,
                     ignore=True,
@@ -618,7 +614,7 @@ def check_shows(days: int) -> None:
 
             pending_async.append({"tvdb": tvdb, "title": title, "attrs": attrs})
 
-        async_results = asyncio.run(_arun_show_candidates(pending_async))
+        async_results = await _arun_show_candidates(pending_async)
         for tvdb, note, ignored in async_results:
             title = next((c["title"] for c in pending_async if c["tvdb"] == tvdb), tvdb)
             add_checked_show(tvdb, title, note, ignored=ignored)

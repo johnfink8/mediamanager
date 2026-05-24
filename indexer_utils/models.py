@@ -1,21 +1,20 @@
 import enum
 from datetime import datetime
-from typing import Any, Iterable, List, Optional, Sequence, Type
+from typing import Any, List, Optional, Sequence, Type
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
-    JSON,
     Boolean,
     DateTime,
     Enum,
     Integer,
-    LargeBinary,
     String,
     Text,
     or_,
+    select,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, Session, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column
 
 from indexer_utils.session import Base, db_session
 
@@ -38,9 +37,7 @@ class IgnoreItem(Base):
     title: Mapped[str] = mapped_column(String(255), default="")
     checked_title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     poster_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    attributes: Mapped[Optional[dict]] = mapped_column(
-        JSON().with_variant(JSONB(), "postgresql"), nullable=True
-    )
+    attributes: Mapped[Optional[dict]] = mapped_column(JSONB(), nullable=True)
     created_at: Mapped[Optional[int]] = mapped_column(
         Integer, nullable=True
     )  # Unix timestamp, default None
@@ -48,49 +45,52 @@ class IgnoreItem(Base):
     defer_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     # Deferred: 6KB per row, only loaded when a search/index path asks for it.
     synopsis_vector: Mapped[Optional[Any]] = mapped_column(
-        Vector(SYNOPSIS_VECTOR_DIMS).with_variant(LargeBinary(), "sqlite"),
-        nullable=True,
-        deferred=True,
+        Vector(SYNOPSIS_VECTOR_DIMS), nullable=True, deferred=True
     )
 
-    def save(self) -> None:
-        session = Session.object_session(self)
-        if session is None:
-            session = db_session()
-            session.add(self)
-        session.commit()
+    async def save(self) -> None:
+        async with db_session() as session:
+            await session.merge(self)
+            await session.commit()
 
     @classmethod
-    def get_open(cls: Type["IgnoreItem"]) -> List["IgnoreItem"]:
-        with db_session() as session:
+    async def get_open(cls: Type["IgnoreItem"]) -> List["IgnoreItem"]:
+        async with db_session() as session:
             now = datetime.utcnow()
-            items = session.query(cls).filter(
-                cls.ignore.is_(False),
-                or_(cls.defer_until.is_(None), cls.defer_until <= now),
+            result = await session.execute(
+                select(cls).where(
+                    cls.ignore.is_(False),
+                    or_(cls.defer_until.is_(None), cls.defer_until <= now),
+                )
             )
-            return list(items)
+            return list(result.scalars())
 
     @classmethod
-    def exists(cls: Type["IgnoreItem"], type: str, id: str) -> bool:
-        with db_session() as session:
-            return any(
-                session.query(cls).filter_by(item_type=type.lower(), uid=id.lower())
+    async def exists(cls: Type["IgnoreItem"], type: str, id: str) -> bool:
+        async with db_session() as session:
+            result = await session.execute(
+                select(cls.id)
+                .where(cls.item_type == type.lower(), cls.uid == id.lower())
+                .limit(1)
             )
+            return result.first() is not None
 
     @classmethod
-    def create(cls: Type["IgnoreItem"], **kwargs: object) -> "IgnoreItem":
+    async def create(cls: Type["IgnoreItem"], **kwargs: object) -> "IgnoreItem":
         if "created_at" not in kwargs or kwargs["created_at"] is None:
             kwargs["created_at"] = int(datetime.now().timestamp())
-        with db_session() as session:
+        async with db_session() as session:
             item = cls(**kwargs)
             session.add(item)
-            session.commit()
+            await session.commit()
+            await session.refresh(item)
             return item
 
     @classmethod
-    def filter(cls: Type["IgnoreItem"], **kwargs: object) -> Iterable["IgnoreItem"]:
-        with db_session() as session:
-            return session.query(cls).filter_by(**kwargs)
+    async def filter(cls: Type["IgnoreItem"], **kwargs: object) -> List["IgnoreItem"]:
+        async with db_session() as session:
+            result = await session.execute(select(cls).filter_by(**kwargs))
+            return list(result.scalars())
 
 
 class FilterRule(Base):
@@ -110,14 +110,11 @@ class FilterRule(Base):
         String(255), nullable=False
     )  # value to compare against (as string)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    # Optionally: user_id = mapped_column(Integer, nullable=True)
 
-    def save(self) -> None:
-        session = Session.object_session(self)
-        if session is None:
-            session = db_session()
-            session.add(self)
-        session.commit()
+    async def save(self) -> None:
+        async with db_session() as session:
+            await session.merge(self)
+            await session.commit()
 
 
 class RecommendationPreference(enum.Enum):
@@ -146,24 +143,18 @@ class MovieRecommendationRecord(Base):
     )
     updated_at: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
-    def save(self) -> None:
-        session = Session.object_session(self)
-        if session is None:
-            session = db_session()
-            session.add(self)
-        session.commit()
+    async def save(self) -> None:
+        async with db_session() as session:
+            await session.merge(self)
+            await session.commit()
 
-    def set_preference(self, preference: RecommendationPreference) -> None:
-        session = Session.object_session(self)
-        if session is None:
-            session = db_session()
-            session.add(self)
+    async def set_preference(self, preference: RecommendationPreference) -> None:
         self.preference = preference
         self.updated_at = int(datetime.utcnow().timestamp())
-        session.commit()
+        await self.save()
 
     @classmethod
-    def log_recommendation(
+    async def log_recommendation(
         cls: Type["MovieRecommendationRecord"],
         *,
         prompt: Optional[str],
@@ -172,7 +163,7 @@ class MovieRecommendationRecord(Base):
         reason: Optional[str],
         source: Optional[str],
     ) -> "MovieRecommendationRecord":
-        with db_session() as session:
+        async with db_session() as session:
             record = cls(
                 prompt=prompt,
                 recommended_imdb_id=imdb_id,
@@ -182,21 +173,21 @@ class MovieRecommendationRecord(Base):
                 created_at=int(datetime.utcnow().timestamp()),
             )
             session.add(record)
-            session.commit()
-            session.refresh(record)
+            await session.commit()
+            await session.refresh(record)
             return record
 
     @classmethod
-    def get_by_id(cls, record_id: int) -> Optional["MovieRecommendationRecord"]:
-        with db_session() as session:
-            return session.query(cls).get(record_id)
+    async def get_by_id(cls, record_id: int) -> Optional["MovieRecommendationRecord"]:
+        async with db_session() as session:
+            return await session.get(cls, record_id)
 
     @classmethod
-    def recent_history(cls, limit: int = 10) -> Sequence["MovieRecommendationRecord"]:
-        with db_session() as session:
-            return (
-                session.query(cls)
-                .order_by(cls.created_at.desc(), cls.id.desc())
-                .limit(limit)
-                .all()
+    async def recent_history(
+        cls, limit: int = 10
+    ) -> Sequence["MovieRecommendationRecord"]:
+        async with db_session() as session:
+            result = await session.execute(
+                select(cls).order_by(cls.created_at.desc(), cls.id.desc()).limit(limit)
             )
+            return list(result.scalars())

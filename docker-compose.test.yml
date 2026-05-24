@@ -1,6 +1,15 @@
+# Project name forked so the test stack's containers/networks/volumes
+# never collide with the prod stack (docker-compose.yml). Without this
+# both files map to ``mediamanager-db-1`` and bringing up either one
+# evicts the other's container (the named volume survives, but the
+# user has to re-up the prod stack to remount it).
+name: mediamanager-test
+
 services:
   db:
     image: pgvector/pgvector:pg16
+    volumes:
+      - ./scripts/postgres-init:/docker-entrypoint-initdb.d:ro
     environment:
       POSTGRES_DB: indexer_utils
       POSTGRES_USER: indexer_utils
@@ -82,15 +91,21 @@ services:
     environment:
       BASE_URL: http://web
 
-  # Unit tests (tests/) — use in-memory SQLite, no infrastructure deps.
-  # Run with: docker-compose -f docker-compose.test.yml run --rm pytest
+  # Unit tests (tests/) — run against the real pgvector postgres so the
+  # pgvector / JSONB / cosine-distance code paths exercise their actual SQL.
+  # pytest swaps to TEST_DB_NAME via session.py's sys.argv check, so the
+  # real DB is never touched even though we point at the same postgres.
+  # Run with: docker-compose -f docker-compose.test.yml run --build --rm pytest
   pytest:
     build:
       context: .
       target: runner
     volumes:
       - ./tests:/opt/servermonitor/tests
+    depends_on:
+      db:
+        condition: service_healthy
     command:
       - sh
       - -c
-      - "pip install --quiet pytest && pytest tests/ -q"
+      - "pip install --quiet pytest pytest-asyncio && pytest --asyncio-mode=auto tests/ -q"
