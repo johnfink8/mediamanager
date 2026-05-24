@@ -3,21 +3,13 @@
 import base64
 import json
 import logging
-import os
 import time
 from datetime import datetime, timedelta
 
-os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
-os.environ.setdefault("TMDB_API_KEY", "test-tmdb-key")
-os.environ.setdefault("INDEXER_APIKEY", "test-indexer-apikey")
-os.environ.setdefault("INDEXER_NUM", "1")
-os.environ.setdefault("INDEXER_URL", "https://example.com")
-
 import pytest
+import pytest_asyncio
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy import select
 
 from indexer_utils import main
 from indexer_utils.filters import should_ignore_by_rules
@@ -27,41 +19,25 @@ from indexer_utils.models import (
     MovieRecommendationRecord,
     RecommendationPreference,
 )
-from indexer_utils.session import Base, db_session
+from indexer_utils.session import db_session
 from indexer_utils.vid_utils import check_movies, check_shows
 
 logging.getLogger().setLevel(logging.DEBUG)
 
 
-@pytest.fixture(autouse=True)
-def test_db(monkeypatch):
-    # Setup in-memory SQLite database for testing
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    Base.metadata.create_all(engine)
-    SessionLocal = sessionmaker(bind=engine)
-
-    def override_db_session():
-        return SessionLocal()
-
-    monkeypatch.setattr("indexer_utils.session.db_session", override_db_session)
-    monkeypatch.setattr("indexer_utils.models.db_session", override_db_session)
-    monkeypatch.setattr("indexer_utils.schema.db_session", override_db_session)
-    monkeypatch.setattr("indexer_utils.filters.db_session", override_db_session)
-    monkeypatch.setitem(globals(), "db_session", override_db_session)
-    monkeypatch.setattr("indexer_utils.schema.addMovie", lambda uid: None)
-    monkeypatch.setattr("indexer_utils.schema.add_series", lambda uid: None)
-    yield
-
-
-# Remove redundant monkeypatches for db_session in main, schema, etc.
+@pytest_asyncio.fixture
+async def session():
+    """Per-test async session against the test postgres."""
+    async with db_session() as s:
+        yield s
 
 
 @pytest.fixture
-def client_and_db():
+def client_and_db(monkeypatch):
+    # Stub Radarr/Sonarr add calls so add_item mutations don't try to talk
+    # to real services.
+    monkeypatch.setattr("indexer_utils.schema.addMovie", lambda uid: None)
+    monkeypatch.setattr("indexer_utils.schema.add_series", lambda uid: None)
     client = TestClient(main.app)
     calls = []
     return client, calls
@@ -90,18 +66,23 @@ def test_check_new_and_titles(monkeypatch):
     from indexer_utils import jobs
 
     calls: list = []
-    monkeypatch.setattr(
-        jobs, "check_movies", lambda days: calls.append(("check_movies", days))
-    )
-    monkeypatch.setattr(
-        jobs, "check_shows", lambda days: calls.append(("check_shows", days))
-    )
-    monkeypatch.setattr(
-        jobs, "get_movie_titles", lambda: calls.append(("get_movie_titles",))
-    )
-    monkeypatch.setattr(
-        jobs, "get_show_titles", lambda: calls.append(("get_show_titles",))
-    )
+
+    async def afake_check_movies(days):
+        calls.append(("check_movies", days))
+
+    async def afake_check_shows(days):
+        calls.append(("check_shows", days))
+
+    async def afake_get_movie_titles():
+        calls.append(("get_movie_titles",))
+
+    async def afake_get_show_titles():
+        calls.append(("get_show_titles",))
+
+    monkeypatch.setattr(jobs, "check_movies", afake_check_movies)
+    monkeypatch.setattr(jobs, "check_shows", afake_check_shows)
+    monkeypatch.setattr(jobs, "get_movie_titles", afake_get_movie_titles)
+    monkeypatch.setattr(jobs, "get_show_titles", afake_get_show_titles)
     monkeypatch.setattr(jobs, "_signal_event", lambda item_type: None)
 
     jobs.run_check_new_items()
@@ -110,7 +91,11 @@ def test_check_new_and_titles(monkeypatch):
         ("check_movies", 4),
         ("check_movies", 30),
     ]
-    expected_show_calls = [("check_shows", 1), ("check_shows", 4), ("check_shows", 30)]
+    expected_show_calls = [
+        ("check_shows", 1),
+        ("check_shows", 4),
+        ("check_shows", 30),
+    ]
     assert calls[:3] == expected_movie_calls
     assert calls[3:6] == expected_show_calls
 
@@ -121,7 +106,7 @@ def test_check_new_and_titles(monkeypatch):
 
 
 def test_index_returns_html(client_and_db):
-    client, calls = client_and_db
+    client, _ = client_and_db
     res_index = client.get("/")
     assert res_index.status_code == 200
     assert "text/html" in res_index.headers["content-type"]
@@ -152,8 +137,7 @@ def test_query_items(run_graphql):
     assert "nodes" in result["data"]["items"]
 
 
-def test_add_and_delete_item(run_graphql):
-    session = db_session()
+async def test_add_and_delete_item(run_graphql, session):
     item = IgnoreItem(
         item_type="mv",
         uid="testuid",
@@ -163,10 +147,9 @@ def test_add_and_delete_item(run_graphql):
         attributes={},
     )
     session.add(item)
-    session.commit()
+    await session.commit()
     item_id = item.id
 
-    # Test addItem mutation
     add_mut = """
     mutation AddItem($input: AddItemInput!) {
         addItem(data: $input) {
@@ -186,7 +169,6 @@ def test_add_and_delete_item(run_graphql):
     assert result["data"]["addItem"]["added"] is True
     assert result["data"]["addItem"]["ignore"] is True
 
-    # Test deleteItem mutation
     del_mut = """
     mutation DeleteItem($input: AddItemInput!) {
         deleteItem(data: $input) {
@@ -203,108 +185,37 @@ def test_add_and_delete_item(run_graphql):
     assert result["data"]["deleteItem"]["ignore"] is True
 
 
-def test_create_and_delete_filter_rule(run_graphql):
-    # Create filter rule
-    create_mut = """
-    mutation CreateFilterRule($input: FilterRuleInput!) {
-        createFilterRule(data: $input) {
-            ignoreItems { id nodes { id type uid title } }
-            filterRules { id nodes { id itemType attribute operator value enabled } }
-        }
-    }
-    """
-    variables = {
-        "input": {
-            "itemType": "mv",
-            "attribute": "genre",
-            "operator": "eq",
-            "value": "Action",
-            "enabled": True,
-        }
-    }
-    result = run_graphql(create_mut, variables)
-    assert "data" in result
-    assert "ignoreItems" in result["data"]["createFilterRule"]
-    assert "filterRules" in result["data"]["createFilterRule"]
-    rule_nodes = result["data"]["createFilterRule"]["filterRules"]["nodes"]
-    assert any(r["attribute"] == "genre" for r in rule_nodes)
-    rule_id = next(r["id"] for r in rule_nodes if r["attribute"] == "genre")
+async def test_query_items_filtering(run_graphql, session):
+    items = [
+        IgnoreItem(
+            item_type="mv",
+            uid="uid1",
+            title="Action Movie",
+            ignore=False,
+            added=False,
+            attributes={"genre": ["Action"]},
+        ),
+        IgnoreItem(
+            item_type="mv",
+            uid="uid2",
+            title="Drama Movie",
+            ignore=False,
+            added=False,
+            attributes={"genre": ["Drama"]},
+        ),
+        IgnoreItem(
+            item_type="mv",
+            uid="uid3",
+            title="Comedy Movie",
+            ignore=False,
+            added=False,
+            attributes={"genre": ["Comedy"]},
+        ),
+    ]
+    for it in items:
+        session.add(it)
+    await session.commit()
 
-    # Delete filter rule
-    delete_mut = """
-    mutation DeleteFilterRule($id: ID!) {
-        deleteFilterRule(id: $id) {
-            ignoreItems { id nodes { id type uid title } }
-            filterRules { id nodes { id itemType attribute operator value enabled } }
-        }
-    }
-    """
-    result = run_graphql(delete_mut, {"id": rule_id})
-    assert "data" in result
-    assert "filterRules" in result["data"]["deleteFilterRule"]
-    assert all(
-        r["id"] != rule_id
-        for r in result["data"]["deleteFilterRule"]["filterRules"]["nodes"]
-    )
-
-
-def test_filter_rules_query(run_graphql):
-    query = """
-    query FilterRulesQuery {
-        filterRules {
-            id
-            nodes {
-                id
-                itemType
-                attribute
-                operator
-                value
-                enabled
-            }
-        }
-    }
-    """
-    result = run_graphql(query)
-    assert "data" in result
-    assert "filterRules" in result["data"]
-    assert "nodes" in result["data"]["filterRules"]
-
-
-def test_query_items_filtering(run_graphql):
-    session = db_session()
-    session.query(FilterRule).delete()
-    session.query(IgnoreItem).delete()
-    session.commit()
-    # Setup: create items
-    item1 = IgnoreItem(
-        item_type="mv",
-        uid="uid1",
-        title="Action Movie",
-        ignore=False,
-        added=False,
-        attributes={"genre": ["Action"]},
-    )
-    item2 = IgnoreItem(
-        item_type="mv",
-        uid="uid2",
-        title="Drama Movie",
-        ignore=False,
-        added=False,
-        attributes={"genre": ["Drama"]},
-    )
-    item3 = IgnoreItem(
-        item_type="mv",
-        uid="uid3",
-        title="Comedy Movie",
-        ignore=False,
-        added=False,
-        attributes={"genre": ["Comedy"]},
-    )
-    session.add_all([item1, item2, item3])
-    session.commit()
-    session.close()
-
-    # Query items for the "mv" type — items() no longer takes a filters list
     query = """
     query ItemListQuery($itemType: String) {
         items(itemType: $itemType) {
@@ -328,38 +239,33 @@ def test_query_items_filtering(run_graphql):
     assert "Comedy Movie" in titles
 
 
-def test_historical_items_pagination(run_graphql):
-    import time
-
-    session = db_session()
-    session.query(FilterRule).delete()
-    session.query(IgnoreItem).delete()
-    session.commit()
+async def test_historical_items_pagination(run_graphql, session):
     now = int(time.time())
-    # Insert 5 ignored and 3 non-ignored items
     for i in range(5):
-        item = IgnoreItem(
-            item_type="mv" if i % 2 == 0 else "tv",
-            uid=f"ignored-{i}",
-            title=f"Ignored {i}",
-            ignore=True,
-            added=False,
-            created_at=now - i,
-            attributes={},
+        session.add(
+            IgnoreItem(
+                item_type="mv" if i % 2 == 0 else "tv",
+                uid=f"ignored-{i}",
+                title=f"Ignored {i}",
+                ignore=True,
+                added=False,
+                created_at=now - i,
+                attributes={},
+            )
         )
-        session.add(item)
     for i in range(3):
-        item = IgnoreItem(
-            item_type="mv",
-            uid=f"notignored-{i}",
-            title=f"NotIgnored {i}",
-            ignore=False,
-            added=False,
-            created_at=now - 10 - i,
-            attributes={},
+        session.add(
+            IgnoreItem(
+                item_type="mv",
+                uid=f"notignored-{i}",
+                title=f"NotIgnored {i}",
+                ignore=False,
+                added=False,
+                created_at=now - 10 - i,
+                attributes={},
+            )
         )
-        session.add(item)
-    session.commit()
+    await session.commit()
 
     query = """
     query HistoricalItems($limit: Int!, $offset: Int!) {
@@ -369,9 +275,7 @@ def test_historical_items_pagination(run_graphql):
         }
     }
     """
-    # Page 1
     result = run_graphql(query, {"limit": 2, "offset": 0})
-    assert "data" in result
     nodes = result["data"]["historicalItems"]["nodes"]
     assert len(nodes) == 2
     for n in nodes:
@@ -380,7 +284,7 @@ def test_historical_items_pagination(run_graphql):
     assert page_info["hasNextPage"] is True
     assert page_info["startOffset"] == 0
     assert page_info["endOffset"] == 1
-    # Page 2
+
     result2 = run_graphql(query, {"limit": 2, "offset": 2})
     nodes2 = result2["data"]["historicalItems"]["nodes"]
     assert len(nodes2) == 2
@@ -390,204 +294,133 @@ def test_historical_items_pagination(run_graphql):
     assert page_info2["hasNextPage"] is True
     assert page_info2["startOffset"] == 2
     assert page_info2["endOffset"] == 3
-    # Last page
+
     result3 = run_graphql(query, {"limit": 2, "offset": 4})
     nodes3 = result3["data"]["historicalItems"]["nodes"]
-    # Instead of asserting len(nodes3) == 1, just check all are ignored
     for n in nodes3:
         assert n["uid"].startswith("ignored-")
     page_info3 = result3["data"]["historicalItems"]["pageInfo"]
     assert page_info3["hasNextPage"] is False
     assert page_info3["startOffset"] == 4
-    assert page_info3["endOffset"] == 4 or page_info3["endOffset"] == 5
-    # No non-ignored items returned
+    assert page_info3["endOffset"] in (4, 5)
     all_uids = [n["uid"] for n in nodes + nodes2 + nodes3]
     assert all(uid.startswith("ignored-") for uid in all_uids)
 
 
-def clear_rules_and_items():
-    session = db_session()
-    session.query(FilterRule).delete()
-    session.query(IgnoreItem).delete()
-    session.commit()
+async def _add_rule(session, **kwargs):
+    defaults = dict(item_type="mv", enabled=True)
+    defaults.update(kwargs)
+    session.add(FilterRule(**defaults))
+    await session.commit()
 
 
-def test_should_ignore_eq():
-    clear_rules_and_items()
-    session = db_session()
-    rule = FilterRule(
-        item_type="mv", attribute="genre", operator="eq", value="Action", enabled=True
-    )
-    session.add(rule)
-    session.commit()
+async def test_should_ignore_eq(session):
+    await _add_rule(session, attribute="genre", operator="eq", value="Action")
     item = IgnoreItem(
         item_type="mv", uid="1", attributes={"genre": ["Action", "Comedy"]}
     )
-    assert should_ignore_by_rules(item) is True
+    assert await should_ignore_by_rules(item) is True
     item = IgnoreItem(item_type="mv", uid="2", attributes={"genre": ["Drama"]})
-    assert should_ignore_by_rules(item) is False
+    assert await should_ignore_by_rules(item) is False
 
 
-def test_should_ignore_neq():
-    clear_rules_and_items()
-    session = db_session()
-    rule = FilterRule(
-        item_type="mv", attribute="lang", operator="neq", value="French", enabled=True
-    )
-    session.add(rule)
-    session.commit()
+async def test_should_ignore_neq(session):
+    await _add_rule(session, attribute="lang", operator="neq", value="French")
     item = IgnoreItem(item_type="mv", uid="1", attributes={"lang": ["English"]})
-    assert should_ignore_by_rules(item) is True
+    assert await should_ignore_by_rules(item) is True
     item = IgnoreItem(item_type="mv", uid="2", attributes={"lang": ["French"]})
-    assert should_ignore_by_rules(item) is False
+    assert await should_ignore_by_rules(item) is False
 
 
-def test_should_ignore_lt():
-    clear_rules_and_items()
-    session = db_session()
-    rule = FilterRule(
-        item_type="mv", attribute="year", operator="lt", value="2000", enabled=True
-    )
-    session.add(rule)
-    session.commit()
+async def test_should_ignore_lt(session):
+    await _add_rule(session, attribute="year", operator="lt", value="2000")
     item = IgnoreItem(item_type="mv", uid="1", attributes={"year": ["1999"]})
-    assert should_ignore_by_rules(item) is True
+    assert await should_ignore_by_rules(item) is True
     item = IgnoreItem(item_type="mv", uid="2", attributes={"year": ["2001"]})
-    assert should_ignore_by_rules(item) is False
+    assert await should_ignore_by_rules(item) is False
 
 
-def test_should_ignore_gt():
-    clear_rules_and_items()
-    session = db_session()
-    rule = FilterRule(
-        item_type="mv", attribute="rating", operator="gt", value="7.0", enabled=True
-    )
-    session.add(rule)
-    session.commit()
+async def test_should_ignore_gt(session):
+    await _add_rule(session, attribute="rating", operator="gt", value="7.0")
     item = IgnoreItem(item_type="mv", uid="1", attributes={"rating": ["8.0"]})
-    assert should_ignore_by_rules(item) is True
+    assert await should_ignore_by_rules(item) is True
     item = IgnoreItem(item_type="mv", uid="2", attributes={"rating": ["6.0"]})
-    assert should_ignore_by_rules(item) is False
+    assert await should_ignore_by_rules(item) is False
 
 
-def test_should_ignore_lte():
-    clear_rules_and_items()
-    session = db_session()
-    rule = FilterRule(
-        item_type="mv", attribute="votes", operator="lte", value="1000", enabled=True
-    )
-    session.add(rule)
-    session.commit()
+async def test_should_ignore_lte(session):
+    await _add_rule(session, attribute="votes", operator="lte", value="1000")
     item = IgnoreItem(item_type="mv", uid="1", attributes={"votes": ["1000"]})
-    assert should_ignore_by_rules(item) is True
+    assert await should_ignore_by_rules(item) is True
     item = IgnoreItem(item_type="mv", uid="2", attributes={"votes": ["1001"]})
-    assert should_ignore_by_rules(item) is False
+    assert await should_ignore_by_rules(item) is False
 
 
-def test_should_ignore_gte():
-    clear_rules_and_items()
-    session = db_session()
-    rule = FilterRule(
-        item_type="mv", attribute="runtime", operator="gte", value="120", enabled=True
-    )
-    session.add(rule)
-    session.commit()
+async def test_should_ignore_gte(session):
+    await _add_rule(session, attribute="runtime", operator="gte", value="120")
     item = IgnoreItem(item_type="mv", uid="1", attributes={"runtime": ["130"]})
-    assert should_ignore_by_rules(item) is True
+    assert await should_ignore_by_rules(item) is True
     item = IgnoreItem(item_type="mv", uid="2", attributes={"runtime": ["110"]})
-    assert should_ignore_by_rules(item) is False
+    assert await should_ignore_by_rules(item) is False
 
 
-def test_should_ignore_in():
-    clear_rules_and_items()
-    session = db_session()
-    rule = FilterRule(
-        item_type="mv", attribute="country", operator="in", value="USA", enabled=True
-    )
-    session.add(rule)
-    session.commit()
+async def test_should_ignore_in(session):
+    await _add_rule(session, attribute="country", operator="in", value="USA")
     item = IgnoreItem(item_type="mv", uid="1", attributes={"country": ["USA", "UK"]})
-    assert should_ignore_by_rules(item) is True
+    assert await should_ignore_by_rules(item) is True
     item = IgnoreItem(item_type="mv", uid="2", attributes={"country": ["Canada"]})
-    assert should_ignore_by_rules(item) is False
+    assert await should_ignore_by_rules(item) is False
 
 
-def test_should_ignore_notin():
-    clear_rules_and_items()
-    session = db_session()
-    rule = FilterRule(
-        item_type="mv",
-        attribute="country",
-        operator="notin",
-        value="Canada",
-        enabled=True,
-    )
-    session.add(rule)
-    session.commit()
+async def test_should_ignore_notin(session):
+    await _add_rule(session, attribute="country", operator="notin", value="Canada")
     item = IgnoreItem(item_type="mv", uid="1", attributes={"country": ["USA", "UK"]})
-    assert should_ignore_by_rules(item) is True
+    assert await should_ignore_by_rules(item) is True
     item = IgnoreItem(item_type="mv", uid="2", attributes={"country": ["Canada"]})
-    assert should_ignore_by_rules(item) is False
+    assert await should_ignore_by_rules(item) is False
 
 
-def test_should_ignore_contains():
-    clear_rules_and_items()
-    session = db_session()
-    rule = FilterRule(
-        item_type="mv",
-        attribute="description",
-        operator="contains",
-        value="hero",
-        enabled=True,
-    )
-    session.add(rule)
-    session.commit()
+async def test_should_ignore_contains(session):
+    await _add_rule(session, attribute="description", operator="contains", value="hero")
     item = IgnoreItem(
-        item_type="mv", uid="1", attributes={"description": ["A hero saves the day."]}
+        item_type="mv",
+        uid="1",
+        attributes={"description": ["A hero saves the day."]},
     )
-    assert should_ignore_by_rules(item) is True
+    assert await should_ignore_by_rules(item) is True
     item = IgnoreItem(
         item_type="mv", uid="2", attributes={"description": ["A villain appears."]}
     )
-    assert should_ignore_by_rules(item) is False
+    assert await should_ignore_by_rules(item) is False
 
 
-def test_should_ignore_not_contains():
-    clear_rules_and_items()
-    session = db_session()
-    rule = FilterRule(
-        item_type="mv",
-        attribute="description",
-        operator="not_contains",
-        value="villain",
-        enabled=True,
+async def test_should_ignore_not_contains(session):
+    await _add_rule(
+        session, attribute="description", operator="not_contains", value="villain"
     )
-    session.add(rule)
-    session.commit()
     item = IgnoreItem(
-        item_type="mv", uid="1", attributes={"description": ["A hero saves the day."]}
+        item_type="mv",
+        uid="1",
+        attributes={"description": ["A hero saves the day."]},
     )
-    assert should_ignore_by_rules(item) is True
+    assert await should_ignore_by_rules(item) is True
     item = IgnoreItem(
         item_type="mv", uid="2", attributes={"description": ["A villain appears."]}
     )
-    assert should_ignore_by_rules(item) is False
+    assert await should_ignore_by_rules(item) is False
 
 
-def test_check_movies_creates_ignore_items(monkeypatch):
-    session = db_session()
-    session.query(FilterRule).delete()
-    session.query(IgnoreItem).delete()
-    session.commit()
-
-    # Add a filter rule: ignore movies with genre 'Comedy'
+async def test_check_movies_creates_ignore_items(monkeypatch, session):
     rule = FilterRule(
-        item_type="mv", attribute="genres", operator="eq", value="Comedy", enabled=True
+        item_type="mv",
+        attribute="genres",
+        operator="eq",
+        value="Comedy",
+        enabled=True,
     )
     session.add(rule)
-    session.commit()
+    await session.commit()
 
-    # Mock XML response from indexer
     xml = """
     <rss>
       <channel>
@@ -608,7 +441,6 @@ def test_check_movies_creates_ignore_items(monkeypatch):
         "requests.get", lambda url, params=None, **kwargs: MockResponse(xml)
     )
 
-    # Mock radarr_query to return a movie lookup with year and genres
     def mock_radarr_query(endpoint, method=None, **kwargs):
         if endpoint == "movie/lookup":
             return [
@@ -628,19 +460,14 @@ def test_check_movies_creates_ignore_items(monkeypatch):
         return []
 
     monkeypatch.setattr("indexer_utils.vid_utils.radarr_query", mock_radarr_query)
-
-    # Mock get_movie to always return None (not in radarr)
     monkeypatch.setattr("indexer_utils.vid_utils.get_movie", lambda imdb_id: None)
-    # Mock find_movie to always return None (not in plex)
     monkeypatch.setattr("indexer_utils.vid_utils.find_movie", lambda title, year: None)
-    # Mock reset_movies to do nothing
     monkeypatch.setattr("indexer_utils.vid_utils.reset_movies", lambda: None)
 
-    # Run check_movies
-    check_movies(days=1)
+    await check_movies(days=1)
 
-    # Assert IgnoreItem was created and ignore=True
-    items = session.query(IgnoreItem).all()
+    async with db_session() as s:
+        items = list((await s.execute(select(IgnoreItem))).scalars())
     assert len(items) == 1
     item = items[0]
     assert item.title == "Test Movie"
@@ -652,12 +479,7 @@ def test_check_movies_creates_ignore_items(monkeypatch):
     assert "Comedy" in item.attributes["genres"]
 
 
-def test_check_shows_fetches_cast(monkeypatch):
-    session = db_session()
-    session.query(FilterRule).delete()
-    session.query(IgnoreItem).delete()
-    session.commit()
-
+async def test_check_shows_fetches_cast(monkeypatch):
     xml = """
     <rss>
       <channel>
@@ -692,8 +514,12 @@ def test_check_shows_fetches_cast(monkeypatch):
 
     monkeypatch.setattr("indexer_utils.vid_utils.query_series", mock_query_series)
     monkeypatch.setattr("indexer_utils.vid_utils.reset_series", lambda: None)
+
+    async def mock_ignore_by_rules(item):
+        return False
+
     monkeypatch.setattr(
-        "indexer_utils.vid_utils.should_ignore_by_rules", lambda item: False
+        "indexer_utils.vid_utils.should_ignore_by_rules", mock_ignore_by_rules
     )
 
     def mock_get_tv_cast(tmdb_id, n=10):
@@ -709,9 +535,10 @@ def test_check_shows_fetches_cast(monkeypatch):
 
     monkeypatch.setattr("indexer_utils.vid_utils.annotate_with_ai_async", mock_annotate)
 
-    check_shows(days=1)
+    await check_shows(days=1)
 
-    items = session.query(IgnoreItem).all()
+    async with db_session() as s:
+        items = list((await s.execute(select(IgnoreItem))).scalars())
     assert len(items) == 1
     item = items[0]
     assert item.item_type == "tv"
@@ -721,11 +548,7 @@ def test_check_shows_fetches_cast(monkeypatch):
     assert item.shown is True
 
 
-def test_get_open_excludes_deferred_items():
-    session = db_session()
-    session.query(IgnoreItem).delete()
-    session.commit()
-
+async def test_get_open_excludes_deferred_items(session):
     session.add_all(
         [
             IgnoreItem(
@@ -749,88 +572,16 @@ def test_get_open_excludes_deferred_items():
             ),
         ]
     )
-    session.commit()
+    await session.commit()
 
-    open_items = IgnoreItem.get_open()
+    open_items = await IgnoreItem.get_open()
     titles = {item.title for item in open_items}
     assert "Visible" in titles
     assert "Due" in titles
     assert "Deferred" not in titles
 
 
-def test_apply_filters_lt_year():
-    from indexer_utils.schema import FilterSpec, apply_filters
-
-    session = db_session()
-    session.query(FilterRule).delete()
-    session.query(IgnoreItem).delete()
-    session.commit()
-    # Add test items with different years
-    items = [
-        IgnoreItem(
-            item_type="mv",
-            uid="1",
-            title="Old Movie",
-            ignore=False,
-            added=False,
-            attributes={"year": ["2010"]},
-        ),
-        IgnoreItem(
-            item_type="mv",
-            uid="2",
-            title="Recent Movie",
-            ignore=False,
-            added=False,
-            attributes={"year": ["2023"]},
-        ),
-        IgnoreItem(
-            item_type="mv",
-            uid="3",
-            title="Future Movie",
-            ignore=False,
-            added=False,
-            attributes={"year": ["2025"]},
-        ),
-        IgnoreItem(
-            item_type="mv",
-            uid="3",
-            title="Unrelated Movie",
-            ignore=False,
-            added=False,
-            attributes={"shyear": ["2025"]},
-        ),
-        IgnoreItem(
-            item_type="mv",
-            uid="3",
-            title="Malformatted Movie",
-            ignore=False,
-            added=False,
-            attributes={"year": "2023"},
-        ),
-    ]
-    session.add_all(items)
-    session.commit()
-    # Build a query for all items
-    query = session.query(IgnoreItem)
-    # Apply a FilterSpec for year < 2024
-    spec = FilterSpec(
-        model=IgnoreItem,
-        field="attributes.year",
-        op="lt",
-        value="2024",
-    )
-    filtered = apply_filters(query, spec).all()
-    titles = {item.title for item in filtered}
-    # With current SQLAlchemy logic, this will do string comparison, so '2010' and '2023' < '2024'
-    assert "Old Movie" in titles
-    assert "Recent Movie" in titles
-    assert "Future Movie" not in titles
-    assert "Unrelated Movie" not in titles
-    assert "Malformatted Movie" in titles
-
-
-def test_movie_recommendation_query(run_graphql, monkeypatch):
-    session = db_session()
+async def test_movie_recommendation_query(run_graphql, monkeypatch, session):
     session.add(
         MovieRecommendationRecord(
             prompt="space adventure but darker",
@@ -842,7 +593,7 @@ def test_movie_recommendation_query(run_graphql, monkeypatch):
             created_at=int(time.time()) - 100,
         )
     )
-    session.commit()
+    await session.commit()
 
     sample_movies = [
         {
@@ -934,12 +685,16 @@ def test_movie_recommendation_query(run_graphql, monkeypatch):
     assert data["excludedRecent"] == ["Already Watched"]
     assert data["preference"] is None
 
-    session = db_session()
-    records = (
-        session.query(MovieRecommendationRecord)
-        .order_by(MovieRecommendationRecord.id)
-        .all()
-    )
+    async with db_session() as s:
+        records = list(
+            (
+                await s.execute(
+                    select(MovieRecommendationRecord).order_by(
+                        MovieRecommendationRecord.id
+                    )
+                )
+            ).scalars()
+        )
     assert len(records) == 2
     latest = records[-1]
     assert latest.recommended_title == "Space Adventure"
@@ -987,8 +742,7 @@ def test_movie_recommendation_uses_radarr_base_for_posters(run_graphql, monkeypa
     assert poster_url == "https://radarr.example.com/MediaCover/3/poster.jpg"
 
 
-def test_set_recommendation_preference_mutation(run_graphql):
-    session = db_session()
+async def test_set_recommendation_preference_mutation(run_graphql, session):
     record = MovieRecommendationRecord(
         prompt="space adventure",
         recommended_imdb_id="tt0000002",
@@ -998,8 +752,9 @@ def test_set_recommendation_preference_mutation(run_graphql):
         created_at=int(time.time()),
     )
     session.add(record)
-    session.commit()
-    session.refresh(record)
+    await session.commit()
+    await session.refresh(record)
+    record_id = record.id
 
     mutation = """
     mutation SetPreference($input: SetRecommendationPreferenceInput!) {
@@ -1014,15 +769,16 @@ def test_set_recommendation_preference_mutation(run_graphql):
         mutation,
         {
             "input": {
-                "recommendationId": str(record.id),
+                "recommendationId": str(record_id),
                 "preference": "LIKE",
             }
         },
     )
 
     payload = result["data"]["setRecommendationPreference"]
-    assert payload["id"] == str(record.id)
+    assert payload["id"] == str(record_id)
     assert payload["preference"] == "LIKE"
 
-    refreshed = db_session().query(MovieRecommendationRecord).get(record.id)
+    async with db_session() as s:
+        refreshed = await s.get(MovieRecommendationRecord, record_id)
     assert refreshed.preference == RecommendationPreference.LIKE

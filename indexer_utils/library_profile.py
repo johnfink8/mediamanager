@@ -21,7 +21,8 @@ pre-resolved "Horror: #6 of 52" rather than having to count.
 from collections import Counter
 from typing import Any, Dict, List, Optional, Sequence
 
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import IgnoreItem
 
@@ -70,17 +71,20 @@ def _top(counter: Counter, n: int, total: int) -> List[Dict[str, Any]]:
     ]
 
 
-def compute_library_profile(session: Session, item_type: str) -> Dict[str, Any]:
+async def compute_library_profile(
+    session: AsyncSession, item_type: str
+) -> Dict[str, Any]:
     """Snapshot the user's added-items distribution for ``item_type``.
 
     Single pass over IgnoreItem rows where ``added=True``. Returns a dict
     safe to JSON-encode and drop into the user prompt.
     """
-    rows = (
-        session.query(IgnoreItem)
-        .filter(IgnoreItem.item_type == item_type, IgnoreItem.added.is_(True))
-        .all()
+    result = await session.execute(
+        select(IgnoreItem).where(
+            IgnoreItem.item_type == item_type, IgnoreItem.added.is_(True)
+        )
     )
+    rows = list(result.scalars())
     total = len(rows)
 
     genres = Counter()

@@ -1,18 +1,19 @@
+from sqlalchemy import select
+
 from indexer_utils.models import FilterRule, IgnoreItem
 from indexer_utils.session import db_session
 
 
-def should_ignore_by_rules(item: IgnoreItem) -> bool:
+async def should_ignore_by_rules(item: IgnoreItem) -> bool:
     """
     Returns True if any enabled FilterRule matches the given IgnoreItem's type and attributes.
     Supported operators: eq, neq, lt, gt, lte, gte, in, notin, contains, not_contains
     """
-    session = db_session()
-    rules = (
-        session.query(FilterRule)
-        .filter_by(item_type=item.item_type, enabled=True)
-        .all()
-    )
+    async with db_session() as session:
+        result = await session.execute(
+            select(FilterRule).filter_by(item_type=item.item_type, enabled=True)
+        )
+        rules = list(result.scalars())
     attributes = item.attributes or {}
     for rule in rules:
         attr_val = attributes.get(rule.attribute)

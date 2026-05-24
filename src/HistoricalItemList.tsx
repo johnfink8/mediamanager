@@ -16,14 +16,12 @@ const HistoricalItemsQuery = graphql`
         $type: String
         $limit: Int!
         $offset: Int!
-        $applyInvertedPermanentRules: Boolean!
         $search: String
     ) {
         historicalItems(
-            filters: [{ type: $type }]
+            itemType: $type
             limit: $limit
             offset: $offset
-            applyInvertedPermanentRules: $applyInvertedPermanentRules
             search: $search
         ) {
             nodes {
@@ -418,7 +416,6 @@ const HistoricalItemList: FC<{ menuItem: MenuItemType }> = ({ menuItem }) => {
             type: typeFilter,
             limit: PAGE_SIZE,
             offset,
-            applyInvertedPermanentRules: false,
             search: search || null,
         });
         return () => {

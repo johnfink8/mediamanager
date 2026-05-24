@@ -1,17 +1,21 @@
 """Seed test data for playwright e2e tests."""
 
+import asyncio
+
+from sqlalchemy import delete
+
 from indexer_utils.models import IgnoreItem
 from indexer_utils.session import db_session
 
 TEST_UID_PREFIX = "playwright-test-"
 
 
-def seed() -> None:
-    with db_session() as session:
-        session.query(IgnoreItem).filter(
-            IgnoreItem.uid.like(f"{TEST_UID_PREFIX}%")
-        ).delete(synchronize_session=False)
-        session.commit()
+async def seed() -> None:
+    async with db_session() as session:
+        await session.execute(
+            delete(IgnoreItem).where(IgnoreItem.uid.like(f"{TEST_UID_PREFIX}%"))
+        )
+        await session.commit()
 
     items = [
         # Active movies — appear in Movies tab
@@ -75,11 +79,11 @@ def seed() -> None:
             added=True,
         ),
     ]
-    with db_session() as session:
+    async with db_session() as session:
         session.add_all(items)
-        session.commit()
+        await session.commit()
     print(f"Seeded {len(items)} test items")
 
 
 if __name__ == "__main__":
-    seed()
+    asyncio.run(seed())

@@ -23,7 +23,7 @@ from .models import IgnoreItem
 from .radarr_utils import radarr_query
 from .session import db_session
 from .sonarr_utils import query_series
-from .vector_search import aupsert_item_vector
+from .vector_search import upsert_item_vector
 
 logger = logging.getLogger(__name__)
 
@@ -278,7 +278,7 @@ def refresh_visible_item_attributes(item: IgnoreItem) -> Dict[str, Any]:
     return attrs
 
 
-def _build_user_payload(
+async def _build_user_payload(
     item_type: str,
     uid: str,
     title: str,
@@ -335,8 +335,8 @@ def _build_user_payload(
     # it from per-tool counts. See ``indexer_utils.library_profile`` for the
     # motivation — short version: absolute per-genre counts are unbounded
     # and uncalibrated; relative composition is the honest signal.
-    with db_session() as session:
-        profile = compute_library_profile(session, item_type)
+    async with db_session() as session:
+        profile = await compute_library_profile(session, item_type)
     payload["library_profile"] = profile
     payload["candidate_match"] = compute_candidate_match(profile, attrs)
     return payload
@@ -476,7 +476,7 @@ async def _annotate_with_ai_async_inner(
             if len(candidate_synopsis) > 480
             else candidate_synopsis,
         )
-    attrs = await aupsert_item_vector(attrs, item_type, uid, title, candidate_synopsis)
+    attrs = await upsert_item_vector(attrs, item_type, uid, title, candidate_synopsis)
 
     base_ai = dict(attrs.get("ai") or {})
 
@@ -495,7 +495,9 @@ async def _annotate_with_ai_async_inner(
         return attrs_out
 
     system_prompt = RECOMMENDATION_PROMPTS.get(item_type, "")
-    user_payload = _build_user_payload(item_type, uid, title, attrs, candidate_synopsis)
+    user_payload = await _build_user_payload(
+        item_type, uid, title, attrs, candidate_synopsis
+    )
     user_prompt = json.dumps(user_payload, default=str)
 
     ctx = ToolContext(

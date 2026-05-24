@@ -129,7 +129,7 @@ test.describe("smoke: GraphQL API", () => {
     }) => {
         const response = await request.post("/graphql", {
             data: {
-                query: `{ historicalItems(filters: [{type: "mv"}], limit: 10, offset: 0, applyInvertedPermanentRules: false) { nodes { id title added createdAt } } }`,
+                query: `{ historicalItems(itemType: "mv", limit: 10, offset: 0) { nodes { id title added createdAt } } }`,
             },
         });
         expect(response.ok()).toBeTruthy();

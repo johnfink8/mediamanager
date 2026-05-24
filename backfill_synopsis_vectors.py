@@ -7,16 +7,17 @@ result into pgvector via ``vector_search.upsert_item_vector``.
 """
 
 import argparse
+import asyncio
 import json
 import logging
 from datetime import datetime
 from typing import List, Optional
 
 from decouple import config
-from sqlalchemy import Integer, and_, func, or_, text
+from sqlalchemy import Integer, and_, func, or_, select, text
 from sqlalchemy.orm.attributes import flag_modified
 
-from indexer_utils.ai_recs import generate_synopsis_for_candidate
+from indexer_utils.ai_recs import agenerate_synopsis_for_candidate
 from indexer_utils.filters import should_ignore_by_rules
 from indexer_utils.models import FilterRule, IgnoreItem
 from indexer_utils.session import db_session
@@ -49,7 +50,7 @@ def _year_from_attrs(attrs) -> Optional[int]:
     return None
 
 
-def backfill(
+async def backfill(
     item_type: str,
     limit: int,
     dry_run: bool,
@@ -66,168 +67,164 @@ def backfill(
         )
         return
 
-    session = db_session()
-    query = session.query(IgnoreItem)
-    query = query.filter(IgnoreItem.item_type == item_type)
-    if added_only:
-        # ``search_similar_by_synopsis`` filters to added=True post-fetch, so
-        # vectors on rejected rows are dead weight at query time. For a
-        # cutover backfill this is also what keeps cost bounded.
-        query = query.filter(
-            IgnoreItem.added.is_(True),
-            IgnoreItem.attributes["ai"]["synopsis"].isnot(None),
-        )
-        logger.info("Restricting to added=True items with stored synopses")
-    logger.info(f"Querying {item_type} items")
-
-    if query_rules:
-        # Exclude items that would be disqualified by rules by pushing rules into SQL
-        rules_q = session.query(FilterRule).filter_by(enabled=True)
-        rules_q = rules_q.filter_by(item_type=item_type)
-        rules = rules_q.all()
-
-        disq_clauses = []
-        logger.info(f"Querying {len(rules)} FilterRules")
-        for r in rules:
-            # Map rule.attribute to column or JSON field
-            if r.attribute in [
-                "type",
-                "uid",
-                "title",
-                "checked_title",
-                "poster_url",
-                "added",
-                "ignore",
-            ]:
-                field = getattr(IgnoreItem, r.attribute)
-            else:
-                field = IgnoreItem.attributes[r.attribute]
-            op = r.operator
-            val = r.value
-            cond = None
-            if op == "eq":
-                cond = field.contains(val)
-            elif op == "neq":
-                cond = ~field.contains(val)
-            elif op == "in":
-                values = [v.strip() for v in val.split(",")]
-                cond = or_(*[field.contains(v) for v in values])
-            elif op == "not_in":
-                values = [v.strip() for v in val.split(",")]
-                cond = and_(*[~field.contains(v) for v in values])
-            elif op == "lt":
-                cond = func.cast(field[0], Integer) < int(val)
-            elif op == "gt":
-                cond = func.cast(field[0], Integer) > int(val)
-            elif op == "lte":
-                cond = func.cast(field[0], Integer) <= int(val)
-            elif op == "gte":
-                cond = func.cast(field[0], Integer) >= int(val)
-            elif op == "contains":
-                cond = field.contains(val)
-            elif op == "not_contains":
-                cond = ~field.contains(val)
-            else:
-                continue
-            disq_clauses.append(and_(IgnoreItem.item_type == r.item_type, cond))
-
-        if disq_clauses:
-            query = query.filter(~or_(*disq_clauses))
-
-    if since:
-        # JSONB ``year`` is mostly an int but legacy rows have stored lists
-        # (``[2022]``) and the occasional raw string. Gate the ``::int`` cast
-        # behind a regex so non-numeric values silently fall out of the
-        # filter instead of aborting the whole backfill on the first one.
-        query = query.filter(
-            text(
-                "(CASE WHEN (attributes->>'year') ~ '^-?[0-9]+$' "
-                "THEN (attributes->>'year')::int END) >= :since_year"
+    async with db_session() as session:
+        stmt = select(IgnoreItem).where(IgnoreItem.item_type == item_type)
+        if added_only:
+            stmt = stmt.where(
+                IgnoreItem.added.is_(True),
+                IgnoreItem.attributes["ai"]["synopsis"].isnot(None),
             )
-        ).params(since_year=since)
+            logger.info("Restricting to added=True items with stored synopses")
+        logger.info(f"Querying {item_type} items")
 
-    # Vector-presence gate (postgres-side; the column is deferred but
-    # still usable in WHERE clauses).
-    if check_vectors:
-        logger.info("Checking items that already have a synopsis vector")
-        query = query.filter(IgnoreItem.synopsis_vector.is_not(None))
-    elif not reindex_all:
-        logger.info("Excluding items that already have a synopsis vector")
-        query = query.filter(IgnoreItem.synopsis_vector.is_(None))
-    query = query.order_by(IgnoreItem.id.desc())
-    if limit:
-        logger.info(f"Limiting to {limit} items")
-        query = query.limit(limit)
-    items = query.all()
-    logger.info(f"Found {len(items)} items to process")
-    updated_count = 0
+        if query_rules:
+            rules = list(
+                (
+                    await session.execute(
+                        select(FilterRule).filter_by(enabled=True, item_type=item_type)
+                    )
+                ).scalars()
+            )
 
-    for item in items:
-        logger.info(f"Processing item {item.uid}")
-        attrs = item.attributes or {}
-        try:
-            if query_rules and should_ignore_by_rules(item):
-                logger.info(
-                    f"Skipping item {item.uid} because it's disqualified by rules"
+            disq_clauses = []
+            logger.info(f"Querying {len(rules)} FilterRules")
+            for r in rules:
+                if r.attribute in [
+                    "type",
+                    "uid",
+                    "title",
+                    "checked_title",
+                    "poster_url",
+                    "added",
+                    "ignore",
+                ]:
+                    field = getattr(IgnoreItem, r.attribute)
+                else:
+                    field = IgnoreItem.attributes[r.attribute]
+                op = r.operator
+                val = r.value
+                cond = None
+                if op == "eq":
+                    cond = field.contains(val)
+                elif op == "neq":
+                    cond = ~field.contains(val)
+                elif op == "in":
+                    values = [v.strip() for v in val.split(",")]
+                    cond = or_(*[field.contains(v) for v in values])
+                elif op == "not_in":
+                    values = [v.strip() for v in val.split(",")]
+                    cond = and_(*[~field.contains(v) for v in values])
+                elif op == "lt":
+                    cond = func.cast(field[0], Integer) < int(val)
+                elif op == "gt":
+                    cond = func.cast(field[0], Integer) > int(val)
+                elif op == "lte":
+                    cond = func.cast(field[0], Integer) <= int(val)
+                elif op == "gte":
+                    cond = func.cast(field[0], Integer) >= int(val)
+                elif op == "contains":
+                    cond = field.contains(val)
+                elif op == "not_contains":
+                    cond = ~field.contains(val)
+                else:
+                    continue
+                disq_clauses.append(and_(IgnoreItem.item_type == r.item_type, cond))
+
+            if disq_clauses:
+                stmt = stmt.where(~or_(*disq_clauses))
+
+        if since:
+            # JSONB ``year`` is mostly an int but legacy rows have stored lists
+            # (``[2022]``) and the occasional raw string. Gate the ``::int``
+            # cast behind a regex so non-numeric values silently fall out
+            # instead of aborting the whole backfill.
+            stmt = stmt.where(
+                text(
+                    "(CASE WHEN (attributes->>'year') ~ '^-?[0-9]+$' "
+                    "THEN (attributes->>'year')::int END) >= :since_year"
+                ).bindparams(since_year=since)
+            )
+
+        if check_vectors:
+            logger.info("Checking items that already have a synopsis vector")
+            stmt = stmt.where(IgnoreItem.synopsis_vector.is_not(None))
+        elif not reindex_all:
+            logger.info("Excluding items that already have a synopsis vector")
+            stmt = stmt.where(IgnoreItem.synopsis_vector.is_(None))
+        stmt = stmt.order_by(IgnoreItem.id.desc())
+        if limit:
+            logger.info(f"Limiting to {limit} items")
+            stmt = stmt.limit(limit)
+        items = list((await session.execute(stmt)).scalars())
+        logger.info(f"Found {len(items)} items to process")
+        updated_count = 0
+
+        for item in items:
+            logger.info(f"Processing item {item.uid}")
+            attrs = item.attributes or {}
+            try:
+                if query_rules and await should_ignore_by_rules(item):
+                    logger.info(
+                        f"Skipping item {item.uid} because it's disqualified by rules"
+                    )
+                    continue
+            except Exception as e:
+                logger.error(f"Error evaluating rules for item {item.uid}: {e}")
+                continue
+
+            title = item.checked_title or item.title
+            year = _year_from_attrs(attrs)
+            genres = _to_list_of_str((attrs).get("genres"))
+            language = _to_list_of_str((attrs).get("originalLanguage"))
+
+            synopsis = attrs.get("ai", {}).get("synopsis")
+
+            if force or synopsis is None:
+                logger.info(f"Generating synopsis for {item.uid}")
+                synopsis, _synopsis_failure = await agenerate_synopsis_for_candidate(
+                    title, year, genres, language, item.item_type
                 )
-                continue
-        except Exception as e:
-            logger.error(f"Error evaluating rules for item {item.uid}: {e}")
-            continue
+                if synopsis:
+                    ai = attrs.get("ai", {})
+                    ai["synopsis"] = synopsis
+                    attrs["ai"] = ai
 
-        title = item.checked_title or item.title
-        year = _year_from_attrs(attrs)
-        genres = _to_list_of_str((attrs).get("genres"))
-        language = _to_list_of_str((attrs).get("originalLanguage"))
-
-        synopsis = attrs.get("ai", {}).get("synopsis")
-
-        if force or synopsis is None:
-            logger.info(f"Generating synopsis for {item.uid}")
-            synopsis, _synopsis_failure = generate_synopsis_for_candidate(
-                title, year, genres, language, item.item_type
-            )
-            if synopsis:
-                ai = attrs.get("ai", {})
-                ai["synopsis"] = synopsis
+            # Drop the dead pointer from the Weaviate era.
+            ai = attrs.get("ai")
+            if isinstance(ai, dict) and "weaviate_uuid" in ai:
+                ai.pop("weaviate_uuid", None)
                 attrs["ai"] = ai
 
-        # Drop the dead pointer from the Weaviate era.
-        ai = attrs.get("ai")
-        if isinstance(ai, dict) and "weaviate_uuid" in ai:
-            ai.pop("weaviate_uuid", None)
-            attrs["ai"] = ai
+            if synopsis:
+                try:
+                    attrs = await upsert_item_vector(
+                        attrs, item.item_type, item.uid, title, synopsis
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to write vector for {item.uid}: {e}")
+                    raise
 
-        if synopsis:
-            try:
-                attrs = upsert_item_vector(
-                    attrs, item.item_type, item.uid, title, synopsis
+            if dry_run:
+                print(
+                    json.dumps(
+                        {
+                            "uid": item.uid,
+                            "type": item.item_type,
+                            "title": title,
+                            "synopsis_added": bool(synopsis),
+                        },
+                        indent=2,
+                    )
                 )
-            except Exception as e:
-                logger.error(f"Failed to write vector for {item.uid}: {e}")
-                raise
+            else:
+                logger.info(f"Updating item {item.uid}")
+                item.attributes = attrs
+                flag_modified(item, "attributes")
+                session.add(item)
+                await session.commit()
+                updated_count += 1
 
-        if dry_run:
-            print(
-                json.dumps(
-                    {
-                        "uid": item.uid,
-                        "type": item.item_type,
-                        "title": title,
-                        "synopsis_added": bool(synopsis),
-                    },
-                    indent=2,
-                )
-            )
-        else:
-            logger.info(f"Updating item {item.uid}")
-            item.attributes = attrs
-            flag_modified(item, "attributes")
-            session.add(item)
-            session.commit()
-            updated_count += 1
-
-    print(f"Backfill complete. Updated {updated_count} item(s).")
+        print(f"Backfill complete. Updated {updated_count} item(s).")
 
 
 def main() -> None:
@@ -276,16 +273,18 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    backfill(
-        args.type,
-        args.limit,
-        args.dry_run,
-        args.force,
-        args.reindex_all,
-        args.check_vectors,
-        not args.skip_rules,
-        int(args.since or datetime.now().year),
-        args.added_only,
+    asyncio.run(
+        backfill(
+            args.type,
+            args.limit,
+            args.dry_run,
+            args.force,
+            args.reindex_all,
+            args.check_vectors,
+            not args.skip_rules,
+            int(args.since or datetime.now().year),
+            args.added_only,
+        )
     )
 
 
