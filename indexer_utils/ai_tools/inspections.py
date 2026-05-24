@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 
 from agents import RunContextWrapper
+from sqlalchemy import select
 
 from ..models import IgnoreItem, MovieRecommendationRecord
 from ..plex_utils import aget_plex_details, aget_recently_played
@@ -64,12 +65,13 @@ async def get_item_details(
     if not uid:
         return {"error": "uid is required"}
 
-    with db_session() as session:
-        row = (
-            session.query(IgnoreItem)
-            .filter(IgnoreItem.item_type == ctx.item_type, IgnoreItem.uid == uid)
-            .first()
+    async with db_session() as session:
+        result = await session.execute(
+            select(IgnoreItem)
+            .where(IgnoreItem.item_type == ctx.item_type, IgnoreItem.uid == uid)
+            .limit(1)
         )
+        row = result.scalars().first()
         if row is None:
             return {"error": f"no {ctx.item_type} item with uid {uid}"}
         attrs = row.attributes or {}
@@ -185,7 +187,7 @@ async def get_user_history(
 
     rec_history: List[Dict[str, Any]] = []
     try:
-        records = MovieRecommendationRecord.recent_history(limit)
+        records = await MovieRecommendationRecord.recent_history(limit)
         for r in list(records)[:limit]:
             rec_history.append(
                 {
@@ -413,17 +415,18 @@ async def check_added_history(
     if days_back is not None:
         cutoff_ts = int(datetime.now(tz=timezone.utc).timestamp()) - days_back * 86400
 
-    with db_session() as session:
-        q = session.query(IgnoreItem).filter(
+    async with db_session() as session:
+        stmt = select(IgnoreItem).where(
             IgnoreItem.added.is_(True),
             IgnoreItem.created_at.isnot(None),
         )
         if requested_type != "any":
-            q = q.filter(IgnoreItem.item_type == requested_type)
+            stmt = stmt.where(IgnoreItem.item_type == requested_type)
         if cutoff_ts is not None:
-            q = q.filter(IgnoreItem.created_at >= cutoff_ts)
-        rows = q.order_by(IgnoreItem.created_at.desc()).limit(limit).all()
-        snapshots: List[IgnoreItem] = list(rows)
+            stmt = stmt.where(IgnoreItem.created_at >= cutoff_ts)
+        stmt = stmt.order_by(IgnoreItem.created_at.desc()).limit(limit)
+        result = await session.execute(stmt)
+        snapshots: List[IgnoreItem] = list(result.scalars())
         for r in snapshots:
             session.expunge(r)
 

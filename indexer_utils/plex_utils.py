@@ -253,7 +253,7 @@ def iter_plex_library_items() -> Iterable[Dict[str, Any]]:
                 yield normalized
 
 
-def scan_and_index_plex_library() -> Dict[str, int]:
+async def scan_and_index_plex_library() -> Dict[str, int]:
     """Scan all Plex libraries and upsert IgnoreItem rows for each item.
 
     Items found in Plex are marked ``added=True`` and ``ignore=True`` so the
@@ -261,6 +261,8 @@ def scan_and_index_plex_library() -> Dict[str, int]:
     into the ``attributes`` JSON without clobbering existing AI fields.
     """
     # Local import to avoid a circular import with ``models`` at module load.
+    from sqlalchemy import select
+
     from .models import IgnoreItem
     from .session import db_session
 
@@ -271,7 +273,7 @@ def scan_and_index_plex_library() -> Dict[str, int]:
     started = time.monotonic()
     logger.info("Plex library scan starting")
     BATCH = 100
-    with db_session() as session:
+    async with db_session() as session:
         for record in iter_plex_library_items():
             seen += 1
             if seen % 500 == 0:
@@ -284,12 +286,12 @@ def scan_and_index_plex_library() -> Dict[str, int]:
             # There is no unique constraint on (item_type, uid) so historical
             # races can leave duplicates. Take the lowest-id row as canonical
             # and merge into it; ``.one_or_none()`` would crash here.
-            matches = (
-                session.query(IgnoreItem)
+            result = await session.execute(
+                select(IgnoreItem)
                 .filter_by(item_type=record["item_type"], uid=record["uid"])
                 .order_by(IgnoreItem.id)
-                .all()
             )
+            matches = list(result.scalars())
             if not matches:
                 session.add(
                     IgnoreItem(
@@ -326,8 +328,8 @@ def scan_and_index_plex_library() -> Dict[str, int]:
                 existing.ignore = True
                 updated += 1
             if seen % BATCH == 0:
-                session.commit()
-        session.commit()
+                await session.commit()
+        await session.commit()
     elapsed = time.monotonic() - started
     logger.info(
         "Plex library scan complete in %.1fs: %d items, %d new, %d updated, %d duplicate rows seen",

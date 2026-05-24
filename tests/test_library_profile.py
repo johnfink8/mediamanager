@@ -7,61 +7,47 @@ Covers the two functions the recommendation flow depends on:
   each distribution so the model doesn't have to derive it.
 """
 
-import os
+import pytest_asyncio
 
-import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
-
-os.environ.setdefault("OPENAI_API_KEY", "test-library-profile")
-
-from indexer_utils.library_profile import (  # noqa: E402
+from indexer_utils.library_profile import (
     compute_candidate_match,
     compute_library_profile,
 )
-from indexer_utils.models import IgnoreItem  # noqa: E402
-from indexer_utils.session import Base  # noqa: E402
+from indexer_utils.models import IgnoreItem
+from indexer_utils.session import db_session
 
 
-@pytest.fixture
-def session():
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    Base.metadata.create_all(engine)
-    SessionLocal = sessionmaker(bind=engine)
-    with SessionLocal() as s:
+@pytest_asyncio.fixture
+async def session():
+    async with db_session() as s:
         yield s
 
 
-def _add(session, **kwargs):
+async def _add(session, **kwargs):
     defaults = dict(item_type="mv", ignore=True, shown=True, added=True)
     defaults.update(kwargs)
     item = IgnoreItem(**defaults)
     session.add(item)
-    session.commit()
+    await session.commit()
     return item
 
 
-def test_profile_counts_only_added(session) -> None:
+async def test_profile_counts_only_added(session) -> None:
     """Rejected and pending items don't contribute to the profile distributions."""
-    _add(
+    await _add(
         session,
         uid="add-1",
         title="Liked",
         attributes={"genres": ["Drama"], "year": 2020, "studio": "A24"},
     )
-    _add(
+    await _add(
         session,
         uid="rej-1",
         title="Rejected",
         added=False,
         attributes={"genres": ["Drama"], "year": 2020, "studio": "A24"},
     )
-    _add(
+    await _add(
         session,
         uid="pen-1",
         title="Pending",
@@ -71,37 +57,37 @@ def test_profile_counts_only_added(session) -> None:
         attributes={"genres": ["Drama"], "year": 2020, "studio": "A24"},
     )
 
-    profile = compute_library_profile(session, "mv")
+    profile = await compute_library_profile(session, "mv")
     assert profile["total_added"] == 1
     assert profile["top_genres"] == [{"name": "Drama", "count": 1, "share": 1.0}]
     assert profile["top_studios"] == [{"name": "A24", "count": 1, "share": 1.0}]
 
 
-def test_profile_ranks_by_count(session) -> None:
+async def test_profile_ranks_by_count(session) -> None:
     """Genres are ordered by frequency; shares reflect total adds."""
     for i in range(5):
-        _add(
+        await _add(
             session,
             uid=f"c-{i}",
             title=f"Comedy {i}",
             attributes={"genres": ["Comedy"]},
         )
     for i in range(3):
-        _add(
+        await _add(
             session,
             uid=f"d-{i}",
             title=f"Drama {i}",
             attributes={"genres": ["Drama"]},
         )
     for i in range(2):
-        _add(
+        await _add(
             session,
             uid=f"h-{i}",
             title=f"Horror {i}",
             attributes={"genres": ["Horror"]},
         )
 
-    profile = compute_library_profile(session, "mv")
+    profile = await compute_library_profile(session, "mv")
     assert profile["total_added"] == 10
     assert [(g["name"], g["count"]) for g in profile["top_genres"]] == [
         ("Comedy", 5),
@@ -111,13 +97,18 @@ def test_profile_ranks_by_count(session) -> None:
     assert profile["top_genres"][0]["share"] == 0.5
 
 
-def test_profile_handles_list_and_scalar_attrs(session) -> None:
+async def test_profile_handles_list_and_scalar_attrs(session) -> None:
     """Genres / language stored as both list[str] and bare str must merge cleanly."""
-    _add(session, uid="a", title="a", attributes={"genres": ["Horror"]})
-    _add(session, uid="b", title="b", attributes={"genres": "Horror"})
-    _add(session, uid="c", title="c", attributes={"genres": ["Horror", "Thriller"]})
+    await _add(session, uid="a", title="a", attributes={"genres": ["Horror"]})
+    await _add(session, uid="b", title="b", attributes={"genres": "Horror"})
+    await _add(
+        session,
+        uid="c",
+        title="c",
+        attributes={"genres": ["Horror", "Thriller"]},
+    )
 
-    profile = compute_library_profile(session, "mv")
+    profile = await compute_library_profile(session, "mv")
     horror_count = next(
         g["count"] for g in profile["top_genres"] if g["name"] == "Horror"
     )
@@ -128,20 +119,20 @@ def test_profile_handles_list_and_scalar_attrs(session) -> None:
     assert thriller_count == 1
 
 
-def test_profile_decade_bucketing(session) -> None:
-    _add(session, uid="x", title="x", attributes={"year": 2024})
-    _add(session, uid="y", title="y", attributes={"year": 1987})
-    _add(session, uid="z", title="z", attributes={"year": 2021})
+async def test_profile_decade_bucketing(session) -> None:
+    await _add(session, uid="x", title="x", attributes={"year": 2024})
+    await _add(session, uid="y", title="y", attributes={"year": 1987})
+    await _add(session, uid="z", title="z", attributes={"year": 2021})
 
-    profile = compute_library_profile(session, "mv")
+    profile = await compute_library_profile(session, "mv")
     decades = {d["decade"]: d["count"] for d in profile["decade_distribution"]}
     assert decades == {2020: 2, 1980: 1}
 
 
-def test_profile_isolates_item_type(session) -> None:
+async def test_profile_isolates_item_type(session) -> None:
     """A TV row doesn't leak into the movie profile and vice versa."""
-    _add(session, uid="mv1", title="mv", attributes={"genres": ["Action"]})
-    _add(
+    await _add(session, uid="mv1", title="mv", attributes={"genres": ["Action"]})
+    await _add(
         session,
         uid="tv1",
         title="tv",
@@ -149,32 +140,32 @@ def test_profile_isolates_item_type(session) -> None:
         attributes={"genres": ["Comedy"], "network": "HBO"},
     )
 
-    mv_profile = compute_library_profile(session, "mv")
-    tv_profile = compute_library_profile(session, "tv")
+    mv_profile = await compute_library_profile(session, "mv")
+    tv_profile = await compute_library_profile(session, "tv")
     assert mv_profile["total_added"] == 1
     assert tv_profile["total_added"] == 1
     assert "top_networks" in tv_profile and "top_studios" not in tv_profile
     assert "top_studios" in mv_profile and "top_networks" not in mv_profile
 
 
-def test_candidate_match_resolves_ranks(session) -> None:
+async def test_candidate_match_resolves_ranks(session) -> None:
     """The candidate's genres get pre-resolved into ranks the model can read."""
     for i in range(5):
-        _add(
+        await _add(
             session,
             uid=f"c-{i}",
             title=f"c{i}",
             attributes={"genres": ["Comedy"], "studio": "Universal"},
         )
     for i in range(3):
-        _add(
+        await _add(
             session,
             uid=f"h-{i}",
             title=f"h{i}",
             attributes={"genres": ["Horror"], "studio": "Blumhouse"},
         )
 
-    profile = compute_library_profile(session, "mv")
+    profile = await compute_library_profile(session, "mv")
     candidate_attrs = {
         "genres": ["Horror", "Mystery"],
         "studio": ["Blumhouse"],
@@ -195,26 +186,26 @@ def test_candidate_match_resolves_ranks(session) -> None:
     assert studios["Blumhouse"]["rank"] == 2
 
 
-def test_candidate_match_unranked_for_unknown_director(session) -> None:
-    _add(session, uid="x", title="x", attributes={"director": "Known Director"})
-    profile = compute_library_profile(session, "mv")
+async def test_candidate_match_unranked_for_unknown_director(session) -> None:
+    await _add(session, uid="x", title="x", attributes={"director": "Known Director"})
+    profile = await compute_library_profile(session, "mv")
     match = compute_candidate_match(profile, {"director": "Stranger"})
     assert match["director"]["rank"] is None
 
 
-def test_candidate_match_decade_share(session) -> None:
+async def test_candidate_match_decade_share(session) -> None:
     for y in [2024, 2024, 2024, 1995]:
-        _add(session, uid=f"y-{y}-{id(y)}", title="x", attributes={"year": y})
-    profile = compute_library_profile(session, "mv")
+        await _add(session, uid=f"y-{y}-{id(y)}", title="x", attributes={"year": y})
+    profile = await compute_library_profile(session, "mv")
     match = compute_candidate_match(profile, {"year": 2021})
     # 2021 candidate → 2020s decade → 3 of 4 adds = 0.75 share.
     assert match["decade"]["decade"] == 2020
     assert match["decade"]["share_of_added"] == 0.75
 
 
-def test_empty_library_profile(session) -> None:
+async def test_empty_library_profile(session) -> None:
     """No added items shouldn't blow up."""
-    profile = compute_library_profile(session, "mv")
+    profile = await compute_library_profile(session, "mv")
     assert profile["total_added"] == 0
     assert profile["top_genres"] == []
     assert profile["decade_distribution"] == []

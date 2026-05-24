@@ -14,16 +14,17 @@ discussion.
 from typing import Any, Dict, List, Optional
 
 from agents import RunContextWrapper
+from sqlalchemy import select
 
 from ..models import IgnoreItem
 from ..session import db_session
-from ..vector_search import asearch_by_synopsis
+from ..vector_search import synopsis_select
 from .base import ToolContext
 from .safe_tool import safe_tool
 from .shared import (
     attrs_get_genres,
+    build_filter_clauses,
     enforce_result_budget,
-    query_db_items,
     row_passes_filters,
     summarize_item,
 )
@@ -134,15 +135,6 @@ async def search_similar_by_synopsis(
     limit = max(1, min(int(limit or 10), 25))
 
     candidate_uid = ctx.candidate.get("uid")
-    raw = await asearch_by_synopsis(
-        query,
-        limit,
-        ctx.item_type,
-        added_only=True,
-        exclude_uid=candidate_uid,
-    )
-    uids = [r["uid"] for r in raw if r.get("uid")]
-    db_rows = query_db_items(ctx.item_type, uids)
     filters = _filter_dict(
         language,
         director,
@@ -162,28 +154,31 @@ async def search_similar_by_synopsis(
         year_max,
     )
 
+    stmt = await synopsis_select(query, ctx.item_type)
+    if stmt is None:
+        return {"results": []}
+    stmt = stmt.where(IgnoreItem.added.is_(True))
+    if candidate_uid:
+        stmt = stmt.where(IgnoreItem.uid != candidate_uid)
+    for clause in build_filter_clauses(filters):
+        stmt = stmt.where(clause)
+    stmt = stmt.limit(limit)
+
+    async with db_session() as session:
+        raw = (await session.execute(stmt)).all()
+
     results: List[Dict[str, Any]] = []
-    for hit in raw:
-        uid = hit.get("uid")
-        if not uid:
-            continue
-        row = db_rows.get(uid)
-        if row is None:
-            continue
-        if not row_passes_filters(row, filters):
-            continue
+    for row, distance in raw:
         summary = summarize_item(row)
         item: Dict[str, Any] = {
-            "uid": uid,
-            "title": hit.get("title"),
-            "distance": (
-                round(hit["distance"], 4) if hit.get("distance") is not None else None
-            ),
+            "uid": row.uid,
+            "title": row.title,
+            "distance": round(float(distance), 4),
         }
         for k, v in summary.items():
             if k not in ("uid", "title", "decision"):
-                # ``decision`` is always "added" by construction now — strip
-                # it from the row to avoid burning tokens on a constant.
+                # ``decision`` is always "added" by construction — strip it
+                # to avoid burning tokens on a constant.
                 item[k] = v
         results.append(item)
     return enforce_result_budget(
@@ -272,12 +267,14 @@ async def search_by_genre(
 
     candidate_uid = ctx.candidate.get("uid")
     matches: List[Dict[str, Any]] = []
-    with db_session() as session:
-        q = session.query(IgnoreItem).filter(
-            IgnoreItem.item_type == ctx.item_type,
-            IgnoreItem.added.is_(True),
+    async with db_session() as session:
+        result = await session.execute(
+            select(IgnoreItem).where(
+                IgnoreItem.item_type == ctx.item_type,
+                IgnoreItem.added.is_(True),
+            )
         )
-        for row in q.all():
+        for row in result.scalars():
             if row.uid == candidate_uid:
                 continue
             row_genres = {g.lower() for g in attrs_get_genres(row.attributes)}
@@ -377,12 +374,14 @@ async def search_by_network(
 
     candidate_uid = ctx.candidate.get("uid")
     matches: List[Dict[str, Any]] = []
-    with db_session() as session:
-        q = session.query(IgnoreItem).filter(
-            IgnoreItem.item_type == ctx.item_type,
-            IgnoreItem.added.is_(True),
+    async with db_session() as session:
+        result = await session.execute(
+            select(IgnoreItem).where(
+                IgnoreItem.item_type == ctx.item_type,
+                IgnoreItem.added.is_(True),
+            )
         )
-        for row in q.all():
+        for row in result.scalars():
             if row.uid == candidate_uid:
                 continue
             attrs = row.attributes or {}

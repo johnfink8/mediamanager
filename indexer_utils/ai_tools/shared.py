@@ -16,8 +16,24 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy import Numeric, String, and_, cast
+
 from ..models import IgnoreItem
-from ..session import db_session
+
+_NUMERIC_RE = r"^-?[0-9]+(\.[0-9]+)?$"
+
+
+def _attrs_text(key: str) -> Any:
+    """Return ``attributes->>:key`` as a postgres text expression.
+
+    Used by :func:`build_filter_clauses` to push agent-supplied filters
+    into the synopsis search SQL. Postgres-only — the synopsis search
+    only runs against the real DB, so a non-portable expression is fine
+    here. ``op('->>')`` is preferred over ``[key].astext`` so the model
+    declaration can stay generic ``JSON`` for SQLite-test compatibility.
+    """
+    return cast(IgnoreItem.attributes.op("->>")(key), String)
+
 
 logger = logging.getLogger(__name__)
 
@@ -233,6 +249,78 @@ def summarize_item(item: IgnoreItem) -> Dict[str, Any]:
     return summary
 
 
+def _numeric_clause(key: str, op: str, threshold: float) -> Any:
+    """``attributes->>key`` cast to numeric, guarded by a regex so non-numeric
+    stored values (legacy lists, free-text) silently drop instead of raising
+    a postgres cast error. Missing data fails the filter — same semantics as
+    the prior in-Python ``row_passes_filters`` (a filter that names a field
+    treats null as a fail)."""
+    expr = _attrs_text(key)
+    cmp = (
+        cast(expr, Numeric) >= threshold
+        if op == "ge"
+        else cast(expr, Numeric) <= threshold
+    )
+    return and_(expr.op("~")(_NUMERIC_RE), cmp)
+
+
+def _substr_clause(key: str, needle: str) -> Optional[Any]:
+    needle = (needle or "").strip()
+    if not needle:
+        return None
+    return _attrs_text(key).icontains(needle, autoescape=True)
+
+
+def build_filter_clauses(filters: Dict[str, Any]) -> List[Any]:
+    """Translate the agent-supplied filter dict to SQL WHERE expressions.
+
+    Returns a list of SQLAlchemy clauses the caller AND-s onto a Select.
+    Empty list when there are no filters. Anchored to the same field
+    conventions as ``summarize_item`` and the agent tool argument names.
+    """
+    if not filters:
+        return []
+    clauses: List[Any] = []
+
+    for col_key, filter_key in (
+        ("originalLanguage", "language"),
+        ("director", "director"),
+    ):
+        c = _substr_clause(col_key, filters.get(filter_key) or "")
+        if c is not None:
+            clauses.append(c)
+
+    if filters.get("runtime_min") is not None:
+        clauses.append(_numeric_clause("runtime", "ge", filters["runtime_min"]))
+    if filters.get("runtime_max") is not None:
+        clauses.append(_numeric_clause("runtime", "le", filters["runtime_max"]))
+
+    if filters.get("rating_min") is not None:
+        clauses.append(_numeric_clause("rating_value", "ge", filters["rating_min"]))
+    if filters.get("rating_votes_min") is not None:
+        clauses.append(
+            _numeric_clause("rating_votes", "ge", filters["rating_votes_min"])
+        )
+
+    for label, value_key, votes_key in _RATING_SOURCES:
+        if filters.get(f"{label}_min") is not None:
+            clauses.append(_numeric_clause(value_key, "ge", filters[f"{label}_min"]))
+        if filters.get(f"{label}_votes_min") is not None:
+            clauses.append(
+                _numeric_clause(votes_key, "ge", filters[f"{label}_votes_min"])
+            )
+    for label, value_key in _CRITIC_SOURCES:
+        if filters.get(f"{label}_min") is not None:
+            clauses.append(_numeric_clause(value_key, "ge", filters[f"{label}_min"]))
+
+    if filters.get("year_min") is not None:
+        clauses.append(_numeric_clause("year", "ge", filters["year_min"]))
+    if filters.get("year_max") is not None:
+        clauses.append(_numeric_clause("year", "le", filters["year_max"]))
+
+    return clauses
+
+
 def row_passes_filters(item: IgnoreItem, filters: Dict[str, Any]) -> bool:
     """Return True if the row passes every specified filter. Missing data
     on the row counts as a fail for any filter that names that field —
@@ -303,15 +391,3 @@ def row_passes_filters(item: IgnoreItem, filters: Dict[str, Any]) -> bool:
             return False
 
     return True
-
-
-def query_db_items(item_type: str, uids: List[str]) -> Dict[str, IgnoreItem]:
-    if not uids:
-        return {}
-    with db_session() as session:
-        rows = (
-            session.query(IgnoreItem)
-            .filter(IgnoreItem.item_type == item_type, IgnoreItem.uid.in_(uids))
-            .all()
-        )
-        return {row.uid: row for row in rows}

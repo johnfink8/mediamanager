@@ -1,12 +1,15 @@
 .idea/
 .DS_Store
 *.sql
+!scripts/postgres-init/*.sql
 *.conf
 !nginx.test.conf
 auth.users
 db.sqlite3
 .work/
 .env
+.env.*
+!.env.sample
 Keys/
 ssl/
 .swc/

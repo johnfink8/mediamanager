@@ -1,11 +1,13 @@
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, AsyncIterator, Dict, List, Optional, Type, Union
 
 import strawberry
-from sqlalchemy import Integer, and_, func, or_
+from sqlalchemy import and_, cast, func, or_, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Query
 from sqlalchemy.orm.attributes import flag_modified
 from strawberry.relay import GlobalID
@@ -41,7 +43,6 @@ class FilterSpec:
 
 def apply_filters(query: Query, spec: FilterSpec) -> Query:
     subfield_name = None
-    print("spec", spec)
     if "." in spec.field:
         field_name, subfield_name = spec.field.split(".", 1)
     else:
@@ -53,60 +54,35 @@ def apply_filters(query: Query, spec: FilterSpec) -> Query:
     op = spec.op
     value = spec.value
 
-    # Cross-database JSON filtering (works for both SQLite and MySQL):
-    # - .contains(value) checks if value is present as a substring in any element of the list
-    # - This is not an exact match, but works cross-db
-    def _cast_json(element):
-        if hasattr(element, "astext"):
-            element = element.astext
-        return func.cast(element, Integer)
-
-    def _numeric_expr():
-        raw_first = func.nullif(func.json_extract(field, "$[0]"), "null")
-        raw_root = func.nullif(func.json_extract(field, "$"), "null")
-        cast_first = func.cast(raw_first, Integer)
-        cast_root = func.cast(raw_root, Integer)
-        cast_direct = _cast_json(func.nullif(field, "null"))
-        return func.coalesce(cast_first, cast_root, cast_direct)
-
-    def _numeric_condition(operator: str, compare_value: int):
-        numeric_value = _numeric_expr()
-        if operator == "lt":
-            return numeric_value < compare_value
-        if operator == "gt":
-            return numeric_value > compare_value
-        if operator == "lte":
-            return numeric_value <= compare_value
-        if operator == "gte":
-            return numeric_value >= compare_value
-        raise ValueError(f"Unsupported numeric operator: {operator}")
+    def _contains(needle: str):
+        """JSONB ``field @> [needle]`` — does the attribute list contain
+        the literal value? Both sides need to be jsonb on postgres, so
+        the needle is JSON-encoded and explicitly cast."""
+        return field.op("@>")(cast(json.dumps([needle]), JSONB))
 
     if op == "eq":
-        query = query.where(field.contains(value))
+        query = query.where(_contains(value))
     elif op == "neq":
-        query = query.where(~field.contains(value))
+        query = query.where(~_contains(value))
     elif op == "in":
         values = [v.strip() for v in value.split(",")]
-        query = query.where(or_(*[field.contains(v) for v in values]))
+        query = query.where(or_(*[_contains(v) for v in values]))
     elif op == "not_in":
         values = [v.strip() for v in value.split(",")]
-        query = query.where(and_(*[~field.contains(v) for v in values]))
-    elif op == "lt":
-        query = query.where(field.is_not(None))
-        query = query.where(_numeric_condition("lt", int(value)))
-    elif op == "gt":
-        query = query.where(field.is_not(None))
-        query = query.where(_numeric_condition("gt", int(value)))
-    elif op == "lte":
-        query = query.where(field.is_not(None))
-        query = query.where(_numeric_condition("lte", int(value)))
-    elif op == "gte":
-        query = query.where(field.is_not(None))
-        query = query.where(_numeric_condition("gte", int(value)))
+        query = query.where(and_(*[~_contains(v) for v in values]))
     elif op == "contains":
-        query = query.where(field.contains(value))
+        query = query.where(_contains(value))
     elif op == "not_contains":
-        query = query.where(~field.contains(value))
+        query = query.where(~_contains(value))
+    elif op in ("lt", "gt", "lte", "gte"):
+        # Numeric filtering through the JSONB attribute path is broken on the
+        # postgres side — the previous implementation used ``json_extract``
+        # which is SQLite-only. Use ``FilterRule`` for these operators only
+        # via ``filters.should_ignore_by_rules``, which evaluates in Python.
+        raise ValueError(
+            f"Numeric operator {op!r} is not supported by apply_filters on "
+            "postgres; use should_ignore_by_rules instead."
+        )
     else:
         raise ValueError(f"Invalid operator: {spec.op}")
     return query
@@ -307,12 +283,12 @@ class IgnoreItemType:
         )
 
     @classmethod
-    def get_open(
+    async def get_open(
         cls: Type["IgnoreItemType"],
         item_type: Optional[str] = None,
     ) -> List["IgnoreItemType"]:
-        with db_session() as session:
-            query = session.query(IgnoreItem).where(
+        async with db_session() as session:
+            stmt = select(IgnoreItem).where(
                 IgnoreItem.ignore.is_(False),
                 or_(
                     IgnoreItem.defer_until.is_(None),
@@ -320,8 +296,8 @@ class IgnoreItemType:
                 ),
             )
             if item_type:
-                query = query.where(IgnoreItem.item_type == item_type)
-            items = query.all()
+                stmt = stmt.where(IgnoreItem.item_type == item_type)
+            items = list((await session.execute(stmt)).scalars())
 
             def sort_key(item: IgnoreItem) -> "tuple[int, float, float]":
                 score = ((item.attributes or {}).get("ai") or {}).get("score")
@@ -346,8 +322,8 @@ class IgnoreItemList:
         return GlobalID("ignoreitemlist", self.item_type or "")
 
     @strawberry.field
-    def nodes(self: "IgnoreItemList") -> List[IgnoreItemType]:
-        return IgnoreItemType.get_open(item_type=self.item_type)
+    async def nodes(self: "IgnoreItemList") -> List[IgnoreItemType]:
+        return await IgnoreItemType.get_open(item_type=self.item_type)
 
 
 @strawberry.type(name="FilterRule")
@@ -392,9 +368,9 @@ class FilterRuleList:
         return ID("filterrulelist")
 
     @strawberry.field
-    def nodes(self) -> List[FilterRuleType]:
-        with db_session() as session:
-            rules = session.query(FilterRule).all()
+    async def nodes(self) -> List[FilterRuleType]:
+        async with db_session() as session:
+            rules = list((await session.execute(select(FilterRule))).scalars())
             return [FilterRuleType.from_sqlalchemy(rule) for rule in rules]
 
 
@@ -413,15 +389,15 @@ class HistoricalIgnoreItemList:
     page_info: PageInfo
 
     @staticmethod
-    def get_historical(
+    async def get_historical(
         filters: Optional[List[Filter]] = None,
         limit: int = 20,
         offset: int = 0,
         apply_inverted_permanent_rules: bool = False,
         search: Optional[str] = None,
     ) -> "HistoricalIgnoreItemList":
-        with db_session() as session:
-            query = session.query(IgnoreItem).where(IgnoreItem.ignore.is_(True))
+        async with db_session() as session:
+            query = select(IgnoreItem).where(IgnoreItem.ignore.is_(True))
             item_type_filter = next(
                 (f.type for f in (filters or []) if f.type is not None),
                 None,
@@ -441,10 +417,14 @@ class HistoricalIgnoreItemList:
             # Optionally apply the inverted permanent rules for this type
             if apply_inverted_permanent_rules:
                 if item_type_filter:
-                    rules = (
-                        session.query(FilterRule)
-                        .filter_by(item_type=item_type_filter, enabled=True)
-                        .all()
+                    rules = list(
+                        (
+                            await session.execute(
+                                select(FilterRule).filter_by(
+                                    item_type=item_type_filter, enabled=True
+                                )
+                            )
+                        ).scalars()
                     )
                     for rule in rules:
                         if rule.attribute in [
@@ -471,8 +451,14 @@ class HistoricalIgnoreItemList:
                 IgnoreItem.created_at.desc(),
                 IgnoreItem.id.desc(),
             )
-            total_count = query.count()
-            items = query.offset(offset).limit(limit).all()
+            total_count = (
+                await session.execute(
+                    select(func.count()).select_from(query.subquery())
+                )
+            ).scalar_one()
+            items = list(
+                (await session.execute(query.offset(offset).limit(limit))).scalars()
+            )
             nodes = [IgnoreItemType.from_sqlalchemy(item) for item in items]
             has_next_page = offset + limit < total_count
             has_previous_page = offset > 0
@@ -611,7 +597,7 @@ class SchemaQuery:
         )
 
     @strawberry.field
-    def historical_items(
+    async def historical_items(
         self: "SchemaQuery",
         filters: Optional[List[Filter]] = None,
         limit: int = 20,
@@ -619,7 +605,7 @@ class SchemaQuery:
         apply_inverted_permanent_rules: bool = False,
         search: Optional[str] = None,
     ) -> HistoricalIgnoreItemList:
-        return HistoricalIgnoreItemList.get_historical(
+        return await HistoricalIgnoreItemList.get_historical(
             filters=filters,
             limit=limit,
             offset=offset,
@@ -634,10 +620,10 @@ class SchemaQuery:
         return [ScheduledJobType.from_dict(d) for d in list_scheduled_jobs()]
 
     @strawberry.field
-    def movie_recommendation(
+    async def movie_recommendation(
         self: "SchemaQuery", prompt: Optional[str] = None
     ) -> Optional[MovieRecommendationType]:
-        result = recommend_movie(prompt)
+        result = await recommend_movie(prompt)
         if result is None:
             return None
         return MovieRecommendationType.from_result(result)
@@ -708,9 +694,9 @@ class MutationReturn:
 @strawberry.type
 class Mutation:
     @strawberry.mutation
-    def add_item(self: "Mutation", data: AddItemInput) -> IgnoreItemType:
-        with db_session() as session:
-            item = session.query(IgnoreItem).get(data.id.node_id)
+    async def add_item(self: "Mutation", data: AddItemInput) -> IgnoreItemType:
+        async with db_session() as session:
+            item = await session.get(IgnoreItem, data.id.node_id)
             if not item:
                 raise Exception(f"Item not found: {data.id.node_id}")
             if item.item_type == "mv":
@@ -721,26 +707,26 @@ class Mutation:
             item.added = True
             item.ignore = True
             session.add(item)
-            session.commit()
+            await session.commit()
             return IgnoreItemType.from_sqlalchemy(item)
 
     @strawberry.mutation
-    def accept_all_recommended(
+    async def accept_all_recommended(
         self: "Mutation", data: AcceptAllRecommendedInput
     ) -> AcceptAllRecommendedResult:
         added_count = 0
         ignored_count = 0
         for gid in data.ids:
             try:
-                with db_session() as session:
-                    item = session.query(IgnoreItem).get(gid.node_id)
+                async with db_session() as session:
+                    item = await session.get(IgnoreItem, gid.node_id)
                     if not item:
                         continue
                     ai = (item.attributes or {}).get("ai", {})
                     if ai.get("value") is not True:
                         item.ignore = True
                         session.add(item)
-                        session.commit()
+                        await session.commit()
                         ignored_count += 1
                         continue
                     if item.item_type == "mv":
@@ -750,7 +736,7 @@ class Mutation:
                     item.added = True
                     item.ignore = True
                     session.add(item)
-                    session.commit()
+                    await session.commit()
                     added_count += 1
             except Exception:
                 logger.exception("Failed to add item %s", gid)
@@ -761,14 +747,14 @@ class Mutation:
         )
 
     @strawberry.mutation
-    def delete_item(self: "Mutation", data: AddItemInput) -> IgnoreItemType:
-        with db_session() as session:
-            item = session.query(IgnoreItem).get(data.id.node_id)
+    async def delete_item(self: "Mutation", data: AddItemInput) -> IgnoreItemType:
+        async with db_session() as session:
+            item = await session.get(IgnoreItem, data.id.node_id)
             if not item:
                 raise Exception("Item not found")
             item.ignore = True
             session.add(item)
-            session.commit()
+            await session.commit()
             return IgnoreItemType.from_sqlalchemy(item)
 
     @strawberry.input
@@ -777,23 +763,24 @@ class Mutation:
         added: bool
 
     @strawberry.mutation
-    def set_item_added(self: "Mutation", data: SetItemAddedInput) -> IgnoreItemType:
-        with db_session() as session:
-            item = session.query(IgnoreItem).get(data.id.node_id)
+    async def set_item_added(
+        self: "Mutation", data: SetItemAddedInput
+    ) -> IgnoreItemType:
+        async with db_session() as session:
+            item = await session.get(IgnoreItem, data.id.node_id)
             if not item:
                 raise Exception("Item not found")
             item.added = bool(data.added)
             session.add(item)
-            session.commit()
+            await session.commit()
             return IgnoreItemType.from_sqlalchemy(item)
 
     @strawberry.mutation
     async def retry_ai(self: "Mutation", data: RetryAiInput) -> IgnoreItemType:
-        # Read item snapshot in a sync session, run the agent off-session,
-        # then write results back. Holding a session open across an await
-        # boundary would pin a connection for the whole agent run.
-        with db_session() as session:
-            item = session.query(IgnoreItem).get(data.id.node_id)
+        # Read snapshot, drop the session, run the agent (don't pin a
+        # connection across an await boundary), then write results back.
+        async with db_session() as session:
+            item = await session.get(IgnoreItem, data.id.node_id)
             if not item:
                 raise Exception("Item not found")
             item_type = item.item_type
@@ -805,33 +792,33 @@ class Mutation:
 
         refreshed_attrs = await annotate_with_ai_async(item_type, uid, title, attrs)
 
-        with db_session() as session:
-            item = session.query(IgnoreItem).get(data.id.node_id)
+        async with db_session() as session:
+            item = await session.get(IgnoreItem, data.id.node_id)
             if not item:
                 raise Exception("Item not found")
             item.attributes = refreshed_attrs
             flag_modified(item, "attributes")
             session.add(item)
-            session.commit()
-            session.refresh(item)
+            await session.commit()
+            await session.refresh(item)
             return IgnoreItemType.from_sqlalchemy(item)
 
     @strawberry.mutation
     async def recheck_visible(self: "Mutation", item_type: str) -> List[IgnoreItemType]:
         # Phase 1: read items + refresh metadata.
-        with db_session() as session:
+        async with db_session() as session:
             now = datetime.utcnow()
-            items = (
-                session.query(IgnoreItem)
-                .filter(
+            result = await session.execute(
+                select(IgnoreItem).where(
                     IgnoreItem.item_type == item_type,
                     IgnoreItem.ignore.is_(False),
                     or_(
-                        IgnoreItem.defer_until.is_(None), IgnoreItem.defer_until <= now
+                        IgnoreItem.defer_until.is_(None),
+                        IgnoreItem.defer_until <= now,
                     ),
                 )
-                .all()
             )
+            items = list(result.scalars())
             prepared: List[Dict[str, Any]] = []
             for item in items:
                 attrs = refresh_visible_item_attributes(item)
@@ -867,22 +854,26 @@ class Mutation:
         )
 
         # Phase 3: write enriched attrs back.
-        with db_session() as session:
+        async with db_session() as session:
             for p, outcome in zip(prepared, results):
                 if isinstance(outcome, BaseException):
                     logger.exception(
                         "annotate failed for %s:%s", p["item_type"], p["uid"]
                     )
                     continue
-                item: Optional[IgnoreItem] = session.query(IgnoreItem).get(p["id"])
+                item = await session.get(IgnoreItem, p["id"])
                 if item is None:
                     continue
                 item.attributes = outcome
                 flag_modified(item, "attributes")
                 session.add(item)
-            session.commit()
-            ordered = (
-                session.query(IgnoreItem).filter(IgnoreItem.id.in_(ordered_ids)).all()
+            await session.commit()
+            ordered = list(
+                (
+                    await session.execute(
+                        select(IgnoreItem).where(IgnoreItem.id.in_(ordered_ids))
+                    )
+                ).scalars()
             )
             refreshed_items: List[IgnoreItem] = sorted(
                 ordered, key=lambda r: ordered_ids.index(r.id)
@@ -890,41 +881,41 @@ class Mutation:
             return [IgnoreItemType.from_sqlalchemy(it) for it in refreshed_items]
 
     @strawberry.mutation
-    def defer_item(self: "Mutation", data: DeferItemInput) -> IgnoreItemType:
-        with db_session() as session:
-            item = session.query(IgnoreItem).get(data.id.node_id)
+    async def defer_item(self: "Mutation", data: DeferItemInput) -> IgnoreItemType:
+        async with db_session() as session:
+            item = await session.get(IgnoreItem, data.id.node_id)
             if not item:
                 raise Exception("Item not found")
             item.defer_until = datetime.utcnow() + timedelta(days=3)
             session.add(item)
-            session.commit()
+            await session.commit()
             return IgnoreItemType.from_sqlalchemy(item)
 
     @strawberry.mutation
-    def set_recommendation_preference(
+    async def set_recommendation_preference(
         self: "Mutation", data: SetRecommendationPreferenceInput
     ) -> RecommendationFeedbackType:
         try:
             record_id = int(str(data.recommendation_id))
         except (TypeError, ValueError):
             raise Exception("Invalid recommendation id")
-        with db_session() as session:
-            record = session.query(MovieRecommendationRecord).get(record_id)
+        async with db_session() as session:
+            record = await session.get(MovieRecommendationRecord, record_id)
             if record is None:
                 raise Exception("Recommendation not found")
             record.preference = data.preference
             record.updated_at = int(datetime.utcnow().timestamp())
             session.add(record)
-            session.commit()
-            session.refresh(record)
+            await session.commit()
+            await session.refresh(record)
             return RecommendationFeedbackType(
                 id=str(record.id),
                 preference=record.preference,
             )
 
     @strawberry.mutation
-    def create_filter_rule(self, data: FilterRuleInput) -> MutationReturn:
-        with db_session() as session:
+    async def create_filter_rule(self, data: FilterRuleInput) -> MutationReturn:
+        async with db_session() as session:
             rule = FilterRule(
                 item_type=data.item_type,
                 attribute=data.attribute,
@@ -933,12 +924,12 @@ class Mutation:
                 enabled=data.enabled,
             )
             session.add(rule)
-            session.commit()
+            await session.commit()
 
             # Immediately apply the new rule to all matching IgnoreItems
             # Build a query for IgnoreItems of the correct type and not already ignored
 
-            base_query = session.query(IgnoreItem).filter_by(
+            base_query = select(IgnoreItem).filter_by(
                 item_type=data.item_type, ignore=False
             )
             # Build a FilterSpec for the new rule
@@ -961,10 +952,10 @@ class Mutation:
                 value=data.value,
             )
             filtered_query = apply_filters(base_query, spec)
-            for item in filtered_query.all():
+            for item in (await session.execute(filtered_query)).scalars():
                 item.ignore = True
                 session.add(item)
-            session.commit()
+            await session.commit()
 
             ignore_items = IgnoreItemList(item_type=data.item_type)
             filter_rules = FilterRuleList()
@@ -1042,15 +1033,15 @@ class Mutation:
         return ScheduledJobType.from_dict(result)
 
     @strawberry.mutation
-    def delete_filter_rule(self, id: GlobalID) -> MutationReturn:
-        with db_session() as session:
+    async def delete_filter_rule(self, id: GlobalID) -> MutationReturn:
+        async with db_session() as session:
             i_id = int(id.node_id)
-            rule = session.query(FilterRule).get(i_id)
+            rule = await session.get(FilterRule, i_id)
             if not rule:
                 raise Exception("Rule not found")
             item_type = rule.item_type
-            session.delete(rule)
-            session.commit()
+            await session.delete(rule)
+            await session.commit()
             ignore_items = IgnoreItemList(item_type=item_type)
             filter_rules = FilterRuleList()
             return MutationReturn(ignore_items=ignore_items, filter_rules=filter_rules)

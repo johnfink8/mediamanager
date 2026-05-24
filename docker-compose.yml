@@ -106,6 +106,7 @@ services:
     image: pgvector/pgvector:pg16
     volumes:
       - pg_data:/var/lib/postgresql/data
+      - ./scripts/postgres-init:/docker-entrypoint-initdb.d:ro
     environment:
       - POSTGRES_DB=indexer_utils
       - POSTGRES_USER=indexer_utils

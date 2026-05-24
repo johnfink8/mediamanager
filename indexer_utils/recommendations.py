@@ -201,11 +201,11 @@ class MovieRecommendationResult:
     preference: Optional[RecommendationPreference]
 
 
-def _history_payload(
+async def _history_payload(
     limit: int = HISTORY_PAYLOAD_LIMIT,
 ) -> List[Dict[str, Optional[str]]]:
     try:
-        records = MovieRecommendationRecord.recent_history(limit=limit)
+        records = await MovieRecommendationRecord.recent_history(limit=limit)
     except Exception:
         logger.exception("Failed to load recommendation history")
         return []
@@ -251,7 +251,7 @@ def _build_candidates(
     return candidates
 
 
-def _choose_with_openai(
+async def _choose_with_openai(
     prompt: Optional[str], candidates: Sequence[MovieCandidate]
 ) -> Optional[Dict[str, Any]]:
     if not candidates:
@@ -271,7 +271,7 @@ def _choose_with_openai(
             }
             for c in candidates[:MAX_CANDIDATES]
         ],
-        "history": _history_payload(),
+        "history": await _history_payload(),
     }
     system_prompt = (
         "You are a movie recommendation assistant for a personal media library. "
@@ -317,7 +317,7 @@ def _resolve_openai_choice(
     return None
 
 
-def recommend_movie(
+async def recommend_movie(
     prompt: Optional[str] = None,
 ) -> Optional[MovieRecommendationResult]:
     redis_client = get_redis_client()
@@ -359,7 +359,7 @@ def recommend_movie(
     if not candidates:
         return None
 
-    openai_result = _choose_with_openai(prompt, candidates)
+    openai_result = await _choose_with_openai(prompt, candidates)
     chosen = _resolve_openai_choice(openai_result, candidates)
 
     source = "openai" if chosen and openai_result else "fallback"
@@ -378,7 +378,7 @@ def recommend_movie(
 
     record: Optional[MovieRecommendationRecord] = None
     try:
-        record = MovieRecommendationRecord.log_recommendation(
+        record = await MovieRecommendationRecord.log_recommendation(
             prompt=prompt,
             imdb_id=chosen.imdb_id,
             title=chosen.title,
