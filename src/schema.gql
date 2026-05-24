@@ -52,35 +52,6 @@ input DeferItemInput {
   id: ID!
 }
 
-input Filter {
-  type: String = null
-  attribute: String = null
-  operator: String = null
-  value: String = null
-}
-
-type FilterRule {
-  itemType: String!
-  attribute: String!
-  operator: String!
-  value: String!
-  enabled: Boolean!
-  id: ID!
-}
-
-input FilterRuleInput {
-  itemType: String!
-  attribute: String!
-  operator: String!
-  value: String!
-  enabled: Boolean! = true
-}
-
-type FilterRuleList {
-  id: ID!
-  nodes: [FilterRule!]!
-}
-
 type HistoricalIgnoreItemList {
   nodes: [IgnoreItem!]!
   pageInfo: PageInfo!
@@ -134,17 +105,10 @@ type Mutation {
   recheckVisible(itemType: String!): [IgnoreItem!]!
   deferItem(data: DeferItemInput!): IgnoreItem!
   setRecommendationPreference(data: SetRecommendationPreferenceInput!): RecommendationFeedbackType!
-  createFilterRule(data: FilterRuleInput!): MutationReturn!
   triggerScheduledJob(id: ID!): ScheduledJobType!
   pauseScheduledJob(id: ID!): ScheduledJobType!
   resumeScheduledJob(id: ID!): ScheduledJobType!
   updateScheduledJobTrigger(data: UpdateScheduledJobTriggerInput!): ScheduledJobType!
-  deleteFilterRule(id: ID!): MutationReturn!
-}
-
-type MutationReturn {
-  ignoreItems: IgnoreItemList!
-  filterRules: FilterRuleList!
 }
 
 type PageInfo {
@@ -206,9 +170,8 @@ type ScheduledJobType {
 
 type SchemaQuery {
   items(itemType: String = null): IgnoreItemList!
-  filterRules: FilterRuleList!
   checkRuns: CheckRunHistory!
-  historicalItems(filters: [Filter!] = null, limit: Int! = 20, offset: Int! = 0, applyInvertedPermanentRules: Boolean! = false, search: String = null): HistoricalIgnoreItemList!
+  historicalItems(itemType: String = null, limit: Int! = 20, offset: Int! = 0, search: String = null): HistoricalIgnoreItemList!
   scheduledJobs: [ScheduledJobType!]!
   movieRecommendation(prompt: String = null): MovieRecommendationType
 }
