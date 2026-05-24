@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 from decouple import config
 from openai import AsyncOpenAI
 from sqlalchemy import Select, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import IgnoreItem
 from .session import db_session
@@ -100,6 +101,48 @@ async def upsert_item_vector(
         # onto the row after ``IgnoreItem.create``.
         attrs["_synopsis_vector_tmp"] = vec
     return attrs
+
+
+async def synopsis_neighbor_summary(
+    session: AsyncSession,
+    item_type: str,
+    uid: str,
+    candidate_vec: List[float],
+    k: int = 20,
+    n_show: int = 6,
+) -> Optional[Dict[str, Any]]:
+    """Of the ``k`` titles most similar to the candidate by synopsis, how many
+    the user added.
+
+    The strongest taste signal we have: it measures whether the user actually
+    keeps things like *this* candidate, independent of how the genre is
+    labelled. Returns ``added_of_top`` (count added among the nearest ``k``)
+    plus the closest ``n_show`` titles with their added flag, or ``None`` when
+    the corpus has nothing to compare against.
+    """
+    dist = IgnoreItem.synopsis_vector.cosine_distance(candidate_vec).label("d")
+    rows = (
+        await session.execute(
+            select(IgnoreItem.title, IgnoreItem.added, dist)
+            .where(
+                IgnoreItem.item_type == item_type,
+                IgnoreItem.synopsis_vector.is_not(None),
+                IgnoreItem.uid != uid,
+            )
+            .order_by(dist)
+            .limit(k)
+        )
+    ).all()
+    if not rows:
+        return None
+    return {
+        "added_of_top": sum(1 for _, added, _ in rows if added),
+        "k": len(rows),
+        "nearest": [
+            {"title": title, "added": bool(added), "distance": round(float(d), 3)}
+            for title, added, d in rows[:n_show]
+        ],
+    }
 
 
 async def synopsis_select(query_text: str, item_type: str) -> Optional[Select]:
