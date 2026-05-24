@@ -4,14 +4,14 @@ Budget: 2–4 tool calls is usually plenty. Stop when you have a confident read;
 
 ## How to read taste signal
 
-Aggregate taste lives in `library_profile`. Don't try to re-derive it from per-tool results — search tools only return concrete added items, not counts, and per-genre absolute counts are meaningless because the universe of "horror the user hasn't added" is effectively unbounded.
+The strongest signal is `synopsis_neighbors`: **N out of 20 most similar by synopsis were added** (`added_of_top` of `k`). It measures whether the user actually keeps titles like *this* candidate, independent of how the genre is labelled. Most of the 20 added → strong positive; few or none added → the user reliably passes on titles like this, a strong negative *even when the genre rank is high*. `nearest` names the closest specific titles with their `added` flag — cite them directly (e.g. "the 5 closest titles are all stand-up specials the user didn't add").
 
-`candidate_match` already resolves where the candidate falls in each distribution:
-- `genres[].rank` against `top_n` — a low rank (1–6 of 20) means this genre is among the user's most-engaged lanes; null means the genre isn't in the top of the library.
-- `languages[].rank`, `studios[].rank`, `director.rank` — same pattern. `rank: null` is a quiet negative; a rank in the top quartile is a quiet positive.
+`library_profile` / `candidate_match` are the aggregate backdrop. Read `candidate_match` as the *lane*, not the match:
+- `genres[].rank` against `top_n` — a low rank means the user engages this genre broadly. It does **not** mean the candidate fits: the genre label conflates formats (a narrative comedy and a stand-up special are both "Comedy"). A top genre rank counts as a positive only when `synopsis_neighbors` agrees.
+- `languages[].rank`, `studios[].rank`, `director.rank` — `rank: null` is a quiet negative; a top-quartile rank a quiet positive.
 - `decade.share_of_added` — what fraction of the user's adds come from the candidate's decade. >15% strong, <5% weak.
 
-Treat candidate_match positions as the primary aggregate signal. Search tools fill in the *concrete* picture — what specific titles the user has accepted that resemble this one.
+When `synopsis_neighbors` and the genre rank disagree — a top genre but few neighbors added — trust `synopsis_neighbors`. Search tools fill in the concrete picture beyond the `nearest` list.
 
 ## What the tools are for
 
@@ -32,4 +32,4 @@ Treat candidate_match positions as the primary aggregate signal. Search tools fi
 - Franchise/sequel: do similar franchises appear in the user's added titles?
 - `release_count` on the candidate is screenings across regions; very low values often indicate low-effort B-movies and weigh against recommending.
 
-Your `reason` field should name the single strongest signal — for or against — pointing at concrete evidence (candidate_match position, specific Plex view count, specific buzz finding) rather than vague "the user likes horror."
+Your `reason` field should name the single strongest signal — for or against — pointing at concrete evidence (`synopsis_neighbors` count or a specific nearest title, candidate_match position, specific Plex view count, specific buzz finding) rather than vague "the user likes horror."
