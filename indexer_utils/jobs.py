@@ -4,10 +4,15 @@ APScheduler pickles its job's ``func`` reference into the jobstore as a
 ``module:attribute`` string, so each job target needs a stable, importable
 location. Keep these wrappers thin — actual work lives in ``vid_utils``
 and ``plex_utils``.
+
+The underlying work is async (postgres + AsyncSession). APScheduler's
+threadpool executor runs sync callables, so each wrapper bridges with
+``asyncio.run`` — each scheduled tick gets its own event loop.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from .plex_utils import scan_and_index_plex_library
@@ -31,7 +36,22 @@ def _signal_event(item_type: str) -> None:
 
 def run_plex_library_scan() -> None:
     """Job: weekly walk of every Plex library, upsert ``IgnoreItem`` rows."""
-    scan_and_index_plex_library()
+    asyncio.run(scan_and_index_plex_library())
+
+
+async def _run_check_new_items_async() -> None:
+    for window in CHECK_NEW_DAYS:
+        try:
+            await check_movies(window)
+        except Exception:
+            logger.exception("check_movies(%s) failed", window)
+    _signal_event("mv")
+    for window in CHECK_NEW_DAYS:
+        try:
+            await check_shows(window)
+        except Exception:
+            logger.exception("check_shows(%s) failed", window)
+    _signal_event("tv")
 
 
 def run_check_new_items() -> None:
@@ -42,32 +62,25 @@ def run_check_new_items() -> None:
     fires the GraphQL subscription events so any open clients refresh.
     """
     logger.info("Scheduled check_new starting")
-    for window in CHECK_NEW_DAYS:
-        try:
-            check_movies(window)
-        except Exception:
-            logger.exception("check_movies(%s) failed", window)
-    _signal_event("mv")
-    for window in CHECK_NEW_DAYS:
-        try:
-            check_shows(window)
-        except Exception:
-            logger.exception("check_shows(%s) failed", window)
-    _signal_event("tv")
+    asyncio.run(_run_check_new_items_async())
     logger.info("Scheduled check_new finished")
+
+
+async def _run_check_titles_async() -> None:
+    try:
+        await get_movie_titles()
+    except Exception:
+        logger.exception("get_movie_titles failed")
+    _signal_event("mv")
+    try:
+        await get_show_titles()
+    except Exception:
+        logger.exception("get_show_titles failed")
+    _signal_event("tv")
 
 
 def run_check_titles() -> None:
     """Job: backfill checked titles + thumbnail URLs for pending items."""
     logger.info("Scheduled check_titles starting")
-    try:
-        get_movie_titles()
-    except Exception:
-        logger.exception("get_movie_titles failed")
-    _signal_event("mv")
-    try:
-        get_show_titles()
-    except Exception:
-        logger.exception("get_show_titles failed")
-    _signal_event("tv")
+    asyncio.run(_run_check_titles_async())
     logger.info("Scheduled check_titles finished")

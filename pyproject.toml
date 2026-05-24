@@ -66,3 +66,6 @@ line-ending = "auto"
 
 [tool.ruff.lint.isort]
 case-sensitive = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

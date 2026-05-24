@@ -8,7 +8,7 @@ tvdb_v4_official
 python-decouple
 redis
 fastapi[all]
-sqlalchemy>=2.0.0
+sqlalchemy[asyncio]>=2.0.0
 jinja2
 gunicorn
 strawberry-graphql[fastapi,cli]==0.275.2
