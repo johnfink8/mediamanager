@@ -1,14 +1,10 @@
 import asyncio
-import json
 import logging
-from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, AsyncIterator, Dict, List, Optional, Type, Union
+from typing import Any, AsyncIterator, Dict, List, Optional, Type
 
 import strawberry
-from sqlalchemy import and_, cast, func, or_, select
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Query
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm.attributes import flag_modified
 from strawberry.relay import GlobalID
 from strawberry.scalars import ID, JSON
@@ -23,7 +19,6 @@ from indexer_utils.sonarr_utils import add_series
 from indexer_utils.vid_utils import addMovie
 
 from .models import (
-    FilterRule,
     IgnoreItem,
     MovieRecommendationRecord,
     RecommendationPreference,
@@ -33,104 +28,10 @@ from .recommendations import MovieRecommendationResult, recommend_movie
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class FilterSpec:
-    model: Union[type[IgnoreItem], type[FilterRule]]
-    field: str
-    op: str
-    value: str
-
-
-def apply_filters(query: Query, spec: FilterSpec) -> Query:
-    subfield_name = None
-    if "." in spec.field:
-        field_name, subfield_name = spec.field.split(".", 1)
-    else:
-        field_name = spec.field
-    field = getattr(spec.model, field_name)
-    if subfield_name:
-        field = field[subfield_name]
-
-    op = spec.op
-    value = spec.value
-
-    def _contains(needle: str):
-        """JSONB ``field @> [needle]`` — does the attribute list contain
-        the literal value? Both sides need to be jsonb on postgres, so
-        the needle is JSON-encoded and explicitly cast."""
-        return field.op("@>")(cast(json.dumps([needle]), JSONB))
-
-    if op == "eq":
-        query = query.where(_contains(value))
-    elif op == "neq":
-        query = query.where(~_contains(value))
-    elif op == "in":
-        values = [v.strip() for v in value.split(",")]
-        query = query.where(or_(*[_contains(v) for v in values]))
-    elif op == "not_in":
-        values = [v.strip() for v in value.split(",")]
-        query = query.where(and_(*[~_contains(v) for v in values]))
-    elif op == "contains":
-        query = query.where(_contains(value))
-    elif op == "not_contains":
-        query = query.where(~_contains(value))
-    elif op in ("lt", "gt", "lte", "gte"):
-        # Numeric filtering through the JSONB attribute path is broken on the
-        # postgres side — the previous implementation used ``json_extract``
-        # which is SQLite-only. Use ``FilterRule`` for these operators only
-        # via ``filters.should_ignore_by_rules``, which evaluates in Python.
-        raise ValueError(
-            f"Numeric operator {op!r} is not supported by apply_filters on "
-            "postgres; use should_ignore_by_rules instead."
-        )
-    else:
-        raise ValueError(f"Invalid operator: {spec.op}")
-    return query
-
-
-def invert_operator(op: str) -> str:
-    mapping = {
-        "eq": "not_contains",
-        "neq": "contains",
-        "in": "not_in",
-        "not_in": "in",
-        "lt": "gte",
-        "lte": "gt",
-        "gt": "lte",
-        "gte": "lt",
-        "contains": "not_contains",
-        "not_contains": "contains",
-    }
-    if op not in mapping:
-        raise ValueError(f"Cannot invert operator: {op}")
-    return mapping[op]
-
-
 events = {
     "tv": asyncio.Event(),
     "mv": asyncio.Event(),
 }
-
-
-@strawberry.type
-class Attribute:
-    name: str
-    value: str
-
-
-@strawberry.input
-class AttributeInput:
-    name: str
-    value: str
-
-
-@strawberry.input
-class Filter:
-    type: Optional[str] = None
-    attribute: Optional[str] = None
-    operator: Optional[str] = None
-    value: Optional[str] = None
-    # rule: Optional[FilterRule] = None  # Uncomment if you want to attach a FilterRule object
 
 
 @strawberry.type
@@ -326,54 +227,6 @@ class IgnoreItemList:
         return await IgnoreItemType.get_open(item_type=self.item_type)
 
 
-@strawberry.type(name="FilterRule")
-class FilterRuleType:
-    _id: strawberry.Private[int]
-    item_type: str
-    attribute: str
-    operator: str
-    value: str
-    enabled: bool
-
-    @strawberry.field
-    def id(self: "FilterRuleType") -> GlobalID:
-        return GlobalID("filterrule", str(self._id))
-
-    @classmethod
-    def from_sqlalchemy(cls, rule: FilterRule) -> "FilterRuleType":
-        return cls(
-            _id=int(rule.id),  # type: ignore
-            item_type=str(rule.item_type),
-            attribute=str(rule.attribute),
-            operator=str(rule.operator),
-            value=str(rule.value),
-            enabled=bool(rule.enabled),
-        )
-
-
-@strawberry.input
-class FilterRuleInput:
-    item_type: str
-    attribute: str
-    operator: str
-    value: str
-    enabled: bool = True
-
-
-@strawberry.type
-class FilterRuleList:
-    @strawberry.field
-    def id(self) -> ID:
-        # Use a static id for now; could be a hash of rules for more granularity
-        return ID("filterrulelist")
-
-    @strawberry.field
-    async def nodes(self) -> List[FilterRuleType]:
-        async with db_session() as session:
-            rules = list((await session.execute(select(FilterRule))).scalars())
-            return [FilterRuleType.from_sqlalchemy(rule) for rule in rules]
-
-
 @strawberry.type
 class PageInfo:
     has_next_page: bool
@@ -390,20 +243,15 @@ class HistoricalIgnoreItemList:
 
     @staticmethod
     async def get_historical(
-        filters: Optional[List[Filter]] = None,
+        item_type: Optional[str] = None,
         limit: int = 20,
         offset: int = 0,
-        apply_inverted_permanent_rules: bool = False,
         search: Optional[str] = None,
     ) -> "HistoricalIgnoreItemList":
         async with db_session() as session:
             query = select(IgnoreItem).where(IgnoreItem.ignore.is_(True))
-            item_type_filter = next(
-                (f.type for f in (filters or []) if f.type is not None),
-                None,
-            )
-            if item_type_filter:
-                query = query.where(IgnoreItem.item_type == item_type_filter)
+            if item_type:
+                query = query.where(IgnoreItem.item_type == item_type)
 
             if search and search.strip():
                 pattern = f"%{search.strip()}%"
@@ -414,38 +262,6 @@ class HistoricalIgnoreItemList:
                     )
                 )
 
-            # Optionally apply the inverted permanent rules for this type
-            if apply_inverted_permanent_rules:
-                if item_type_filter:
-                    rules = list(
-                        (
-                            await session.execute(
-                                select(FilterRule).filter_by(
-                                    item_type=item_type_filter, enabled=True
-                                )
-                            )
-                        ).scalars()
-                    )
-                    for rule in rules:
-                        if rule.attribute in [
-                            "type",
-                            "uid",
-                            "title",
-                            "checked_title",
-                            "poster_url",
-                            "added",
-                            "ignore",
-                        ]:
-                            field = rule.attribute
-                        else:
-                            field = f"attributes.{rule.attribute}"
-                        spec = FilterSpec(
-                            model=IgnoreItem,
-                            field=field,
-                            op=invert_operator(rule.operator),
-                            value=rule.value,
-                        )
-                        query = apply_filters(query, spec)
             # Order by created_at DESC, then id DESC
             query = query.order_by(
                 IgnoreItem.created_at.desc(),
@@ -584,10 +400,6 @@ class SchemaQuery:
         return IgnoreItemList(item_type=item_type)
 
     @strawberry.field
-    def filter_rules(self) -> FilterRuleList:
-        return FilterRuleList()
-
-    @strawberry.field
     def check_runs(self) -> CheckRunHistory:
         return CheckRunHistory(
             movies=[
@@ -599,17 +411,15 @@ class SchemaQuery:
     @strawberry.field
     async def historical_items(
         self: "SchemaQuery",
-        filters: Optional[List[Filter]] = None,
+        item_type: Optional[str] = None,
         limit: int = 20,
         offset: int = 0,
-        apply_inverted_permanent_rules: bool = False,
         search: Optional[str] = None,
     ) -> HistoricalIgnoreItemList:
         return await HistoricalIgnoreItemList.get_historical(
-            filters=filters,
+            item_type=item_type,
             limit=limit,
             offset=offset,
-            apply_inverted_permanent_rules=apply_inverted_permanent_rules,
             search=search,
         )
 
@@ -683,12 +493,6 @@ class AcceptAllRecommendedResult:
     added_count: int
     ignored_count: int
     items: IgnoreItemList
-
-
-@strawberry.type
-class MutationReturn:
-    ignore_items: IgnoreItemList
-    filter_rules: FilterRuleList
 
 
 @strawberry.type
@@ -913,54 +717,6 @@ class Mutation:
                 preference=record.preference,
             )
 
-    @strawberry.mutation
-    async def create_filter_rule(self, data: FilterRuleInput) -> MutationReturn:
-        async with db_session() as session:
-            rule = FilterRule(
-                item_type=data.item_type,
-                attribute=data.attribute,
-                operator=data.operator,
-                value=data.value,
-                enabled=data.enabled,
-            )
-            session.add(rule)
-            await session.commit()
-
-            # Immediately apply the new rule to all matching IgnoreItems
-            # Build a query for IgnoreItems of the correct type and not already ignored
-
-            base_query = select(IgnoreItem).filter_by(
-                item_type=data.item_type, ignore=False
-            )
-            # Build a FilterSpec for the new rule
-            if data.attribute in [
-                "type",
-                "uid",
-                "title",
-                "checked_title",
-                "poster_url",
-                "added",
-                "ignore",
-            ]:
-                field = data.attribute
-            else:
-                field = f"attributes.{data.attribute}"
-            spec = FilterSpec(
-                model=IgnoreItem,
-                field=field,
-                op=data.operator,
-                value=data.value,
-            )
-            filtered_query = apply_filters(base_query, spec)
-            for item in (await session.execute(filtered_query)).scalars():
-                item.ignore = True
-                session.add(item)
-            await session.commit()
-
-            ignore_items = IgnoreItemList(item_type=data.item_type)
-            filter_rules = FilterRuleList()
-            return MutationReturn(ignore_items=ignore_items, filter_rules=filter_rules)
-
     # ----- Admin: APScheduler job management -----
 
     @strawberry.mutation
@@ -1031,20 +787,6 @@ class Mutation:
         if result is None:
             raise Exception(f"Scheduled job not found: {data.id}")
         return ScheduledJobType.from_dict(result)
-
-    @strawberry.mutation
-    async def delete_filter_rule(self, id: GlobalID) -> MutationReturn:
-        async with db_session() as session:
-            i_id = int(id.node_id)
-            rule = await session.get(FilterRule, i_id)
-            if not rule:
-                raise Exception("Rule not found")
-            item_type = rule.item_type
-            await session.delete(rule)
-            await session.commit()
-            ignore_items = IgnoreItemList(item_type=item_type)
-            filter_rules = FilterRuleList()
-            return MutationReturn(ignore_items=ignore_items, filter_rules=filter_rules)
 
 
 schema = strawberry.Schema(
