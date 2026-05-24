@@ -4,8 +4,8 @@ A self-hosted media manager I built and use daily. Pulls new releases through Ra
 
 ## What's interesting
 
-- **Agentic recommender** — [`ai_recs.py`](indexer_utils/ai_recs.py) runs an async OpenAI tool-calling loop against a small registry of inspection / search / discovery tools ([`ai_tools/registry.py`](indexer_utils/ai_tools/registry.py)). The model iterates: looks up a candidate, checks prior feedback, fetches attributes.
-- **Vector recall on synopses.** Weaviate embeddings of every item's synopsis seed the candidate pool before the LLM picks.
+- **Agentic recommender** — [`ai_recs.py`](indexer_utils/ai_recs.py) drives a recommendation Agent built on the [openai-agents SDK](https://github.com/openai/openai-agents-python) ([`ai_tools/`](indexer_utils/ai_tools/)) over a set of inspection / search / discovery tools. The model iterates — looks up a candidate, checks prior feedback, searches the library for taste-matched neighbours, web-searches current releases — then returns a structured verdict.
+- **Vector recall on synopses.** Each item's synopsis is embedded into a pgvector column; cosine similarity surfaces taste-matched library examples and a nearest-neighbour accept-rate signal for the recommender.
 - **GraphQL + Relay with live subscriptions.** Strawberry on the server, Relay on the client, `graphql-ws` so background ingest jobs push UI updates.
 - **Scheduler-driven ingest.** APScheduler runs the indexer checks on a schedule and writes through a Redis cache; the GraphQL layer reads through the cache, not the upstream APIs.
 
@@ -13,9 +13,9 @@ A self-hosted media manager I built and use daily. Pulls new releases through Ra
 
 | Layer        | Stack                                                                      |
 | ------------ | -------------------------------------------------------------------------- |
-| Backend      | Python 3.12, FastAPI, Strawberry GraphQL, SQLAlchemy, Alembic, APScheduler |
+| Backend      | Python 3.11, FastAPI, Strawberry GraphQL, SQLAlchemy, Alembic, APScheduler |
 | Frontend     | TypeScript, React, Relay, MUI                                              |
-| Data         | MySQL (primary), Weaviate (vectors), Redis (cache)                         |
+| Data         | Postgres + pgvector (primary + vectors), Redis (cache)                     |
 | Integrations | Plex, Radarr, Sonarr, TMDB, OpenAI                                         |
 | Tests        | pytest, Playwright                                                         |
 | Infra        | Docker, Docker Compose, GitHub Actions                                     |

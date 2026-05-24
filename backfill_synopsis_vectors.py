@@ -149,12 +149,6 @@ async def backfill(
                 if synopsis:
                     attrs["synopsis"] = synopsis
 
-            # Drop the dead pointer from the Weaviate era.
-            ai = attrs.get("ai")
-            if isinstance(ai, dict) and "weaviate_uuid" in ai:
-                ai.pop("weaviate_uuid", None)
-                attrs["ai"] = ai
-
             if synopsis:
                 try:
                     attrs = await upsert_item_vector(
