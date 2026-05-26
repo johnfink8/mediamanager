@@ -10,7 +10,7 @@ import pytest_asyncio
 from indexer_utils import taste_signal as ts
 from indexer_utils.models import IgnoreItem
 from indexer_utils.session import db_session
-from indexer_utils.taste_signal import build_taste_signal
+from indexer_utils.taste_signal import _cast_xref, build_taste_signal
 
 VECTOR_DIMS = 1536
 _VEC = [1.0] + [0.0] * (VECTOR_DIMS - 1)
@@ -135,3 +135,96 @@ async def test_nearest_excludes_undecided_and_out_of_era(cohort):
     titles = {n["title"] for n in block["nearest"]}
     assert "undecided" not in titles
     assert "old" not in titles
+
+
+def _cast_item(uid, *, added, cast, year=2025):
+    return IgnoreItem(
+        uid=uid,
+        title=uid,
+        item_type="mv",
+        added=added,
+        ignore=True,
+        shown=True,
+        attributes={"year": year, "cast": cast},
+    )
+
+
+@pytest_asyncio.fixture
+async def cast_lib(session):
+    """Added library with overlapping cast.
+
+    Alice: m1, m2 (2 added). Bob: m1, m3 (2 added). Dan only appears in a
+    rejected title. ``selfrow`` is an added title whose sole actor (Solo Star)
+    appears nowhere else — used to exercise the leave-one-out uid filter.
+    """
+    rows = [
+        _cast_item("m1", added=True, cast=["Alice Adams", "Bob Brown"]),
+        _cast_item("m2", added=True, cast=["Alice Adams", "Carol Clark"]),
+        _cast_item("m3", added=True, cast=["Bob Brown"]),
+        _cast_item("r1", added=False, cast=["Dan Davis", "Alice Adams"]),
+        _cast_item("selfrow", added=True, cast=["Solo Star"]),
+    ]
+    for r in rows:
+        session.add(r)
+    await session.commit()
+    return session
+
+
+async def test_cast_xref_counts_added_titles_per_castmate(cast_lib):
+    block = await _cast_xref(
+        cast_lib,
+        "mv",
+        {"cast": ["Alice Adams", "Bob Brown", "Eve Evans"]},
+        "candidate-not-in-db",
+    )
+
+    # Alice in m1+m2, Bob in m1+m3, Eve in nothing added.
+    assert block["best_actor_adds"] == 2
+    assert block["n_cast_with_prior_add"] == 2
+    assert {c["name"]: c["added"] for c in block["contributors"]} == {
+        "Alice Adams": 2,
+        "Bob Brown": 2,
+    }
+
+
+async def test_cast_xref_is_leave_one_out(cast_lib):
+    # Solo Star appears only in selfrow; excluding the candidate's own row
+    # leaves zero cross-references. Without the uid filter this would be 1.
+    block = await _cast_xref(cast_lib, "mv", {"cast": ["Solo Star"]}, "selfrow")
+
+    assert block["contributors"] == []
+    assert block["best_actor_adds"] == 0
+
+
+async def test_cast_xref_ignores_rejected_only_castmate(cast_lib):
+    # Dan appears only in a rejected title — no added cross-reference.
+    block = await _cast_xref(cast_lib, "mv", {"cast": ["Dan Davis"]}, "x")
+
+    assert block == {
+        "best_actor_adds": 0,
+        "n_cast_with_prior_add": 0,
+        "contributors": [],
+    }
+
+
+async def test_cast_xref_none_when_candidate_has_no_cast(cast_lib):
+    assert await _cast_xref(cast_lib, "mv", {"genres": ["Horror"]}, "x") is None
+
+
+async def test_cast_xref_surfaces_in_block(cohort):
+    # cohort fixture has no cast; a candidate with cast still gets the sub-block.
+    block = await build_taste_signal(
+        cohort,
+        item_type="mv",
+        year=2025,
+        candidate_attrs={**CAND_ATTRS, "cast": ["h-add-1"]},
+        candidate_vec=_VEC,
+        candidate_uid="cand",
+    )
+
+    # No cohort member carries cast, so contributors is empty but present.
+    assert block["cast_xref"] == {
+        "best_actor_adds": 0,
+        "n_cast_with_prior_add": 0,
+        "contributors": [],
+    }

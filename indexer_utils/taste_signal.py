@@ -13,6 +13,11 @@ Axes:
     value doesn't, because no-name filler is never critically rated.
   * ``by_attribute`` — the cohort add-rate for the candidate's own categorical
     values (network, language, genre); overlapping sub-counts, not a partition.
+  * ``cast_xref`` — how many *added* library titles each of the candidate's cast
+    members appears in. Unlike the cohort axes this spans the whole library, not
+    the ±window era: cast is a cross-era bridge (an actor's older films
+    predicting a new one). Strong for movies (AUC ~0.8 within recent years),
+    weaker for TV; the modal case is no overlap.
 
 The cohort cross-tab needs each cohort member's own nearest-neighbour sweep
 (~10s for a movie era), so the scored cohort is cached in Redis keyed by
@@ -25,7 +30,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional, Set
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .redis_client import get_redis_client, redis_get_json, redis_set_json
@@ -72,6 +77,81 @@ CROSS JOIN LATERAL (
         ORDER BY x.synopsis_vector <=> c.synopsis_vector LIMIT 20) x
 ) n;
 """
+
+
+# How many of the candidate's cast members to name in ``contributors``. The
+# scalar counts (best / n_with_prior_add) span the full cast regardless.
+CAST_XREF_LIMIT = 5
+
+# Per candidate cast member: how many *added* titles of this type they appear in,
+# excluding the candidate itself (uid filter → exact leave-one-out). Targeted to
+# the candidate's own cast so it stays a small, fast aggregate rather than a
+# library-wide index.
+CAST_XREF_SQL = """
+SELECT lower(btrim(name)) AS name, count(DISTINCT uid) AS added
+FROM indexer_utils_ignoreitem,
+     LATERAL jsonb_array_elements_text(attributes->'cast') AS name
+WHERE item_type = :it AND added IS TRUE AND uid <> :uid
+  AND jsonb_typeof(attributes->'cast') = 'array'
+  AND lower(btrim(name)) IN :names
+GROUP BY lower(btrim(name));
+"""
+
+
+def _cast_names(attrs: Dict[str, Any]) -> List[str]:
+    """Candidate cast as display strings, de-duped, first-seen casing kept."""
+    raw = attrs.get("cast")
+    if not isinstance(raw, list):
+        return []
+    seen: Set[str] = set()
+    out: List[str] = []
+    for x in raw:
+        if isinstance(x, str):
+            name = x.strip()
+        elif isinstance(x, dict):
+            name = str(x.get("name") or "").strip()
+        else:
+            name = ""
+        key = name.lower()
+        if name and key not in seen:
+            seen.add(key)
+            out.append(name)
+    return out
+
+
+async def _cast_xref(
+    session: AsyncSession,
+    item_type: str,
+    candidate_attrs: Dict[str, Any],
+    candidate_uid: str,
+) -> Optional[Dict[str, Any]]:
+    """Cross-reference the candidate's cast against the added library.
+
+    ``None`` when the candidate carries no cast metadata (so the consumer can
+    tell "no cast data" apart from "cast present, no overlap" — the latter is
+    the informative modal case and comes back with empty ``contributors``).
+    """
+    names = _cast_names(candidate_attrs)
+    if not names:
+        return None
+    rows = (
+        await session.execute(
+            text(CAST_XREF_SQL).bindparams(bindparam("names", expanding=True)),
+            {
+                "it": item_type,
+                "uid": candidate_uid,
+                "names": [n.lower() for n in names],
+            },
+        )
+    ).all()
+    counts = {r.name: int(r.added) for r in rows}
+    matched = [(n, counts[n.lower()]) for n in names if counts.get(n.lower())]
+    matched.sort(key=lambda nc: nc[1], reverse=True)
+    return {
+        "best_actor_adds": max(counts.values(), default=0),
+        "n_cast_with_prior_add": len(matched),
+        "contributors": [{"name": n, "added": c} for n, c in matched[:CAST_XREF_LIMIT]],
+    }
 
 
 def _to_set(v: Any) -> Set[str]:
@@ -186,7 +266,7 @@ async def build_taste_signal(
         by_attr[label] = per_value
 
     window = NEIGHBOR_YEAR_WINDOW
-    return {
+    block: Dict[str, Any] = {
         "cohort": {
             "scope": f"decided {item_type} titles released "
             f"{year - window}-{year + window}",
@@ -203,3 +283,7 @@ async def build_taste_signal(
         "by_attribute": by_attr,
         "nearest": nearest,
     }
+    cast_xref = await _cast_xref(session, item_type, candidate_attrs, candidate_uid)
+    if cast_xref is not None:
+        block["cast_xref"] = cast_xref
+    return block
