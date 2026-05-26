@@ -33,7 +33,7 @@ Full-stack media manager app: **FastAPI + Strawberry GraphQL** backend (Python),
   - `ai_tools/` — the openai-agents-SDK recommendation Agent and its tools
   - `prompts/` — system prompts for the recommendation agent + discovery subagents (`.md`)
   - `vector_search.py` — pgvector embedding + synopsis-similarity queries
-  - `taste_signal.py` — builds the `taste_signal` payload block (neighbour×critic cohort cross-tab + per-attribute add-rates), Redis-cached by era
+  - `taste_signal.py` — builds the `taste_signal` payload block (neighbour×critic cohort cross-tab + per-attribute add-rates + whole-library cast cross-reference), the cohort cross-tab Redis-cached by era
 - `src/` — React/TypeScript frontend (Relay, MUI)
 - `alembic/` — DB migrations
 - `tests/` — Python unit tests (run against a real pgvector Postgres, see below)
@@ -57,7 +57,7 @@ Entry point: `annotate_with_ai_async(item_type, uid, title, attrs)` in `indexer_
 
 1. Hydrates metadata (TMDB cast/director/release-count via `tmdb.py`).
 2. Generates a short synopsis (plain OpenAI JSON call) and embeds `title + synopsis` into the pgvector `synopsis_vector` column (`vector_search.upsert_item_vector`). For brand-new candidates the row doesn't exist yet, so the vector is stashed in `attrs["_synopsis_vector_tmp"]` and attached after insert.
-3. Builds a user payload including a pre-computed `library_profile` (aggregate taste, see `library_profile.py`) and a `taste_signal` block (`taste_signal.py`): raw historical add counts over the candidate's decided ±2yr same-type cohort, broken out by the synopsis-neighbour × critic-presence cross-tab and per-attribute (network/language/genre). The model reads counts as rates itself; the cohort cross-tab is Redis-cached by `(item_type, year)`.
+3. Builds a user payload including a pre-computed `library_profile` (aggregate taste, see `library_profile.py`) and a `taste_signal` block (`taste_signal.py`): raw historical add counts over the candidate's decided ±2yr same-type cohort, broken out by the synopsis-neighbour × critic-presence cross-tab and per-attribute (network/language/genre), plus a `cast_xref` counting how many added titles each of the candidate's cast appears in (whole-library, cross-era — not bounded to the cohort window). The model reads counts as rates itself; the cohort cross-tab is Redis-cached by `(item_type, year)`.
 4. Runs the recommendation **Agent** and writes a single consolidated `ai` block back onto `attrs` (verdict, score, reason, synopsis, tool log, turn/tool-call counts, failure info).
 
 The agent itself lives in `indexer_utils/ai_tools/` and is built on the **openai-agents SDK** (`openai-agents` package):
