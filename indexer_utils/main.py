@@ -6,15 +6,17 @@ import pathlib
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict
 
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from fastmcp.utilities.lifespan import combine_lifespans
 from jinja2 import Environment, PackageLoader, select_autoescape
 from pydantic import BaseModel
 from strawberry.fastapi import GraphQLRouter
 from strawberry.subscriptions import GRAPHQL_TRANSPORT_WS_PROTOCOL, GRAPHQL_WS_PROTOCOL
 
 from .log import configure_logging
+from .mcp_server import PROTECTED_RESOURCE_METADATA, mcp
 from .models import IgnoreItem
 from .scheduler import (
     PLEX_SCAN_JOB_ID,
@@ -46,7 +48,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         shutdown_scheduler()
 
 
-app = FastAPI(lifespan=lifespan)
+# The MCP ASGI app carries its own (session-manager) lifespan that must run
+# alongside ours; combine_lifespans enters both. path="/" avoids double-
+# prefixing since we mount it under /mcp below.
+mcp_app = mcp.http_app(path="/")
+
+app = FastAPI(lifespan=combine_lifespans(lifespan, mcp_app.lifespan))
 graphql_app = GraphQLRouter(
     schema,
     subscription_protocols=[
@@ -55,6 +62,29 @@ graphql_app = GraphQLRouter(
     ],
 )
 app.include_router(graphql_app, prefix="/graphql")
+
+# Mount before the SPA catch-all (/{_path:path}) below, or that route would
+# swallow /mcp. Auth is enforced inside the MCP app via Authelia JWT, so this
+# must be exempted from nginx's Authelia forward-auth.
+app.mount("/mcp", mcp_app)
+
+
+# Clients POST to the bare `/mcp` (the advertised resource URL), but the mount
+# only serves `/mcp/`, and the SPA catch-all would otherwise swallow the
+# slashless form. Redirect it (307 preserves the POST + body).
+@app.api_route("/mcp", methods=["GET", "POST", "DELETE"])
+async def _mcp_slash(request: Request) -> RedirectResponse:
+    target = "/mcp/" + (f"?{request.url.query}" if request.url.query else "")
+    return RedirectResponse(target, status_code=307)
+
+
+# OAuth discovery, served at both the bare and resource-path-suffixed paths a
+# client may probe. Public (no Authelia) and registered before the SPA
+# catch-all so it returns JSON, not index.html.
+@app.get("/.well-known/oauth-protected-resource")
+@app.get("/.well-known/oauth-protected-resource/mcp")
+async def oauth_protected_resource() -> Dict[str, Any]:
+    return PROTECTED_RESOURCE_METADATA
 
 
 class InData(BaseModel):
