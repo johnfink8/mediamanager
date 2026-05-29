@@ -41,6 +41,14 @@ Full-stack media manager app: **FastAPI + Strawberry GraphQL** backend (Python),
 - `scripts/postgres-init/` — `create-test-db.sql`, mounted as Postgres `initdb.d` by the compose files to create the test DB
 - `backfill_synopsis_vectors.py` (repo root) — (re)embed `synopsis_vector` across the catalog; `--reindex-all`, `--check-vectors`, `--added-only`, etc.
 
+## MCP Server (claude.ai connector)
+
+`indexer_utils/mcp_server.py` exposes a native **MCP** endpoint mounted at `/mcp` in `main.py` (via `mcp.http_app(path="/")` + `combine_lifespans` so FastMCP's session-manager lifespan runs alongside the scheduler's). It's a curated tool surface (read: open/decided candidates, scheduled jobs, `recommend`; write: `add_item`, `ignore_item`, `retry_ai`, `set_recommendation_preference`, `recheck_visible`) wrapping the same helpers the GraphQL resolvers use.
+
+- **Auth**: Authelia acts as the OIDC provider. The connector gets a JWT access token from Authelia and presents it as a bearer token; `JWTVerifier` validates it against Authelia's JWKS (issuer + audience). Config via `MCP_OIDC_ISSUER`, `MCP_OIDC_JWKS_URI`, `MCP_RESOURCE_URL`, `MCP_BASE_URL`; `MCP_AUTH_DISABLED=true` bypasses auth for local/dev.
+- **Discovery**: we serve RFC 9728 protected-resource metadata ourselves from `main.py` (`/.well-known/oauth-protected-resource[/mcp]`) because FastMCP mis-derives `resource`/path under an ASGI sub-mount (upstream issue #1348). `PROTECTED_RESOURCE_METADATA.resource` MUST equal the `JWTVerifier` audience **and** the Authelia client's audience, or tokens validate to the wrong `aud` and silently fail.
+- **nginx**: `/mcp` and `/.well-known/oauth-protected-resource` must be proxied to the app **without** Authelia forward-auth (`auth_request`) — the JWT is the gate, not the session cookie. These are server-side, gitignored configs.
+
 ## Database
 
 Postgres 16 with the **pgvector** extension (`pgvector/pgvector:pg16` image). The app talks to it through **async SQLAlchemy 2.0** over **psycopg 3** (`postgresql+psycopg://…`).

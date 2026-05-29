@@ -43,8 +43,8 @@ def get_attrs(item: ET.Element) -> Dict[str, str]:
     return attrs
 
 
-def get_ratings_attrs(ratings):
-    attrs: Dict[str, str] = {}
+def get_ratings_attrs(ratings: Dict[str, Any]) -> Dict[str, Any]:
+    attrs: Dict[str, Any] = {}
     for rating_source in ratings:
         attrs[f"{rating_source}{ratings[rating_source]['type']}_votes"] = ratings[
             rating_source

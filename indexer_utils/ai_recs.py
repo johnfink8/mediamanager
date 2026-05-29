@@ -257,8 +257,11 @@ def refresh_visible_item_attributes(item: IgnoreItem) -> Dict[str, Any]:
                         logger.exception("Failed to refresh director for %s", item.uid)
             ratings = result.get("ratings")
             if ratings:
-                attrs["rating_votes"] = ratings.get("votes")
-                attrs["rating_value"] = ratings.get("value")
+                # Mirror ingest: Radarr exposes per-source ratings
+                # (imdb/rt/metacritic/…), which is what the agent filters on.
+                from indexer_utils.vid_utils import get_ratings_attrs
+
+                attrs.update(get_ratings_attrs(ratings))
         except Exception:
             logger.exception("Failed to refresh movie attributes for %s", item.uid)
     else:
