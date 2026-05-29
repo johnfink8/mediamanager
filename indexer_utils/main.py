@@ -50,8 +50,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 # The MCP ASGI app carries its own (session-manager) lifespan that must run
 # alongside ours; combine_lifespans enters both. path="/" avoids double-
-# prefixing since we mount it under /mcp below.
-mcp_app = mcp.http_app(path="/")
+# prefixing since we mount it under /mcp below. stateless_http=True keeps each
+# request self-contained — required because gunicorn runs multiple workers and
+# requests round-robin across them, so an in-memory session would be "lost"
+# (JSON-RPC "Session terminated") on any follow-up that lands on another worker.
+mcp_app = mcp.http_app(path="/", stateless_http=True)
 
 app = FastAPI(lifespan=combine_lifespans(lifespan, mcp_app.lifespan))
 graphql_app = GraphQLRouter(

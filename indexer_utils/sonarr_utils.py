@@ -7,20 +7,26 @@ from decouple import config
 from requests.auth import HTTPBasicAuth
 
 
-def sn_query(cmd: str, post: bool = False, **kwargs: object) -> object:
+def _sn_request(cmd: str, method: str, **kwargs: object) -> object:
     session = requests.Session()
     session.headers["X-Api-Key"] = config("SONARR_APIKEY")
     url = "/".join([config("SONARR_URL"), cmd])
     auth = None
     if config("SONARR_USERNAME", None):
         auth = HTTPBasicAuth(config("SONARR_USERNAME"), config("SONARR_PASSWORD"))
-    if post:
-        r = session.post(url, json=kwargs, auth=auth)
+    if method in ("get", "delete"):
+        r = getattr(session, method)(url, params=kwargs, auth=auth)
     else:
-        r = session.get(url, params=kwargs, auth=auth)
+        r = getattr(session, method)(url, json=kwargs, auth=auth)
     if r.status_code >= 400:
         raise Exception(r.status_code, r.text)
+    if not r.text:
+        return None
     return json.loads(r.text)
+
+
+def sn_query(cmd: str, post: bool = False, **kwargs: object) -> object:
+    return _sn_request(cmd, "post" if post else "get", **kwargs)
 
 
 SERIES: List[object] = []
@@ -70,6 +76,10 @@ async def aquery_series(tvdb: str) -> Dict[str, object]:
 
 async def asn_query(cmd: str, post: bool = False, **kwargs: Any) -> object:
     return await asyncio.to_thread(sn_query, cmd, post, **kwargs)
+
+
+async def asn_delete(cmd: str, **kwargs: Any) -> object:
+    return await asyncio.to_thread(_sn_request, cmd, "delete", **kwargs)
 
 
 def add_series(tvdb: str, all_seasons: bool = True) -> None:

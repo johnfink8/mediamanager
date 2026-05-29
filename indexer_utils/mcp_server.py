@@ -9,6 +9,7 @@ route ``/mcp`` and the ``/.well-known`` discovery paths to the app
 *without* its usual Authelia forward-auth — the JWT is the gate here.
 """
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
@@ -30,10 +31,11 @@ from indexer_utils.models import (
     MovieRecommendationRecord,
     RecommendationPreference,
 )
+from indexer_utils.radarr_utils import aradarr_query
 from indexer_utils.recommendations import recommend_movie
 from indexer_utils.scheduler import list_scheduled_jobs
 from indexer_utils.session import db_session
-from indexer_utils.sonarr_utils import add_series
+from indexer_utils.sonarr_utils import add_series, asn_delete, asn_query
 from indexer_utils.vid_utils import addMovie
 
 logger = logging.getLogger(__name__)
@@ -382,8 +384,6 @@ async def recheck_visible(item_type: str) -> Dict[str, Any]:
     if not prepared:
         return {"item_type": item_type, "rechecked": 0}
 
-    import asyncio
-
     from indexer_utils.vid_utils import AI_ANNOTATE_CONCURRENCY
 
     semaphore = asyncio.Semaphore(AI_ANNOTATE_CONCURRENCY)
@@ -414,3 +414,196 @@ async def recheck_visible(item_type: str) -> Dict[str, Any]:
         await session.commit()
 
     return {"item_type": item_type, "rechecked": rechecked}
+
+
+# --------------------------------------------------------------------------
+# Radarr / Sonarr direct proxy
+# --------------------------------------------------------------------------
+
+
+@mcp.tool
+async def radarr_find(term: str) -> List[Dict[str, Any]]:
+    """Search for movies to add (Radarr title lookup).
+
+    Returns candidates with title, year, imdb/tmdb ids, and whether each is
+    already in the library. Pass the imdb_id to radarr_add_movie.
+    """
+    results: Any = await aradarr_query("movie/lookup", term=term)
+    return [
+        {
+            "title": m.get("title"),
+            "year": m.get("year"),
+            "imdb_id": m.get("imdbId"),
+            "tmdb_id": m.get("tmdbId"),
+            "in_library": bool(m.get("id")),
+            "overview": m.get("overview"),
+        }
+        for m in results[:20]
+    ]
+
+
+@mcp.tool
+async def radarr_movies(query: Optional[str] = None) -> List[Dict[str, Any]]:
+    """List movies in the Radarr library, optionally filtered by title substring.
+
+    Returns the Radarr movie `id` (needed for radarr_upgrade_movie), quality
+    profile, and whether a file is present.
+    """
+    movies: Any = await aradarr_query("movie")
+    if query:
+        q = query.lower()
+        movies = [m for m in movies if q in (m.get("title") or "").lower()]
+    return [
+        {
+            "id": m.get("id"),
+            "title": m.get("title"),
+            "year": m.get("year"),
+            "quality_profile_id": m.get("qualityProfileId"),
+            "has_file": m.get("hasFile"),
+            "monitored": m.get("monitored"),
+        }
+        for m in movies[:50]
+    ]
+
+
+@mcp.tool
+async def radarr_quality_profiles() -> List[Dict[str, Any]]:
+    """List Radarr quality profiles (id + name) — e.g. to find the '1080p' profile id."""
+    profiles: Any = await aradarr_query("qualityprofile")
+    return [{"id": p.get("id"), "name": p.get("name")} for p in profiles]
+
+
+@mcp.tool
+async def radarr_add_movie(imdb_id: str) -> Dict[str, Any]:
+    """Add a movie to Radarr by IMDb id (monitored) and trigger a search.
+
+    To pull it in a specific quality, follow with radarr_upgrade_movie.
+    """
+    await asyncio.to_thread(addMovie, imdb_id)
+    return {"imdb_id": imdb_id, "status": "added"}
+
+
+@mcp.tool
+async def radarr_upgrade_movie(
+    movie_id: int, quality_profile_id: Optional[int] = None
+) -> Dict[str, Any]:
+    """Re-grab a movie, optionally at a new quality ("get this one in 1080p").
+
+    Pass quality_profile_id (from radarr_quality_profiles) to switch profiles;
+    omit it to just re-search at the current quality. Triggers a Radarr search.
+    """
+    movie: Any = await aradarr_query(f"movie/{movie_id}")
+    if quality_profile_id is not None:
+        movie["qualityProfileId"] = quality_profile_id
+        movie["monitored"] = True
+        await aradarr_query(f"movie/{movie_id}", method="put", **movie)
+    await aradarr_query(
+        "command", method="post", name="MoviesSearch", movieIds=[movie_id]
+    )
+    return {
+        "id": movie_id,
+        "quality_profile_id": movie.get("qualityProfileId"),
+        "status": "searching",
+    }
+
+
+@mcp.tool
+async def sonarr_find(term: str) -> List[Dict[str, Any]]:
+    """Search for series to add (Sonarr title lookup). Pass tvdb_id to sonarr_add_series."""
+    results: Any = await asn_query("series/lookup", term=term)
+    return [
+        {
+            "title": s.get("title"),
+            "year": s.get("year"),
+            "tvdb_id": s.get("tvdbId"),
+            "in_library": bool(s.get("id")),
+            "overview": s.get("overview"),
+        }
+        for s in results[:20]
+    ]
+
+
+@mcp.tool
+async def sonarr_series(query: Optional[str] = None) -> List[Dict[str, Any]]:
+    """List series in the Sonarr library, optionally filtered by title.
+
+    Returns the Sonarr series `id` (needed for sonarr_episodes).
+    """
+    series: Any = await asn_query("series")
+    if query:
+        q = query.lower()
+        series = [s for s in series if q in (s.get("title") or "").lower()]
+    return [
+        {
+            "id": s.get("id"),
+            "title": s.get("title"),
+            "year": s.get("year"),
+            "quality_profile_id": s.get("qualityProfileId"),
+            "monitored": s.get("monitored"),
+        }
+        for s in series[:50]
+    ]
+
+
+@mcp.tool
+async def sonarr_quality_profiles() -> List[Dict[str, Any]]:
+    """List Sonarr quality profiles (id + name)."""
+    profiles: Any = await asn_query("qualityprofile")
+    return [{"id": p.get("id"), "name": p.get("name")} for p in profiles]
+
+
+@mcp.tool
+async def sonarr_add_series(tvdb_id: str) -> Dict[str, Any]:
+    """Add a series to Sonarr by TVDB id (all seasons monitored) and search for episodes."""
+    await asyncio.to_thread(add_series, tvdb_id)
+    return {"tvdb_id": tvdb_id, "status": "added"}
+
+
+@mcp.tool
+async def sonarr_episodes(
+    series_id: int, season: Optional[int] = None
+) -> List[Dict[str, Any]]:
+    """List a series' episodes (id, season/episode number, title, file status).
+
+    Use this to find the episode_id for sonarr_regrab_episode. Optionally filter
+    by season number.
+    """
+    eps: Any = await asn_query("episode", seriesId=series_id)
+    out: List[Dict[str, Any]] = []
+    for e in eps:
+        if season is not None and e.get("seasonNumber") != season:
+            continue
+        out.append(
+            {
+                "id": e.get("id"),
+                "season": e.get("seasonNumber"),
+                "episode": e.get("episodeNumber"),
+                "title": e.get("title"),
+                "has_file": e.get("hasFile"),
+            }
+        )
+    return out
+
+
+@mcp.tool
+async def sonarr_regrab_episode(
+    episode_id: int, replace_file: bool = True
+) -> Dict[str, Any]:
+    """Fetch a fresh copy of one episode ("this episode won't play, get a new copy").
+
+    By default deletes the existing file first so Sonarr grabs a replacement even
+    when the current file already meets the quality cutoff, then triggers a
+    search. Set replace_file=False to only search for an upgrade without deleting.
+    """
+    ep: Any = await asn_query(f"episode/{episode_id}")
+    file_id = ep.get("episodeFileId") or 0
+    deleted = False
+    if replace_file and file_id:
+        await asn_delete(f"episodefile/{file_id}")
+        deleted = True
+    await asn_query("command", post=True, name="EpisodeSearch", episodeIds=[episode_id])
+    return {
+        "episode_id": episode_id,
+        "deleted_old_file": deleted,
+        "status": "searching",
+    }
