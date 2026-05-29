@@ -12,6 +12,7 @@ services:
     secrets: ["JWT_SECRET", "SESSION_SECRET", "STORAGE_ENCRYPTION_KEY"]
     environment:
       AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE: "/run/secrets/JWT_SECRET"
+      X_AUTHELIA_CONFIG_FILTERS: 'template'
       AUTHELIA_SESSION_SECRET_FILE: "/run/secrets/SESSION_SECRET"
       AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE: "/run/secrets/STORAGE_ENCRYPTION_KEY"
     volumes:
@@ -48,6 +49,8 @@ services:
       - /mnt:/mnt
     restart: unless-stopped
     networks: [proxy]
+    ports:
+      - 7878:7878
   servermonitor:
     build:
       context: .
