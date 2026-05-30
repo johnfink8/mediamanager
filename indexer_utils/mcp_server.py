@@ -20,6 +20,7 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth import RemoteAuthProvider
 from fastmcp.server.auth.providers.jwt import JWTVerifier
+from mcp.types import ToolAnnotations
 from pydantic import AnyHttpUrl
 from sqlalchemy import or_, select
 from sqlalchemy.orm.attributes import flag_modified
@@ -120,14 +121,40 @@ def _build_auth() -> Optional[RemoteAuthProvider]:
 mcp: FastMCP = FastMCP(name="mediamanager", auth=_build_auth(), mask_error_details=True)
 
 
+# Read-only tools (query/inspect, no side effects). Everything else is treated
+# as a write — fail-closed, so a new tool needs approval until listed here. The
+# MCP ``readOnlyHint`` lets the claude.ai connector allow-all reads while still
+# gating writes; ``destructiveHint`` flags the writes that delete/replace a file.
+_READ_ONLY_TOOLS = {
+    "list_open_candidates",
+    "get_candidate",
+    "list_decided",
+    "scheduled_jobs",
+    "radarr_find",
+    "radarr_movies",
+    "radarr_quality_profiles",
+    "sonarr_find",
+    "sonarr_series",
+    "sonarr_quality_profiles",
+    "sonarr_episodes",
+    "locate_video",
+    "now_playing",
+    "diagnose_video",
+    "get_video_job",
+    "check_compatibility",
+}
+_DESTRUCTIVE_TOOLS = {"sonarr_regrab_episode", "repair_video"}
+
+
 def safe_tool(fn: Callable[..., Awaitable[Any]]) -> Any:
-    """Register an MCP tool that turns expected failures into clean model output.
+    """Register an MCP tool: clean error surfacing + read/write annotations.
 
     A tool (or a helper it calls) signals an actionable negative result with
     ``ValueError`` (not found, bad input, nothing to do) or ``VdiagError`` (the
     sidecar reported a problem). We convert those to ``ToolError`` so the model
     sees the real message even with masking on; anything else propagates and is
-    masked as an internal error.
+    masked as an internal error. We also stamp MCP read-only/destructive hints
+    (from the sets above) so the connector can group permissions.
     """
 
     @functools.wraps(fn)
@@ -137,7 +164,12 @@ def safe_tool(fn: Callable[..., Awaitable[Any]]) -> Any:
         except (ValueError, VdiagError) as exc:
             raise ToolError(str(exc)) from exc
 
-    return mcp.tool(wrapper)
+    read_only = fn.__name__ in _READ_ONLY_TOOLS
+    annotations = ToolAnnotations(
+        readOnlyHint=read_only,
+        destructiveHint=(not read_only) and fn.__name__ in _DESTRUCTIVE_TOOLS,
+    )
+    return mcp.tool(wrapper, annotations=annotations)
 
 
 def _serialize_item(item: IgnoreItem) -> Dict[str, Any]:
@@ -169,8 +201,12 @@ def _serialize_item(item: IgnoreItem) -> Dict[str, Any]:
 async def list_open_candidates(item_type: Optional[str] = None) -> List[Dict[str, Any]]:
     """List undecided candidates (not yet added or ignored, not deferred).
 
-    item_type: "mv" for movies, "tv" for shows, or omit for both. Items
-    are returned scored-first (highest AI score first), then oldest.
+    item_type: "mv" for movies, "tv" for TV series — one entry per whole show
+    (tracked by TVDB), never per episode — or omit for both. A "tv" title is
+    often a release/filename with an episode marker ("The.Show.S01E01.1080p"),
+    but the candidate is the whole series: judge and recommend on the show, not
+    that one episode. Items are returned scored-first (highest AI score first),
+    then oldest.
     """
     async with db_session() as session:
         stmt = select(IgnoreItem).where(
@@ -199,7 +235,11 @@ async def list_open_candidates(item_type: Optional[str] = None) -> List[Dict[str
 
 @safe_tool
 async def get_candidate(item_id: int) -> Dict[str, Any]:
-    """Fetch one candidate by its numeric id, including its full ``ai`` block."""
+    """Fetch one candidate by its numeric id, including its full ``ai`` block.
+
+    A "tv" candidate is a whole series, even when its title looks like an episode
+    filename ("Show.Name.S01E01") — reason about the show, not the episode.
+    """
     async with db_session() as session:
         item = await session.get(IgnoreItem, item_id)
         if item is None:
@@ -216,7 +256,10 @@ async def list_decided(
 ) -> Dict[str, Any]:
     """List already-decided (ignored/added) items, newest first.
 
-    Supports a title substring ``search`` and ``limit``/``offset`` paging.
+    item_type filters to "mv" or "tv"; a "tv" entry is a whole series (one row
+    per show, not per episode — its title may carry an episode marker like
+    "S01E01" but the subject is the series). Supports a title substring
+    ``search`` and ``limit``/``offset`` paging.
     """
     async with db_session() as session:
         query = select(IgnoreItem).where(IgnoreItem.ignore.is_(True))
@@ -673,11 +716,15 @@ async def locate_video(
     season: Optional[int] = None,
     episode: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
-    """Find a movie or episode in Plex and its on-disk file ("X is freezing").
+    """Find a movie or TV episode's file on disk in Plex ("X is freezing").
 
-    item_type is "mv" for a movie or "tv" for an episode; for episodes pass
-    season + episode to narrow it down. Returns candidates each with a
-    plex_rating_key — hand that to diagnose_video / repair_video.
+    item_type is "mv" for a movie or "tv" for a single TV episode — here one
+    video file is one episode, which is the right granularity since diagnose/
+    repair act on a single file. For "tv" give the show title plus the season +
+    episode; with no season/episode this returns every matching episode of that
+    show so you can pick one. (Distinct from the catalog tools, where a "tv" item
+    is a whole series.) Each candidate carries a plex_rating_key for
+    diagnose_video / repair_video, which act on that one episode file.
     """
     return await asearch_videos(title, item_type, season, episode)
 
