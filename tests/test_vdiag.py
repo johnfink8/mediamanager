@@ -257,6 +257,19 @@ async def test_get_video_job_unknown_raises(monkeypatch):
         await mcp_server.get_video_job("nope")
 
 
+async def test_tool_annotations_split_read_write_destructive():
+    read = await mcp_server.mcp.get_tool("list_open_candidates")
+    assert read.annotations.readOnlyHint is True
+
+    write = await mcp_server.mcp.get_tool("add_item")
+    assert write.annotations.readOnlyHint is False
+    assert write.annotations.destructiveHint is False
+
+    destructive = await mcp_server.mcp.get_tool("repair_video")
+    assert destructive.annotations.readOnlyHint is False
+    assert destructive.annotations.destructiveHint is True
+
+
 async def test_repair_redownload_movie_uses_imdb(monkeypatch):
     _patch_resolve(
         monkeypatch, {"item_type": "mv", "title": "Foo", "imdb_id": "tt0099"}
