@@ -17,9 +17,12 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 from fastapi import HTTPException
+from fastmcp.exceptions import ToolError
 
 import indexer_utils.mcp_server as mcp_server
 from indexer_utils import plex_utils, radarr_utils, sonarr_utils
+from indexer_utils.compat import assess_compatibility
+from indexer_utils.vdiag_client import VdiagError
 
 _VDIAG_SERVER = pathlib.Path(__file__).resolve().parent.parent / "vdiag" / "server.py"
 _spec = importlib.util.spec_from_file_location("vdiag_server", _VDIAG_SERVER)
@@ -157,7 +160,9 @@ async def test_diagnose_deep_also_scans(monkeypatch):
 
 async def test_diagnose_raises_for_unknown_rating_key(monkeypatch):
     _patch_resolve(monkeypatch, None)
-    with pytest.raises(ValueError):
+    # @safe_tool converts the tool's ValueError into a ToolError so the message
+    # reaches the model even with error masking on.
+    with pytest.raises(ToolError):
         await mcp_server.diagnose_video("123")
 
 
@@ -231,8 +236,34 @@ async def test_repair_redownload_episode_uses_tvdb_season_episode(monkeypatch):
 
 async def test_repair_rejects_unknown_mode(monkeypatch):
     _patch_resolve(monkeypatch, {"item_type": "mv", "file_path": "/store/Foo.mkv"})
-    with pytest.raises(ValueError):
+    with pytest.raises(ToolError):
         await mcp_server.repair_video("123", "transcode")
+
+
+async def test_safe_tool_converts_vdiag_error_to_tool_error(monkeypatch):
+    _patch_resolve(monkeypatch, {"item_type": "mv", "title": "Foo"})
+
+    async def boom(rating_key: str) -> Dict[str, Any]:
+        raise VdiagError("vdiag probe failed (404): item has no file")
+
+    monkeypatch.setattr(mcp_server, "aprobe", boom)
+    with pytest.raises(ToolError) as exc:
+        await mcp_server.diagnose_video("123")
+    assert "no file" in str(exc.value)
+
+
+async def test_safe_tool_converts_helper_value_error_to_tool_error(monkeypatch):
+    _patch_resolve(
+        monkeypatch, {"item_type": "mv", "title": "Foo", "imdb_id": "tt0099"}
+    )
+
+    async def boom(imdb_id: str) -> Dict[str, Any]:
+        raise ValueError("no Radarr movie for imdb tt0099")
+
+    monkeypatch.setattr(mcp_server, "aredownload_by_imdb", boom)
+    with pytest.raises(ToolError) as exc:
+        await mcp_server.repair_video("123", "redownload")
+    assert "no Radarr movie" in str(exc.value)
 
 
 # --------------------------------------------------------------------------
@@ -390,6 +421,28 @@ async def test_aupgrade_by_tvdb_sets_series_profile_and_searches_episode(monkeyp
     assert result["episode_id"] == 11
 
 
+async def test_aupgrade_by_tvdb_unmatched_episode_raises_without_searching(monkeypatch):
+    async def fake_get_series(tvdb_id: int) -> Dict[str, Any]:
+        return {"id": 3}
+
+    commands: List[Dict[str, Any]] = []
+
+    async def fake_query(cmd: str, post: bool = False, **kwargs: Any) -> Any:
+        if cmd == "episode":
+            return [{"id": 11, "seasonNumber": 1, "episodeNumber": 2}]
+        if cmd == "command":
+            commands.append(kwargs)
+        return None
+
+    monkeypatch.setattr(sonarr_utils, "aget_series", fake_get_series)
+    monkeypatch.setattr(sonarr_utils, "asn_query", fake_query)
+
+    # S9E9 isn't in the list — must fail, not fall back to a whole-series search.
+    with pytest.raises(ValueError):
+        await sonarr_utils.aupgrade_by_tvdb("555", 5, season=9, episode=9)
+    assert commands == []
+
+
 async def test_upgrade_video_preview_lists_movie_profiles(monkeypatch):
     _patch_resolve(
         monkeypatch, {"item_type": "mv", "title": "Foo", "imdb_id": "tt0099"}
@@ -438,3 +491,130 @@ async def test_upgrade_video_apply_tv_routes_to_sonarr(monkeypatch):
 
     await mcp_server.upgrade_video("123", 5)
     assert seen == {"tvdb": "555", "profile": 5, "season": 1, "episode": 2}
+
+
+# --------------------------------------------------------------------------
+# Apple TV compatibility assessment
+# --------------------------------------------------------------------------
+
+
+def test_compat_h264_aac_mp4_direct_plays():
+    probe = {
+        "container": "mov,mp4,m4a,3gp,3g2,mj2",
+        "video_streams": [{"codec": "h264", "width": 1920, "height": 1080}],
+        "audio_streams": [{"codec": "aac", "channels": 2}],
+    }
+    result = assess_compatibility(probe)
+    assert result["verdict"] == "direct_play"
+    assert result["transcode_reasons"] == []
+
+
+def test_compat_dts_audio_forces_transcode():
+    probe = {
+        "container": "matroska,webm",
+        "video_streams": [{"codec": "hevc", "width": 1920, "height": 1080}],
+        "audio_streams": [{"codec": "dca", "channels": 6}],
+    }
+    result = assess_compatibility(probe)
+    assert result["verdict"] == "transcode"
+    assert result["video"][0]["ok"] is True
+    assert result["audio"][0]["ok"] is False
+    assert any("dca" in r for r in result["transcode_reasons"])
+
+
+def test_compat_vp9_video_forces_transcode():
+    probe = {
+        "container": "matroska,webm",
+        "video_streams": [{"codec": "vp9", "width": 1920, "height": 1080}],
+        "audio_streams": [{"codec": "aac", "channels": 2}],
+    }
+    result = assess_compatibility(probe)
+    assert result["verdict"] == "transcode"
+    assert result["video"][0]["ok"] is False
+
+
+def test_compat_4k_h264_flagged():
+    probe = {
+        "container": "mov,mp4",
+        "video_streams": [{"codec": "h264", "width": 3840, "height": 2160}],
+        "audio_streams": [{"codec": "aac", "channels": 2}],
+    }
+    result = assess_compatibility(probe)
+    assert result["verdict"] == "transcode"
+    assert any("1080p" in r for r in result["transcode_reasons"])
+
+
+def test_compat_hevc_main10_4k_direct_plays():
+    probe = {
+        "container": "matroska,webm",
+        "video_streams": [
+            {
+                "codec": "hevc",
+                "profile": "Main 10",
+                "level_readable": 5.1,
+                "bit_depth": 10,
+                "width": 3840,
+                "height": 2160,
+            }
+        ],
+        "audio_streams": [{"codec": "eac3", "channels": 6}],
+    }
+    result = assess_compatibility(probe)
+    assert result["verdict"] == "direct_play"
+    assert result["video"][0]["level"] == 5.1
+    assert result["video"][0]["bit_depth"] == 10
+
+
+def test_compat_h264_high10_profile_flagged():
+    probe = {
+        "container": "mov,mp4",
+        "video_streams": [
+            {"codec": "h264", "profile": "High 10", "width": 1920, "height": 1080}
+        ],
+        "audio_streams": [{"codec": "aac", "channels": 2}],
+    }
+    result = assess_compatibility(probe)
+    assert result["verdict"] == "transcode"
+    assert "High 10" in result["video"][0]["reason"]
+
+
+def test_compat_h264_level_above_42_flagged():
+    probe = {
+        "container": "mov,mp4",
+        "video_streams": [
+            {
+                "codec": "h264",
+                "profile": "High",
+                "level_readable": 5.1,
+                "width": 1920,
+                "height": 1080,
+            }
+        ],
+        "audio_streams": [{"codec": "aac", "channels": 2}],
+    }
+    result = assess_compatibility(probe)
+    assert result["verdict"] == "transcode"
+    assert any("level" in r for r in result["transcode_reasons"])
+
+
+def test_compat_12bit_video_flagged():
+    probe = {
+        "container": "matroska",
+        "video_streams": [
+            {
+                "codec": "hevc",
+                "profile": "Main 12",
+                "bit_depth": 12,
+                "width": 1920,
+                "height": 1080,
+            }
+        ],
+        "audio_streams": [{"codec": "aac", "channels": 2}],
+    }
+    result = assess_compatibility(probe)
+    assert result["verdict"] == "transcode"
+
+
+def test_compat_unknown_client_raises():
+    with pytest.raises(ValueError):
+        assess_compatibility({"container": "mp4"}, client="toaster")

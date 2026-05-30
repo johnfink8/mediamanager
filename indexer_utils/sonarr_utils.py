@@ -183,6 +183,10 @@ async def aupgrade_by_tvdb(
     episode_id: Optional[int] = None
     if season is not None and episode is not None:
         episode_id = await _episode_id_for(series_id, season, episode)
+        # An episode-level request that can't be mapped must fail, not silently
+        # fall through to a whole-series search.
+        if episode_id is None:
+            raise ValueError(f"no S{season}E{episode} for tvdb {tvdb_id}")
     return await aupgrade_series(series_id, quality_profile_id, episode_id)
 
 

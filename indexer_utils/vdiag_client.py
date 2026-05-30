@@ -20,6 +20,11 @@ _PROBE_TIMEOUT = 60
 _HEAVY_TIMEOUT = 60 * 30
 
 
+class VdiagError(RuntimeError):
+    """A vdiag call returned an error. Carries vdiag's own (clean) detail so the
+    MCP layer can forward it to the model as an actionable message."""
+
+
 def _post(endpoint: str, payload: Dict[str, Any], timeout: int) -> Dict[str, Any]:
     url = "/".join([config("VDIAG_URL").rstrip("/"), endpoint])
     resp = requests.post(
@@ -29,7 +34,7 @@ def _post(endpoint: str, payload: Dict[str, Any], timeout: int) -> Dict[str, Any
         timeout=timeout,
     )
     if resp.status_code >= 400:
-        raise RuntimeError(f"vdiag {endpoint} failed ({resp.status_code}): {resp.text}")
+        raise VdiagError(f"vdiag {endpoint} failed ({resp.status_code}): {resp.text}")
     result: Dict[str, Any] = resp.json()
     return result
 

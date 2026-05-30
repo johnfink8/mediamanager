@@ -10,12 +10,14 @@ route ``/mcp`` and the ``/.well-known`` discovery paths to the app
 """
 
 import asyncio
+import functools
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional
 
 from decouple import config
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from fastmcp.server.auth import RemoteAuthProvider
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from pydantic import AnyHttpUrl
@@ -26,6 +28,7 @@ from indexer_utils.ai_recs import (
     annotate_with_ai_async,
     refresh_visible_item_attributes,
 )
+from indexer_utils.compat import assess_compatibility
 from indexer_utils.models import (
     IgnoreItem,
     MovieRecommendationRecord,
@@ -56,7 +59,7 @@ from indexer_utils.sonarr_utils import (
     aupgrade_by_tvdb,
     aupgrade_series,
 )
-from indexer_utils.vdiag_client import aprobe, aremux, ascan
+from indexer_utils.vdiag_client import VdiagError, aprobe, aremux, ascan
 from indexer_utils.vid_utils import addMovie
 
 logger = logging.getLogger(__name__)
@@ -104,7 +107,32 @@ def _build_auth() -> Optional[RemoteAuthProvider]:
     )
 
 
-mcp: FastMCP = FastMCP(name="mediamanager", auth=_build_auth())
+# mask_error_details=True hides incidental exceptions (a bug, an unreachable
+# upstream, a malformed response) behind a generic message — they only get
+# logged server-side, never leaked to the model. Intentional, actionable
+# failures are surfaced explicitly via @safe_tool (below), which raises
+# ToolError; FastMCP forwards ToolError messages verbatim regardless of masking.
+mcp: FastMCP = FastMCP(name="mediamanager", auth=_build_auth(), mask_error_details=True)
+
+
+def safe_tool(fn: Callable[..., Awaitable[Any]]) -> Any:
+    """Register an MCP tool that turns expected failures into clean model output.
+
+    A tool (or a helper it calls) signals an actionable negative result with
+    ``ValueError`` (not found, bad input, nothing to do) or ``VdiagError`` (the
+    sidecar reported a problem). We convert those to ``ToolError`` so the model
+    sees the real message even with masking on; anything else propagates and is
+    masked as an internal error.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return await fn(*args, **kwargs)
+        except (ValueError, VdiagError) as exc:
+            raise ToolError(str(exc)) from exc
+
+    return mcp.tool(wrapper)
 
 
 def _serialize_item(item: IgnoreItem) -> Dict[str, Any]:
@@ -132,7 +160,7 @@ def _serialize_item(item: IgnoreItem) -> Dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
-@mcp.tool
+@safe_tool
 async def list_open_candidates(item_type: Optional[str] = None) -> List[Dict[str, Any]]:
     """List undecided candidates (not yet added or ignored, not deferred).
 
@@ -164,7 +192,7 @@ async def list_open_candidates(item_type: Optional[str] = None) -> List[Dict[str
     return [_serialize_item(item) for item in items]
 
 
-@mcp.tool
+@safe_tool
 async def get_candidate(item_id: int) -> Dict[str, Any]:
     """Fetch one candidate by its numeric id, including its full ``ai`` block."""
     async with db_session() as session:
@@ -174,7 +202,7 @@ async def get_candidate(item_id: int) -> Dict[str, Any]:
         return _serialize_item(item)
 
 
-@mcp.tool
+@safe_tool
 async def list_decided(
     item_type: Optional[str] = None,
     limit: int = 20,
@@ -208,13 +236,13 @@ async def list_decided(
     }
 
 
-@mcp.tool
+@safe_tool
 async def scheduled_jobs() -> List[Dict[str, Any]]:
     """List the persistent scheduler jobs and their next run times."""
     return list_scheduled_jobs()
 
 
-@mcp.tool
+@safe_tool
 async def recommend(prompt: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Run the recommendation agent and return a single movie suggestion.
 
@@ -243,7 +271,7 @@ async def recommend(prompt: Optional[str] = None) -> Optional[Dict[str, Any]]:
 # --------------------------------------------------------------------------
 
 
-@mcp.tool
+@safe_tool
 async def add_item(item_id: int) -> Dict[str, Any]:
     """Add a candidate to the library (Radarr for movies, Sonarr for shows).
 
@@ -265,7 +293,7 @@ async def add_item(item_id: int) -> Dict[str, Any]:
         return _serialize_item(item)
 
 
-@mcp.tool
+@safe_tool
 async def ignore_item(item_id: int) -> Dict[str, Any]:
     """Dismiss a candidate (mark ignored) so it drops off the open list."""
     async with db_session() as session:
@@ -278,7 +306,7 @@ async def ignore_item(item_id: int) -> Dict[str, Any]:
         return _serialize_item(item)
 
 
-@mcp.tool
+@safe_tool
 async def retry_ai(item_id: int) -> Dict[str, Any]:
     """Re-run the recommendation agent on a candidate and store the verdict.
 
@@ -310,7 +338,7 @@ async def retry_ai(item_id: int) -> Dict[str, Any]:
         return _serialize_item(item)
 
 
-@mcp.tool
+@safe_tool
 async def refresh_item(item_id: int) -> Dict[str, Any]:
     """Re-fetch ratings/metadata from Radarr/Sonarr for one candidate, then re-annotate.
 
@@ -343,7 +371,7 @@ async def refresh_item(item_id: int) -> Dict[str, Any]:
         return _serialize_item(item)
 
 
-@mcp.tool
+@safe_tool
 async def set_recommendation_preference(
     recommendation_id: int,
     preference: Literal["LIKE", "NOT_NOW", "NEVER"],
@@ -364,7 +392,7 @@ async def set_recommendation_preference(
         return {"id": record.id, "preference": preference}
 
 
-@mcp.tool
+@safe_tool
 async def recheck_visible(item_type: str) -> Dict[str, Any]:
     """Re-fetch ratings/metadata and re-run the agent for every open item of a type.
 
@@ -442,7 +470,7 @@ async def recheck_visible(item_type: str) -> Dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
-@mcp.tool
+@safe_tool
 async def radarr_find(term: str) -> List[Dict[str, Any]]:
     """Search for movies to add (Radarr title lookup).
 
@@ -463,7 +491,7 @@ async def radarr_find(term: str) -> List[Dict[str, Any]]:
     ]
 
 
-@mcp.tool
+@safe_tool
 async def radarr_movies(query: Optional[str] = None) -> List[Dict[str, Any]]:
     """List movies in the Radarr library, optionally filtered by title substring.
 
@@ -487,14 +515,14 @@ async def radarr_movies(query: Optional[str] = None) -> List[Dict[str, Any]]:
     ]
 
 
-@mcp.tool
+@safe_tool
 async def radarr_quality_profiles() -> List[Dict[str, Any]]:
     """List Radarr quality profiles (id + name) — e.g. to find the '1080p' profile id."""
     profiles: Any = await aradarr_query("qualityprofile")
     return [{"id": p.get("id"), "name": p.get("name")} for p in profiles]
 
 
-@mcp.tool
+@safe_tool
 async def radarr_add_movie(imdb_id: str) -> Dict[str, Any]:
     """Add a movie to Radarr by IMDb id (monitored) and trigger a search.
 
@@ -504,7 +532,7 @@ async def radarr_add_movie(imdb_id: str) -> Dict[str, Any]:
     return {"imdb_id": imdb_id, "status": "added"}
 
 
-@mcp.tool
+@safe_tool
 async def radarr_upgrade_movie(
     movie_id: int, quality_profile_id: Optional[int] = None
 ) -> Dict[str, Any]:
@@ -516,7 +544,7 @@ async def radarr_upgrade_movie(
     return await aupgrade_movie(movie_id, quality_profile_id)
 
 
-@mcp.tool
+@safe_tool
 async def sonarr_find(term: str) -> List[Dict[str, Any]]:
     """Search for series to add (Sonarr title lookup). Pass tvdb_id to sonarr_add_series."""
     results: Any = await asn_query("series/lookup", term=term)
@@ -532,7 +560,7 @@ async def sonarr_find(term: str) -> List[Dict[str, Any]]:
     ]
 
 
-@mcp.tool
+@safe_tool
 async def sonarr_series(query: Optional[str] = None) -> List[Dict[str, Any]]:
     """List series in the Sonarr library, optionally filtered by title.
 
@@ -554,21 +582,21 @@ async def sonarr_series(query: Optional[str] = None) -> List[Dict[str, Any]]:
     ]
 
 
-@mcp.tool
+@safe_tool
 async def sonarr_quality_profiles() -> List[Dict[str, Any]]:
     """List Sonarr quality profiles (id + name)."""
     profiles: Any = await asn_query("qualityprofile")
     return [{"id": p.get("id"), "name": p.get("name")} for p in profiles]
 
 
-@mcp.tool
+@safe_tool
 async def sonarr_add_series(tvdb_id: str) -> Dict[str, Any]:
     """Add a series to Sonarr by TVDB id (all seasons monitored) and search for episodes."""
     await asyncio.to_thread(add_series, tvdb_id)
     return {"tvdb_id": tvdb_id, "status": "added"}
 
 
-@mcp.tool
+@safe_tool
 async def sonarr_episodes(
     series_id: int, season: Optional[int] = None
 ) -> List[Dict[str, Any]]:
@@ -594,7 +622,7 @@ async def sonarr_episodes(
     return out
 
 
-@mcp.tool
+@safe_tool
 async def sonarr_regrab_episode(
     episode_id: int, replace_file: bool = True
 ) -> Dict[str, Any]:
@@ -607,7 +635,7 @@ async def sonarr_regrab_episode(
     return await aregrab_episode(episode_id, replace_file=replace_file)
 
 
-@mcp.tool
+@safe_tool
 async def sonarr_upgrade_series(
     series_id: int,
     quality_profile_id: Optional[int] = None,
@@ -633,7 +661,7 @@ async def sonarr_upgrade_series(
 # --------------------------------------------------------------------------
 
 
-@mcp.tool
+@safe_tool
 async def locate_video(
     title: str,
     item_type: str,
@@ -649,7 +677,7 @@ async def locate_video(
     return await asearch_videos(title, item_type, season, episode)
 
 
-@mcp.tool
+@safe_tool
 async def now_playing() -> List[Dict[str, Any]]:
     """List what's currently playing in Plex ("the show I'm watching now is freezing").
 
@@ -660,7 +688,7 @@ async def now_playing() -> List[Dict[str, Any]]:
     return await anow_playing()
 
 
-@mcp.tool
+@safe_tool
 async def diagnose_video(plex_rating_key: str, deep: bool = False) -> Dict[str, Any]:
     """Inspect a located video file for the corruption that causes freezing.
 
@@ -686,7 +714,23 @@ async def diagnose_video(plex_rating_key: str, deep: bool = False) -> Dict[str, 
     return result
 
 
-@mcp.tool
+@safe_tool
+async def check_compatibility(
+    plex_rating_key: str, client: str = "appletv"
+) -> Dict[str, Any]:
+    """Check whether a video direct-plays or must transcode on your client.
+
+    Defaults to Apple TV. Probes the file's container + video/audio codecs and
+    flags the usual transcode triggers (DTS audio, VP9/AV1 video, 4K H.264) —
+    a file forced to transcode is a common cause of freezing/buffering on a busy
+    server or weak network, distinct from on-disk corruption (use diagnose_video
+    for that).
+    """
+    probe = await aprobe(plex_rating_key)
+    return {"plex_rating_key": plex_rating_key, **assess_compatibility(probe, client)}
+
+
+@safe_tool
 async def repair_video(plex_rating_key: str, mode: str) -> Dict[str, Any]:
     """Repair a freezing video, either in place or by re-downloading.
 
@@ -726,7 +770,7 @@ async def repair_video(plex_rating_key: str, mode: str) -> Dict[str, Any]:
     raise ValueError(f"unknown repair mode {mode!r}; use 'remux' or 'redownload'")
 
 
-@mcp.tool
+@safe_tool
 async def upgrade_video(
     plex_rating_key: str, quality_profile_id: Optional[int] = None
 ) -> Dict[str, Any]:

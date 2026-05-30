@@ -123,6 +123,49 @@ def _ffprobe(path: str) -> Dict[str, Any]:
     return {"data": data, "warnings": warnings}
 
 
+def _float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _int(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _readable_level(codec: Optional[str], level: Any) -> Optional[float]:
+    """ffprobe's raw ``level`` to a human profile level.
+
+    H.264 encodes level as ×10 (42 → 4.2); HEVC as the general_level_idc, ×30
+    (153 → 5.1). ffprobe reports -99 when unknown.
+    """
+    raw = _int(level)
+    if raw is None or raw < 0:
+        return None
+    if codec == "h264":
+        return round(raw / 10, 1)
+    if codec == "hevc":
+        return round(raw / 30, 1)
+    return None
+
+
+def _bit_depth(pix_fmt: Optional[str], bits_per_raw_sample: Any) -> Optional[int]:
+    bits = _int(bits_per_raw_sample)
+    if bits:
+        return bits
+    if not pix_fmt:
+        return None
+    if "12" in pix_fmt:
+        return 12
+    if "10" in pix_fmt:
+        return 10
+    return 8
+
+
 def _summarize(probe: Dict[str, Any]) -> Dict[str, Any]:
     data = probe.get("data") or {}
     fmt = data.get("format") or {}
@@ -130,16 +173,11 @@ def _summarize(probe: Dict[str, Any]) -> Dict[str, Any]:
     video = [s for s in streams if s.get("codec_type") == "video"]
     audio = [s for s in streams if s.get("codec_type") == "audio"]
 
-    def _float(value: Any) -> Optional[float]:
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
     duration = _float(fmt.get("duration"))
     size = _float(fmt.get("size"))
     summary: Dict[str, Any] = {
         "container": fmt.get("format_name"),
+        "container_long": fmt.get("format_long_name"),
         "duration_sec": duration,
         "bit_rate": fmt.get("bit_rate"),
         "size_bytes": int(size) if size is not None else None,
@@ -147,13 +185,26 @@ def _summarize(probe: Dict[str, Any]) -> Dict[str, Any]:
             {
                 "codec": s.get("codec_name"),
                 "profile": s.get("profile"),
+                "level": s.get("level"),
+                "level_readable": _readable_level(s.get("codec_name"), s.get("level")),
                 "width": s.get("width"),
                 "height": s.get("height"),
+                "pix_fmt": s.get("pix_fmt"),
+                "bit_depth": _bit_depth(s.get("pix_fmt"), s.get("bits_per_raw_sample")),
+                "frame_rate": s.get("avg_frame_rate"),
+                "color_transfer": s.get("color_transfer"),
             }
             for s in video
         ],
         "audio_streams": [
-            {"codec": s.get("codec_name"), "channels": s.get("channels")} for s in audio
+            {
+                "codec": s.get("codec_name"),
+                "profile": s.get("profile"),
+                "channels": s.get("channels"),
+                "channel_layout": s.get("channel_layout"),
+                "sample_rate": s.get("sample_rate"),
+            }
+            for s in audio
         ],
         "warnings": probe.get("warnings") or [],
     }
