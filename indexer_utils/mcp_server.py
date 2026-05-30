@@ -31,11 +31,32 @@ from indexer_utils.models import (
     MovieRecommendationRecord,
     RecommendationPreference,
 )
-from indexer_utils.radarr_utils import aradarr_query
+from indexer_utils.plex_utils import (
+    anow_playing,
+    arefresh_item,
+    aresolve_item,
+    asearch_videos,
+)
+from indexer_utils.radarr_utils import (
+    aget_movie,
+    aradarr_query,
+    aredownload_by_imdb,
+    aupgrade_by_imdb,
+    aupgrade_movie,
+)
 from indexer_utils.recommendations import recommend_movie
 from indexer_utils.scheduler import list_scheduled_jobs
 from indexer_utils.session import db_session
-from indexer_utils.sonarr_utils import add_series, asn_delete, asn_query
+from indexer_utils.sonarr_utils import (
+    add_series,
+    aget_series,
+    aredownload_episode,
+    aregrab_episode,
+    asn_query,
+    aupgrade_by_tvdb,
+    aupgrade_series,
+)
+from indexer_utils.vdiag_client import aprobe, aremux, ascan
 from indexer_utils.vid_utils import addMovie
 
 logger = logging.getLogger(__name__)
@@ -492,19 +513,7 @@ async def radarr_upgrade_movie(
     Pass quality_profile_id (from radarr_quality_profiles) to switch profiles;
     omit it to just re-search at the current quality. Triggers a Radarr search.
     """
-    movie: Any = await aradarr_query(f"movie/{movie_id}")
-    if quality_profile_id is not None:
-        movie["qualityProfileId"] = quality_profile_id
-        movie["monitored"] = True
-        await aradarr_query(f"movie/{movie_id}", method="put", **movie)
-    await aradarr_query(
-        "command", method="post", name="MoviesSearch", movieIds=[movie_id]
-    )
-    return {
-        "id": movie_id,
-        "quality_profile_id": movie.get("qualityProfileId"),
-        "status": "searching",
-    }
+    return await aupgrade_movie(movie_id, quality_profile_id)
 
 
 @mcp.tool
@@ -595,15 +604,176 @@ async def sonarr_regrab_episode(
     when the current file already meets the quality cutoff, then triggers a
     search. Set replace_file=False to only search for an upgrade without deleting.
     """
-    ep: Any = await asn_query(f"episode/{episode_id}")
-    file_id = ep.get("episodeFileId") or 0
-    deleted = False
-    if replace_file and file_id:
-        await asn_delete(f"episodefile/{file_id}")
-        deleted = True
-    await asn_query("command", post=True, name="EpisodeSearch", episodeIds=[episode_id])
-    return {
-        "episode_id": episode_id,
-        "deleted_old_file": deleted,
-        "status": "searching",
+    return await aregrab_episode(episode_id, replace_file=replace_file)
+
+
+@mcp.tool
+async def sonarr_upgrade_series(
+    series_id: int,
+    quality_profile_id: Optional[int] = None,
+    episode_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Upgrade a series' quality ("get this show in 1080p") — the Sonarr analogue
+    of radarr_upgrade_movie.
+
+    Pass quality_profile_id (from sonarr_quality_profiles) to switch the series'
+    profile; omit it to just re-search at the current quality. Quality in Sonarr
+    is per-series, so pass episode_id to pull only that episode at the new
+    quality, otherwise the whole series is searched.
+    """
+    return await aupgrade_series(series_id, quality_profile_id, episode_id)
+
+
+# --------------------------------------------------------------------------
+# Video diagnostics & repair
+#
+# locate -> diagnose -> repair. Paths come from Plex (the reliable source) and
+# are inspected/repaired by the vdiag ffmpeg sidecar; the model never supplies a
+# filesystem path, only a Plex ratingKey.
+# --------------------------------------------------------------------------
+
+
+@mcp.tool
+async def locate_video(
+    title: str,
+    item_type: str,
+    season: Optional[int] = None,
+    episode: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Find a movie or episode in Plex and its on-disk file ("X is freezing").
+
+    item_type is "mv" for a movie or "tv" for an episode; for episodes pass
+    season + episode to narrow it down. Returns candidates each with a
+    plex_rating_key — hand that to diagnose_video / repair_video.
+    """
+    return await asearch_videos(title, item_type, season, episode)
+
+
+@mcp.tool
+async def now_playing() -> List[Dict[str, Any]]:
+    """List what's currently playing in Plex ("the show I'm watching now is freezing").
+
+    Returns each active stream with a plex_rating_key (for diagnose_video /
+    repair_video) plus user/player/state so you can tell whose stream is which
+    when several are live.
+    """
+    return await anow_playing()
+
+
+@mcp.tool
+async def diagnose_video(plex_rating_key: str, deep: bool = False) -> Dict[str, Any]:
+    """Inspect a located video file for the corruption that causes freezing.
+
+    Quick by default (ffprobe header/stream check, seconds). Set deep=True for a
+    full decode scan (ffmpeg reads the whole file, minutes) that surfaces frame
+    errors a header probe misses — use it when playback freezes/stutters. Returns
+    the raw probe (and scan) facts plus signal flags; decide remux vs redownload
+    from those.
+    """
+    item = await aresolve_item(plex_rating_key)
+    if not item:
+        raise ValueError(f"no Plex item for ratingKey {plex_rating_key}")
+    # vdiag re-resolves the path from the ratingKey itself; we pass the key, not
+    # a path. aresolve_item here is just for the item_type/title context.
+    result: Dict[str, Any] = {
+        "plex_rating_key": plex_rating_key,
+        "item_type": item.get("item_type"),
+        "title": item.get("title"),
+        "probe": await aprobe(plex_rating_key),
     }
+    if deep:
+        result["scan"] = await ascan(plex_rating_key)
+    return result
+
+
+@mcp.tool
+async def repair_video(plex_rating_key: str, mode: str) -> Dict[str, Any]:
+    """Repair a freezing video, either in place or by re-downloading.
+
+    mode="remux" losslessly rebuilds the container in place (fixes a broken
+    index/interleave without re-downloading) then refreshes Plex. mode="redownload"
+    deletes the file and triggers a fresh Radarr/Sonarr grab. Try remux first; fall
+    back to redownload if the diagnosis shows real decode corruption.
+    """
+    item = await aresolve_item(plex_rating_key)
+    if not item:
+        raise ValueError(f"no Plex item for ratingKey {plex_rating_key}")
+
+    if mode == "remux":
+        result = await aremux(plex_rating_key)
+        await arefresh_item(plex_rating_key)
+        return {"mode": "remux", "title": item.get("title"), **result}
+
+    if mode == "redownload":
+        if item.get("item_type") == "mv":
+            imdb_id = item.get("imdb_id")
+            if not imdb_id:
+                raise ValueError(
+                    "no imdb id on the Plex movie to drive a Radarr re-grab"
+                )
+            outcome = await aredownload_by_imdb(imdb_id)
+        else:
+            tvdb_id = item.get("tvdb_id")
+            season = item.get("season")
+            episode = item.get("episode")
+            if not (tvdb_id and season is not None and episode is not None):
+                raise ValueError(
+                    "missing tvdb id / season / episode for a Sonarr re-grab"
+                )
+            outcome = await aredownload_episode(tvdb_id, season, episode)
+        return {"mode": "redownload", "title": item.get("title"), **outcome}
+
+    raise ValueError(f"unknown repair mode {mode!r}; use 'remux' or 'redownload'")
+
+
+@mcp.tool
+async def upgrade_video(
+    plex_rating_key: str, quality_profile_id: Optional[int] = None
+) -> Dict[str, Any]:
+    """Upgrade what you're watching to a better quality ("get this in 1080p").
+
+    Movies and shows use different quality-profile sets, so call once with just
+    the ratingKey to see this item's available profiles + its current one, then
+    call again with the chosen quality_profile_id to switch and re-grab. For an
+    episode the new quality is applied to the series and that episode is searched.
+    """
+    item = await aresolve_item(plex_rating_key)
+    if not item:
+        raise ValueError(f"no Plex item for ratingKey {plex_rating_key}")
+
+    if item["item_type"] == "mv":
+        imdb_id = item.get("imdb_id")
+        if not imdb_id:
+            raise ValueError("no imdb id on the Plex movie to drive a Radarr upgrade")
+        if quality_profile_id is None:
+            movie: Any = await aget_movie(imdb_id)
+            profiles: Any = await aradarr_query("qualityprofile")
+            return {
+                "item_type": "mv",
+                "title": item.get("title"),
+                "current_quality_profile_id": (movie or {}).get("qualityProfileId"),
+                "available_profiles": [
+                    {"id": p.get("id"), "name": p.get("name")} for p in profiles
+                ],
+            }
+        outcome = await aupgrade_by_imdb(imdb_id, quality_profile_id)
+        return {"item_type": "mv", "title": item.get("title"), **outcome}
+
+    tvdb_id = item.get("tvdb_id")
+    if not tvdb_id:
+        raise ValueError("no tvdb id on the Plex show to drive a Sonarr upgrade")
+    if quality_profile_id is None:
+        series: Any = await aget_series(int(tvdb_id))
+        sn_profiles: Any = await asn_query("qualityprofile")
+        return {
+            "item_type": "tv",
+            "title": item.get("title"),
+            "current_quality_profile_id": (series or {}).get("qualityProfileId"),
+            "available_profiles": [
+                {"id": p.get("id"), "name": p.get("name")} for p in sn_profiles
+            ],
+        }
+    outcome = await aupgrade_by_tvdb(
+        tvdb_id, quality_profile_id, item.get("season"), item.get("episode")
+    )
+    return {"item_type": "tv", "title": item.get("title"), **outcome}

@@ -102,6 +102,9 @@ services:
       target: runner
     volumes:
       - ./tests:/opt/servermonitor/tests
+      # vdiag ships as its own image, not in the app build; mount it so the
+      # sidecar path-safety unit test can load server.py.
+      - ./vdiag:/opt/servermonitor/vdiag:ro
     depends_on:
       db:
         condition: service_healthy

@@ -51,6 +51,25 @@ services:
     networks: [proxy]
     ports:
       - 7878:7878
+  vdiag:
+    # ffmpeg sidecar for the video diagnostic/repair tools. Holds the media
+    # mount the app containers lack. Internal only — no published ports, not
+    # proxied by nginx; the VDIAG_TOKEN here must match the app's .env value.
+    build:
+      context: ./vdiag
+    user: "1000:1000"
+    environment:
+      - VDIAG_TOKEN=${VDIAG_TOKEN}
+      - VDIAG_ALLOWED_ROOTS=/store,/mnt
+      # vdiag resolves the ratingKey → path via Plex itself (never trusts a
+      # path off the wire), so it needs Plex creds.
+      - PLEX_URL=${PLEX_URL}
+      - PLEX_TOKEN=${PLEX_TOKEN}
+    volumes:
+      - /store:/store
+      - /mnt:/mnt
+    restart: unless-stopped
+    networks: [proxy]
   servermonitor:
     build:
       context: .
@@ -59,6 +78,7 @@ services:
     depends_on:
       - redis
       - db
+      - vdiag
     networks: [proxy]
   builder:
     build:
@@ -74,6 +94,7 @@ services:
     depends_on:
       - redis
       - db
+      - vdiag
     volumes:
       - .:/opt/servermonitor
     ports:
