@@ -342,6 +342,233 @@ async def scan_and_index_plex_library() -> Dict[str, int]:
     return {"created": created, "updated": updated}
 
 
+# ---------------------------------------------------------------------------
+# File-path resolution for the video diagnostic/repair tools.
+#
+# Plex is the source of truth for a title's on-disk path (``Media[].Part[].file``)
+# — Radarr's ``movieFile`` is not guaranteed present. A single metadata lookup
+# also yields the external ids (imdb/tvdb) and, for episodes, the season/episode
+# numbers, which the repair path uses to map back to Radarr/Sonarr.
+# ---------------------------------------------------------------------------
+
+
+def _plex_get(path: str, **params: Any) -> Dict[str, Any]:
+    url = config("PLEX_URL")
+    r = requests.get(url + path, headers=_plex_headers(), params=params)
+    r.raise_for_status()
+    container: Dict[str, Any] = r.json().get("MediaContainer", {})
+    return container
+
+
+def _metadata_entry(rating_key: str) -> Optional[Dict[str, Any]]:
+    items = _plex_get(f"/library/metadata/{rating_key}", includeGuids=1).get("Metadata")
+    if not items:
+        return None
+    entry: Dict[str, Any] = items[0]
+    return entry
+
+
+def _parts(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
+    parts: List[Dict[str, Any]] = []
+    for media in entry.get("Media") or []:
+        for part in media.get("Part") or []:
+            parts.append(part)
+    return parts
+
+
+def _file_paths(entry: Dict[str, Any]) -> List[str]:
+    return [p["file"] for p in _parts(entry) if p.get("file")]
+
+
+def _first_size(entry: Dict[str, Any]) -> Optional[int]:
+    for part in _parts(entry):
+        if part.get("size") is not None:
+            try:
+                return int(part["size"])
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def resolve_item(rating_key: str) -> Optional[Dict[str, Any]]:
+    """Resolve a Plex ratingKey to its on-disk path(s) + identity.
+
+    Returns a dict with ``item_type`` (``mv``/``tv``), ``file_path``(+``file_paths``),
+    ``title``/``year``, and the ids needed to drive a re-download: ``imdb_id`` for
+    movies; ``tvdb_id`` + ``season`` + ``episode`` for episodes. Returns ``None`` if
+    the key is unknown or not a playable movie/episode.
+    """
+    entry = _metadata_entry(rating_key)
+    if not entry:
+        return None
+    paths = _file_paths(entry)
+    base: Dict[str, Any] = {
+        "plex_rating_key": str(rating_key),
+        "title": entry.get("title") or entry.get("grandparentTitle") or "",
+        "year": entry.get("year"),
+        "file_path": paths[0] if paths else None,
+        "file_paths": paths,
+        "size": _first_size(entry),
+    }
+    ptype = entry.get("type")
+    if ptype == "movie":
+        imdb_id, _ = _extract_ids_from_metadata(entry)
+        base.update({"item_type": "mv", "imdb_id": imdb_id})
+        return base
+    if ptype == "episode":
+        tvdb_id: Optional[str] = None
+        grandparent = entry.get("grandparentRatingKey")
+        if grandparent:
+            show = _metadata_entry(str(grandparent))
+            if show:
+                _, tvdb_id = _extract_ids_from_metadata(show)
+        base.update(
+            {
+                "item_type": "tv",
+                "tvdb_id": tvdb_id,
+                "series_title": entry.get("grandparentTitle"),
+                "season": entry.get("parentIndex"),
+                "episode": entry.get("index"),
+            }
+        )
+        return base
+    return None
+
+
+def _candidate(entry: Dict[str, Any], title: str) -> Dict[str, Any]:
+    paths = _file_paths(entry)
+    return {
+        "plex_rating_key": str(entry.get("ratingKey")),
+        "title": title,
+        "year": entry.get("year"),
+        "file_path": paths[0] if paths else None,
+        "size": _first_size(entry),
+    }
+
+
+def _search_hub(query: str, hub_type: str) -> List[Dict[str, Any]]:
+    """Fuzzy Plex search via ``/hubs/search`` (what the Plex UI uses).
+
+    Unlike the legacy ``/search`` it matches loose, unpunctuated, even
+    misspelled titles ("captain america civil war"), and the entries carry
+    ``Media``/``Part`` inline so the file path comes back without a second
+    fetch. Returns the items from the hub of the requested ``type``.
+    """
+    hubs = _plex_get("/hubs/search", query=query, limit=20).get("Hub") or []
+    for hub in hubs:
+        if hub.get("type") == hub_type:
+            items: List[Dict[str, Any]] = hub.get("Metadata") or []
+            return items
+    return []
+
+
+def search_videos(
+    title: str,
+    item_type: str,
+    season: Optional[int] = None,
+    episode: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Find playable items in Plex matching ``title``.
+
+    For ``mv`` returns matching movies. For ``tv`` finds the show and returns its
+    episodes (filtered by ``season``/``episode`` when given). Each candidate carries
+    a ``plex_rating_key`` to hand to diagnose/repair, plus the on-disk ``file_path``.
+    """
+    if item_type == "mv":
+        return [
+            _candidate(e, e.get("title") or "") for e in _search_hub(title, "movie")
+        ][:10]
+
+    out: List[Dict[str, Any]] = []
+    for show in _search_hub(title, "show")[:3]:
+        leaves = (
+            _plex_get(f"/library/metadata/{show.get('ratingKey')}/allLeaves").get(
+                "Metadata"
+            )
+            or []
+        )
+        for ep in leaves:
+            if season is not None and ep.get("parentIndex") != season:
+                continue
+            if episode is not None and ep.get("index") != episode:
+                continue
+            label = "%s S%sE%s - %s" % (
+                show.get("title"),
+                ep.get("parentIndex"),
+                ep.get("index"),
+                ep.get("title") or "",
+            )
+            out.append(_candidate(ep, label))
+    return out[:30]
+
+
+def now_playing() -> List[Dict[str, Any]]:
+    """Return the items in Plex's active sessions ("the show I'm watching now").
+
+    Each candidate has the same ``plex_rating_key`` + ``file_path`` shape as
+    ``search_videos`` so it feeds straight into diagnose/repair, plus session
+    context (``user``/``player``/``state``) to disambiguate when more than one
+    stream is live.
+    """
+    sessions = _plex_get("/status/sessions").get("Metadata") or []
+    out: List[Dict[str, Any]] = []
+    for entry in sessions:
+        if entry.get("type") == "episode":
+            label = "%s S%sE%s - %s" % (
+                entry.get("grandparentTitle"),
+                entry.get("parentIndex"),
+                entry.get("index"),
+                entry.get("title") or "",
+            )
+            item_type = "tv"
+        else:
+            label = entry.get("title") or ""
+            item_type = "mv"
+        candidate = _candidate(entry, label)
+        player = entry.get("Player") or {}
+        user = entry.get("User") or {}
+        candidate.update(
+            {
+                "item_type": item_type,
+                "user": user.get("title"),
+                "player": player.get("title"),
+                "state": player.get("state"),
+            }
+        )
+        out.append(candidate)
+    return out
+
+
+async def anow_playing() -> List[Dict[str, Any]]:
+    return await asyncio.to_thread(now_playing)
+
+
+def refresh_item(rating_key: str) -> None:
+    """Ask Plex to re-read a single item's file (e.g. after an in-place remux)."""
+    url = config("PLEX_URL")
+    r = requests.put(
+        f"{url}/library/metadata/{rating_key}/refresh", headers=_plex_headers()
+    )
+    r.raise_for_status()
+
+
+async def aresolve_item(rating_key: str) -> Optional[Dict[str, Any]]:
+    return await asyncio.to_thread(resolve_item, rating_key)
+
+
+async def asearch_videos(
+    title: str,
+    item_type: str,
+    season: Optional[int] = None,
+    episode: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    return await asyncio.to_thread(search_videos, title, item_type, season, episode)
+
+
+async def arefresh_item(rating_key: str) -> None:
+    await asyncio.to_thread(refresh_item, rating_key)
+
+
 def get_recently_played_imdb_ids(limit: int = 40) -> Set[str]:
     metadata = get_recently_played(limit=limit)
     recent_ids: Set[str] = set()
