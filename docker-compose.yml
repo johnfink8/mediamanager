@@ -15,6 +15,13 @@ services:
       X_AUTHELIA_CONFIG_FILTERS: 'template'
       AUTHELIA_SESSION_SECRET_FILE: "/run/secrets/SESSION_SECRET"
       AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE: "/run/secrets/STORAGE_ENCRYPTION_KEY"
+      # Long-lived MCP connection: the default OIDC refresh-token lifespan is
+      # only 90m, so the claude.ai connector reports "Connection has expired"
+      # after a short idle. Bump it to a year; Authelia rotates the refresh
+      # token on each use, so the chain stays alive indefinitely as long as the
+      # connector is exercised within the window. Set here (not in the
+      # root-owned, untracked configuration.yml) so it survives redeploys.
+      AUTHELIA_IDENTITY_PROVIDERS_OIDC_LIFESPANS_REFRESH_TOKEN: "1y"
     volumes:
       - ./authelia_config:/config
     expose: ["9091"]
