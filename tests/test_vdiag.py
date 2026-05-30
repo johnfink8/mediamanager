@@ -103,6 +103,58 @@ def test_plex_file_path_404_when_item_has_no_file(monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# sidecar background jobs
+# --------------------------------------------------------------------------
+
+
+def test_progress_from_line_parses_out_time():
+    assert vserver._progress_from_line("out_time_us=30000000", 60.0) == 50.0
+    # caps at 99 even once ffmpeg passes the probed duration
+    assert vserver._progress_from_line("out_time_us=99000000", 60.0) == 99.0
+    # ignored: non-progress lines, N/A, and a missing total
+    assert vserver._progress_from_line("frame=10", 60.0) is None
+    assert vserver._progress_from_line("out_time_us=N/A", 60.0) is None
+    assert vserver._progress_from_line("out_time_us=30000000", None) is None
+
+
+def test_run_scan_marks_job_done_clean(monkeypatch):
+    monkeypatch.setattr(vserver, "_write_job", lambda job: None)
+    monkeypatch.setattr(vserver, "_probe_duration", lambda path: 100.0)
+    monkeypatch.setattr(vserver, "_run_ffmpeg_progress", lambda cmd, total, cb: (0, ""))
+    job = {"id": "j1", "kind": "scan", "rating_key": "1", "status": "running"}
+    vserver._run_scan(job, "/store/x.mkv", None)
+    assert job["status"] == "done"
+    assert job["result"]["ok"] is True
+    assert job["result"]["error_count"] == 0
+
+
+def test_run_scan_reports_decode_errors(monkeypatch):
+    monkeypatch.setattr(vserver, "_write_job", lambda job: None)
+    monkeypatch.setattr(vserver, "_probe_duration", lambda path: 100.0)
+    monkeypatch.setattr(
+        vserver, "_run_ffmpeg_progress", lambda cmd, total, cb: (0, "err one\nerr two")
+    )
+    job = {"id": "j2", "kind": "scan", "rating_key": "1", "status": "running"}
+    vserver._run_scan(job, "/store/x.mkv", None)
+    assert job["status"] == "done"
+    assert job["result"]["ok"] is False
+    assert job["result"]["error_count"] == 2
+
+
+def test_run_scan_failure_marks_job_error(monkeypatch):
+    monkeypatch.setattr(vserver, "_write_job", lambda job: None)
+
+    def boom(path):
+        raise RuntimeError("probe blew up")
+
+    monkeypatch.setattr(vserver, "_probe_duration", boom)
+    job = {"id": "j3", "kind": "scan", "rating_key": "1", "status": "running"}
+    vserver._run_scan(job, "/store/x.mkv", None)
+    assert job["status"] == "error"
+    assert "probe blew up" in job["error"]
+
+
+# --------------------------------------------------------------------------
 # diagnose_video
 # --------------------------------------------------------------------------
 
@@ -122,40 +174,40 @@ async def test_diagnose_quick_probes_only(monkeypatch):
         calls.append(rating_key)
         return {"container": "matroska"}
 
-    async def fake_scan(
+    async def fake_start_scan(
         rating_key: str, duration: Optional[float] = None
     ) -> Dict[str, Any]:
-        raise AssertionError("scan should not run for a quick diagnosis")
+        raise AssertionError("a quick diagnosis must not start a scan job")
 
     monkeypatch.setattr(mcp_server, "aprobe", fake_probe)
-    monkeypatch.setattr(mcp_server, "ascan", fake_scan)
+    monkeypatch.setattr(mcp_server, "astart_scan", fake_start_scan)
 
     result = await mcp_server.diagnose_video("123")
     assert calls == ["123"]
     assert result["probe"] == {"container": "matroska"}
-    assert "scan" not in result
+    assert "scan_job_id" not in result
 
 
-async def test_diagnose_deep_also_scans(monkeypatch):
+async def test_diagnose_deep_starts_background_scan_job(monkeypatch):
     _patch_resolve(monkeypatch, {"item_type": "mv", "title": "Foo"})
 
     async def fake_probe(rating_key: str) -> Dict[str, Any]:
         return {"ok": True}
 
-    scanned: List[str] = []
+    started: List[str] = []
 
-    async def fake_scan(
+    async def fake_start_scan(
         rating_key: str, duration: Optional[float] = None
     ) -> Dict[str, Any]:
-        scanned.append(rating_key)
-        return {"ok": False, "error_count": 9}
+        started.append(rating_key)
+        return {"job_id": "job-abc", "status": "running"}
 
     monkeypatch.setattr(mcp_server, "aprobe", fake_probe)
-    monkeypatch.setattr(mcp_server, "ascan", fake_scan)
+    monkeypatch.setattr(mcp_server, "astart_scan", fake_start_scan)
 
     result = await mcp_server.diagnose_video("123", deep=True)
-    assert scanned == ["123"]
-    assert result["scan"]["error_count"] == 9
+    assert started == ["123"]
+    assert result["scan_job_id"] == "job-abc"
 
 
 async def test_diagnose_raises_for_unknown_rating_key(monkeypatch):
@@ -171,25 +223,38 @@ async def test_diagnose_raises_for_unknown_rating_key(monkeypatch):
 # --------------------------------------------------------------------------
 
 
-async def test_repair_remux_then_refreshes_plex(monkeypatch):
+async def test_repair_remux_starts_background_job(monkeypatch):
     _patch_resolve(monkeypatch, {"item_type": "mv", "title": "Foo"})
-    remuxed: List[str] = []
-    refreshed: List[str] = []
+    started: List[str] = []
 
-    async def fake_remux(rating_key: str) -> Dict[str, Any]:
-        remuxed.append(rating_key)
-        return {"remuxed": True}
+    async def fake_start_remux(rating_key: str) -> Dict[str, Any]:
+        started.append(rating_key)
+        return {"job_id": "job-xyz", "status": "running"}
 
-    async def fake_refresh(rating_key: str) -> None:
-        refreshed.append(rating_key)
-
-    monkeypatch.setattr(mcp_server, "aremux", fake_remux)
-    monkeypatch.setattr(mcp_server, "arefresh_item", fake_refresh)
+    monkeypatch.setattr(mcp_server, "astart_remux", fake_start_remux)
 
     result = await mcp_server.repair_video("123", "remux")
-    assert remuxed == ["123"]
-    assert refreshed == ["123"]
+    assert started == ["123"]
     assert result["mode"] == "remux"
+    assert result["job_id"] == "job-xyz"
+
+
+async def test_get_video_job_returns_state(monkeypatch):
+    async def fake_get_job(job_id: str) -> Optional[Dict[str, Any]]:
+        return {"id": job_id, "status": "running", "progress": 42.0}
+
+    monkeypatch.setattr(mcp_server, "aget_job", fake_get_job)
+    result = await mcp_server.get_video_job("job-abc")
+    assert result["progress"] == 42.0
+
+
+async def test_get_video_job_unknown_raises(monkeypatch):
+    async def fake_get_job(job_id: str) -> Optional[Dict[str, Any]]:
+        return None
+
+    monkeypatch.setattr(mcp_server, "aget_job", fake_get_job)
+    with pytest.raises(ToolError):
+        await mcp_server.get_video_job("nope")
 
 
 async def test_repair_redownload_movie_uses_imdb(monkeypatch):

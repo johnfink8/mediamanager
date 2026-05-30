@@ -65,10 +65,15 @@ services:
       # path off the wire), so it needs Plex creds.
       - PLEX_URL=${PLEX_URL}
       - PLEX_TOKEN=${PLEX_TOKEN}
+      # scan/remux run as background jobs whose progress lands in the shared
+      # redis (the app polls it).
+      - REDIS_HOST=redis
     volumes:
       - /store:/store
       - /mnt:/mnt
     restart: unless-stopped
+    depends_on:
+      - redis
     networks: [proxy]
   servermonitor:
     build:
