@@ -36,7 +36,6 @@ from indexer_utils.models import (
 )
 from indexer_utils.plex_utils import (
     anow_playing,
-    arefresh_item,
     aresolve_item,
     asearch_videos,
 )
@@ -59,7 +58,13 @@ from indexer_utils.sonarr_utils import (
     aupgrade_by_tvdb,
     aupgrade_series,
 )
-from indexer_utils.vdiag_client import VdiagError, aprobe, aremux, ascan
+from indexer_utils.vdiag_client import (
+    VdiagError,
+    aget_job,
+    aprobe,
+    astart_remux,
+    astart_scan,
+)
 from indexer_utils.vid_utils import addMovie
 
 logger = logging.getLogger(__name__)
@@ -692,11 +697,11 @@ async def now_playing() -> List[Dict[str, Any]]:
 async def diagnose_video(plex_rating_key: str, deep: bool = False) -> Dict[str, Any]:
     """Inspect a located video file for the corruption that causes freezing.
 
-    Quick by default (ffprobe header/stream check, seconds). Set deep=True for a
-    full decode scan (ffmpeg reads the whole file, minutes) that surfaces frame
-    errors a header probe misses — use it when playback freezes/stutters. Returns
-    the raw probe (and scan) facts plus signal flags; decide remux vs redownload
-    from those.
+    Quick by default (ffprobe header/stream check, returns immediately). Set
+    deep=True to also launch a full decode scan (ffmpeg reads the whole file,
+    minutes) that surfaces frame errors a header probe misses — use it when
+    playback freezes/stutters. The deep scan runs in the background: the result
+    carries a scan_job_id; poll get_video_job(job_id) for its progress/outcome.
     """
     item = await aresolve_item(plex_rating_key)
     if not item:
@@ -710,8 +715,24 @@ async def diagnose_video(plex_rating_key: str, deep: bool = False) -> Dict[str, 
         "probe": await aprobe(plex_rating_key),
     }
     if deep:
-        result["scan"] = await ascan(plex_rating_key)
+        job = await astart_scan(plex_rating_key)
+        result["scan_job_id"] = job.get("job_id")
+        result["note"] = "deep scan running in the background; poll get_video_job"
     return result
+
+
+@safe_tool
+async def get_video_job(job_id: str) -> Dict[str, Any]:
+    """Poll a background scan/remux job started by diagnose_video or repair_video.
+
+    Returns status ("running" | "done" | "error"), a progress percentage while
+    running, and on completion the result (scan findings, or remux before/after)
+    or an error message. Jobs expire after a day.
+    """
+    job = await aget_job(job_id)
+    if job is None:
+        raise ValueError(f"no vdiag job {job_id} (unknown or expired)")
+    return job
 
 
 @safe_tool
@@ -735,18 +756,25 @@ async def repair_video(plex_rating_key: str, mode: str) -> Dict[str, Any]:
     """Repair a freezing video, either in place or by re-downloading.
 
     mode="remux" losslessly rebuilds the container in place (fixes a broken
-    index/interleave without re-downloading) then refreshes Plex. mode="redownload"
-    deletes the file and triggers a fresh Radarr/Sonarr grab. Try remux first; fall
-    back to redownload if the diagnosis shows real decode corruption.
+    index/interleave without re-downloading) and refreshes Plex when done.
+    Because a remux can take minutes it runs in the background: the result carries
+    a job_id; poll get_video_job(job_id) for progress/outcome. mode="redownload"
+    deletes the file and triggers a fresh Radarr/Sonarr grab (returns immediately).
+    Try remux first; fall back to redownload if the diagnosis shows real corruption.
     """
     item = await aresolve_item(plex_rating_key)
     if not item:
         raise ValueError(f"no Plex item for ratingKey {plex_rating_key}")
 
     if mode == "remux":
-        result = await aremux(plex_rating_key)
-        await arefresh_item(plex_rating_key)
-        return {"mode": "remux", "title": item.get("title"), **result}
+        job = await astart_remux(plex_rating_key)
+        return {
+            "mode": "remux",
+            "title": item.get("title"),
+            "job_id": job.get("job_id"),
+            "status": job.get("status"),
+            "note": "remux running in the background; poll get_video_job",
+        }
 
     if mode == "redownload":
         if item.get("item_type") == "mv":
