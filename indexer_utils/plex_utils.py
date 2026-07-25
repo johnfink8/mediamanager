@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import quote_plus
 
@@ -34,36 +35,34 @@ def find_movie(title: str, year: Optional[int] = None) -> Optional[Dict[str, Any
     return None
 
 
-def get_recently_played(limit: int = 40) -> List[Dict[str, Any]]:
-    """Fetch recent play history for movies from Plex.
+def _viewed_at(entry: Dict[str, Any]) -> int:
+    try:
+        return int(entry.get("viewedAt") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _fetch_history(metadata_item_type: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Fetch Plex play history, most recent first.
 
     Plex's ``/status/sessions/history/all`` endpoint ignores ``maxResults``
     and returns the entire history (potentially thousands of entries) in
-    no guaranteed order. Sort by ``viewedAt`` descending and slice
-    client-side so callers actually get the most-recent ``limit`` plays.
+    no guaranteed order, so callers get the full sorted list and slice it
+    themselves. ``metadata_item_type`` filters server-side (1=movie,
+    4=episode).
     """
+    params: Dict[str, Any] = {}
+    if metadata_item_type is not None:
+        params["metadataItemType"] = metadata_item_type
+    logger.info("Fetching Plex play history (type=%s)", metadata_item_type)
+    entries = _plex_get("/status/sessions/history/all", **params).get("Metadata") or []
+    entries.sort(key=_viewed_at, reverse=True)
+    return entries
 
-    url = config("PLEX_URL")
-    headers = _plex_headers()
-    params = {"maxResults": limit, "metadataItemType": 1}
-    logger.info("Fetching Plex play history (limit=%d)", limit)
-    response = requests.get(
-        f"{url}/status/sessions/history/all",
-        headers=headers,
-        params=params,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    metadata = payload.get("MediaContainer", {}).get("Metadata", []) or []
 
-    def _viewed_at(entry: Dict[str, Any]) -> int:
-        try:
-            return int(entry.get("viewedAt") or 0)
-        except (TypeError, ValueError):
-            return 0
-
-    metadata.sort(key=_viewed_at, reverse=True)
-    return metadata[:limit]
+def get_recently_played(limit: int = 40) -> List[Dict[str, Any]]:
+    """Fetch recent play history for movies from Plex."""
+    return _fetch_history(metadata_item_type=1)[:limit]
 
 
 def _extract_imdb_from_guid(guid_value: Any) -> Optional[str]:
@@ -541,6 +540,125 @@ def now_playing() -> List[Dict[str, Any]]:
 
 async def anow_playing() -> List[Dict[str, Any]]:
     return await asyncio.to_thread(now_playing)
+
+
+def _account_names() -> Dict[Any, str]:
+    accounts = _plex_get("/accounts").get("Account") or []
+    return {
+        a.get("id"): a.get("name")
+        for a in accounts
+        if a.get("id") is not None and a.get("name")
+    }
+
+
+def _rating_key_from_key_path(value: Any) -> Optional[str]:
+    """Extract the ratingKey from a Plex key path like ``/library/metadata/123``."""
+    if not value:
+        return None
+    tail = str(value).rstrip("/").rsplit("/", 1)[-1]
+    return tail or None
+
+
+def _history_entry_matches(entry: Dict[str, Any], keys: Set[str]) -> bool:
+    rating_key = entry.get("ratingKey")
+    if rating_key is not None and str(rating_key) in keys:
+        return True
+    grandparent = _rating_key_from_key_path(entry.get("grandparentKey"))
+    return grandparent is not None and grandparent in keys
+
+
+def _normalize_history_entry(
+    entry: Dict[str, Any], accounts: Dict[Any, str]
+) -> Optional[Dict[str, Any]]:
+    """Flatten a history entry into a play record; None for non-video types."""
+    ptype = entry.get("type")
+    if ptype == "movie":
+        item_type = "mv"
+        label = entry.get("title") or ""
+    elif ptype == "episode":
+        item_type = "tv"
+        label = "%s S%sE%s - %s" % (
+            entry.get("grandparentTitle"),
+            entry.get("parentIndex"),
+            entry.get("index"),
+            entry.get("title") or "",
+        )
+    else:
+        return None
+    viewed = _viewed_at(entry)
+    account_id = entry.get("accountID")
+    out: Dict[str, Any] = {
+        "item_type": item_type,
+        "title": label,
+        "year": entry.get("year"),
+        "viewed_at": viewed,
+        "viewed_at_utc": (
+            datetime.fromtimestamp(viewed, tz=timezone.utc).isoformat()
+            if viewed
+            else None
+        ),
+        "account": accounts.get(account_id, account_id),
+    }
+    rating_key = entry.get("ratingKey")
+    if rating_key:
+        out["plex_rating_key"] = str(rating_key)
+    return out
+
+
+def get_watch_history(
+    limit: int = 20,
+    item_type: Optional[str] = None,
+    title: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Recent Plex plays, optionally narrowed to one movie or show.
+
+    Without ``title``: the most recent plays across movies and episodes.
+    With ``title``: plays of the matching movie(s)/show(s) only — a show
+    matches all of its episodes. Newest first, at most ``limit`` plays.
+    Raises ``ValueError`` when a requested title has no Plex match. Title
+    matching goes through the current library, so plays of an item since
+    deleted from Plex appear in the recent list but can't be found by title.
+    """
+    if item_type not in (None, "mv", "tv"):
+        raise ValueError(f"item_type must be 'mv' or 'tv', not {item_type!r}")
+
+    keys: Optional[Set[str]] = None
+    if title:
+        keys = set()
+        if item_type in (None, "mv"):
+            for e in _search_hub(title, "movie"):
+                if e.get("ratingKey"):
+                    keys.add(str(e["ratingKey"]))
+        if item_type in (None, "tv"):
+            for e in _search_hub(title, "show"):
+                if e.get("ratingKey"):
+                    keys.add(str(e["ratingKey"]))
+        if not keys:
+            raise ValueError(f"no Plex movie or show matching {title!r}")
+
+    metadata_type = {"mv": 1, "tv": 4}.get(item_type) if item_type else None
+    entries = _fetch_history(metadata_item_type=metadata_type)
+    accounts = _account_names()
+
+    out: List[Dict[str, Any]] = []
+    for entry in entries:
+        if keys is not None and not _history_entry_matches(entry, keys):
+            continue
+        normalized = _normalize_history_entry(entry, accounts)
+        if normalized is None:
+            continue
+        out.append(normalized)
+        if len(out) >= limit:
+            break
+    return out
+
+
+async def aget_watch_history(
+    limit: int = 20,
+    item_type: Optional[str] = None,
+    title: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    return await asyncio.to_thread(get_watch_history, limit, item_type, title)
 
 
 def refresh_item(rating_key: str) -> None:

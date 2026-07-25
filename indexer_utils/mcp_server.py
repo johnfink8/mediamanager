@@ -36,6 +36,7 @@ from indexer_utils.models import (
     RecommendationPreference,
 )
 from indexer_utils.plex_utils import (
+    aget_watch_history,
     anow_playing,
     aresolve_item,
     asearch_videos,
@@ -139,6 +140,7 @@ _READ_ONLY_TOOLS = {
     "sonarr_episodes",
     "locate_video",
     "now_playing",
+    "watch_history",
     "diagnose_video",
     "get_video_job",
     "check_compatibility",
@@ -587,7 +589,10 @@ async def radarr_upgrade_movie(
     """Re-grab a movie, optionally at a new quality ("get this one in 1080p").
 
     Pass quality_profile_id (from radarr_quality_profiles) to switch profiles;
-    omit it to just re-search at the current quality. Triggers a Radarr search.
+    omit it to just re-search at the current quality. Triggers a Radarr search
+    and re-monitors the movie, so this also serves "keep an eye out for this
+    movie": if the search finds nothing now, Radarr grabs it when a release
+    appears.
     """
     return await aupgrade_movie(movie_id, quality_profile_id)
 
@@ -679,6 +684,7 @@ async def sonarr_regrab_episode(
     By default deletes the existing file first so Sonarr grabs a replacement even
     when the current file already meets the quality cutoff, then triggers a
     search. Set replace_file=False to only search for an upgrade without deleting.
+    Re-monitors the episode so a search miss still gets picked up by RSS later.
     """
     return await aregrab_episode(episode_id, replace_file=replace_file)
 
@@ -727,6 +733,25 @@ async def locate_video(
     diagnose_video / repair_video, which act on that one episode file.
     """
     return await asearch_videos(title, item_type, season, episode)
+
+
+@safe_tool
+async def watch_history(
+    title: Optional[str] = None,
+    item_type: Optional[str] = None,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """Plex play history ("what have I watched recently", "when did I last watch X").
+
+    Without ``title``, returns the most recent plays across movies and TV
+    episodes. With ``title``, resolves it in Plex and returns only that movie's
+    or show's plays (a show lists its episodes individually), newest first.
+    ``item_type`` ("mv"/"tv") narrows the lookup. Each play carries the watch
+    time (``viewed_at`` epoch seconds + ``viewed_at_utc``) and which account
+    watched it — history spans every user on the server, so check ``account``
+    when the question is about a specific person.
+    """
+    return await aget_watch_history(limit=limit, item_type=item_type, title=title)
 
 
 @safe_tool

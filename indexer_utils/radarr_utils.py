@@ -7,7 +7,7 @@ from decouple import config
 from requests.auth import HTTPBasicAuth
 
 
-def radarr_query(cmd: str, method: str = "get", **kwargs) -> List[Dict[str, Any]]:
+def radarr_query(cmd: str, method: str = "get", **kwargs: Any) -> Any:
     session = requests.Session()
     session.headers["X-Api-Key"] = config("RADARR_APIKEY")
     url = "/".join([config("RADARR_URL"), cmd])
@@ -27,8 +27,11 @@ def radarr_query(cmd: str, method: str = "get", **kwargs) -> List[Dict[str, Any]
             json=kwargs,
             auth=auth,
         )
-    txt = resp.text
-    return json.loads(txt)
+    if resp.status_code >= 400:
+        raise Exception(resp.status_code, resp.text)
+    if not resp.text:
+        return None
+    return json.loads(resp.text)
 
 
 MOVIES: List[Dict[str, object]] = []
@@ -69,9 +72,7 @@ async def aget_movie(imdbId: str) -> Optional[Dict[str, object]]:
     return None
 
 
-async def aradarr_query(
-    cmd: str, method: str = "get", **kwargs: Any
-) -> List[Dict[str, Any]]:
+async def aradarr_query(cmd: str, method: str = "get", **kwargs: Any) -> Any:
     return await asyncio.to_thread(radarr_query, cmd, method, **kwargs)
 
 
@@ -91,6 +92,11 @@ async def aredownload_by_imdb(imdb_id: str) -> Dict[str, Any]:
     if file_id:
         await aradarr_query(f"moviefile/{file_id}", method="delete")
         deleted = True
+    # A forced MoviesSearch grabs regardless of the monitored flag, but if it
+    # finds nothing only a monitored movie gets picked up by RSS later.
+    if not movie.get("monitored"):
+        movie["monitored"] = True
+        await aradarr_query(f"movie/{movie_id}", method="put", **movie)
     await aradarr_query(
         "command", method="post", name="MoviesSearch", movieIds=[movie_id]
     )
@@ -102,10 +108,15 @@ async def aredownload_by_imdb(imdb_id: str) -> Dict[str, Any]:
 async def aupgrade_movie(
     movie_id: int, quality_profile_id: Optional[int] = None
 ) -> Dict[str, Any]:
-    """Switch a movie's quality profile (optional) and trigger a Radarr search."""
+    """Switch a movie's quality profile (optional), re-monitor, and search.
+
+    Always leaves the movie monitored so a search that finds nothing today
+    still gets picked up by RSS when a release appears.
+    """
     movie: Any = await aradarr_query(f"movie/{movie_id}")
     if quality_profile_id is not None:
         movie["qualityProfileId"] = quality_profile_id
+    if quality_profile_id is not None or not movie.get("monitored"):
         movie["monitored"] = True
         await aradarr_query(f"movie/{movie_id}", method="put", **movie)
     await aradarr_query(
