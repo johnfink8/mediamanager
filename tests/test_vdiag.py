@@ -366,9 +366,12 @@ async def test_aredownload_by_imdb_deletes_then_searches(monkeypatch):
 
     result = await radarr_utils.aredownload_by_imdb("tt0099")
     assert calls[0] == {"cmd": "moviefile/42", "method": "delete", "kwargs": {}}
-    assert calls[1]["cmd"] == "command"
-    assert calls[1]["kwargs"]["name"] == "MoviesSearch"
-    assert calls[1]["kwargs"]["movieIds"] == [7]
+    assert calls[1]["cmd"] == "movie/7"
+    assert calls[1]["method"] == "put"
+    assert calls[1]["kwargs"]["monitored"] is True
+    assert calls[2]["cmd"] == "command"
+    assert calls[2]["kwargs"]["name"] == "MoviesSearch"
+    assert calls[2]["kwargs"]["movieIds"] == [7]
     assert result["deleted_old_file"] is True
     assert reset == [True]
 
@@ -416,7 +419,7 @@ async def test_aredownload_episode_matches_season_and_number(monkeypatch):
                 {"id": 11, "seasonNumber": 1, "episodeNumber": 2, "episodeFileId": 99},
             ]
         if cmd.startswith("episode/"):
-            return {"episodeFileId": 99}
+            return {"episodeFileId": 99, "monitored": False}
         return None
 
     deletes: List[str] = []
@@ -425,13 +428,21 @@ async def test_aredownload_episode_matches_season_and_number(monkeypatch):
         deletes.append(cmd)
         return None
 
+    puts: List[Dict[str, Any]] = []
+
+    async def fake_put(cmd: str, **kwargs: Any) -> Any:
+        puts.append({"cmd": cmd, **kwargs})
+        return None
+
     monkeypatch.setattr(sonarr_utils, "aget_series", fake_get_series)
     monkeypatch.setattr(sonarr_utils, "asn_query", fake_query)
     monkeypatch.setattr(sonarr_utils, "asn_delete", fake_delete)
+    monkeypatch.setattr(sonarr_utils, "asn_put", fake_put)
 
     result = await sonarr_utils.aredownload_episode("555", 1, 2)
     assert result["episode_id"] == 11
     assert deletes == ["episodefile/99"]
+    assert puts == [{"cmd": "episode/11", "episodeFileId": 99, "monitored": True}]
 
 
 # --------------------------------------------------------------------------

@@ -93,11 +93,18 @@ async def aregrab_episode(episode_id: int, replace_file: bool = True) -> Dict[st
     quality cutoff; set ``replace_file=False`` to only search for an upgrade.
     """
     ep: Any = await asn_query(f"episode/{episode_id}")
-    file_id = (ep or {}).get("episodeFileId") or 0
+    if not ep:
+        raise ValueError(f"no Sonarr episode {episode_id}")
+    file_id = ep.get("episodeFileId") or 0
     deleted = False
     if replace_file and file_id:
         await asn_delete(f"episodefile/{file_id}")
         deleted = True
+    # A forced EpisodeSearch grabs regardless of the monitored flag, but if it
+    # finds nothing only a monitored episode gets picked up by RSS later.
+    if not ep.get("monitored"):
+        ep["monitored"] = True
+        await asn_put(f"episode/{episode_id}", **ep)
     await asn_query("command", post=True, name="EpisodeSearch", episodeIds=[episode_id])
     return {
         "episode_id": episode_id,
