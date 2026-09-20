@@ -2,10 +2,11 @@
 
 Unlike the other tools in this package, these make a nested LLM call rather
 than reading project state. Each delegates to an inner Agent equipped with
-the hosted ``WebSearchTool`` and returns the prose dossier directly to the
-recommendation agent. No JSON post-processing — the consumer is another LLM
-that reads prose fluently, so imposing a schema would just add latency, cost,
-and parse-failure modes without helping the reader.
+the ``brave_search`` / ``web_fetch`` tools (see webtools.py) and returns the
+prose dossier directly to the recommendation agent. No JSON post-processing
+— the consumer is another LLM that reads prose fluently, so imposing a schema
+would just add latency, cost, and parse-failure modes without helping the
+reader.
 """
 
 import logging
@@ -16,7 +17,6 @@ from zoneinfo import ZoneInfo
 
 from agents import Agent, RunConfig, RunContextWrapper, Runner
 from agents.models.openai_provider import OpenAIProvider
-from agents.tool import WebSearchTool
 from decouple import config
 from openai import AsyncOpenAI
 
@@ -24,6 +24,7 @@ from ..redis_client import get_redis_client, redis_get_json, redis_set_json
 from .base import ToolContext
 from .safe_tool import safe_tool
 from .shared import enforce_result_budget
+from .webtools import brave_search, web_fetch
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
@@ -35,9 +36,9 @@ MODEL = "qwen3.8"
 REPORT_CHAR_CAP = 12000
 
 # Cache the dossier in Redis so repeated calls within a window don't pay the
-# LLM + web_search cost. Bump the version suffix on prompt/schema changes.
+# LLM + web cost. Bump the version suffix on prompt/tool changes.
 CACHE_TTL_SECONDS = 6 * 60 * 60
-CACHE_KEY_VERSION = "v1"
+CACHE_KEY_VERSION = "v2"
 
 # US release day rolls over latest on the West Coast — Pacific keeps the
 # cache key and the queried windows stable for a UTC host during late-Sunday-US
@@ -49,23 +50,25 @@ _MOVIES_SYSTEM_PROMPT = (_PROMPTS_DIR / "search_recent_releases.md").read_text()
 _TV_SYSTEM_PROMPT = (_PROMPTS_DIR / "search_recent_tv.md").read_text()
 _BUZZ_SYSTEM_PROMPT = (_PROMPTS_DIR / "search_title_buzz.md").read_text()
 
+_WEB_TOOLS = [brave_search, web_fetch]
+
 _MOVIES_AGENT = Agent(
     name="search_recent_releases",
     model=MODEL,
     instructions=_MOVIES_SYSTEM_PROMPT,
-    tools=[WebSearchTool()],
+    tools=_WEB_TOOLS,
 )
 _TV_AGENT = Agent(
     name="search_recent_tv",
     model=MODEL,
     instructions=_TV_SYSTEM_PROMPT,
-    tools=[WebSearchTool()],
+    tools=_WEB_TOOLS,
 )
 _BUZZ_AGENT = Agent(
     name="search_title_buzz",
     model=MODEL,
     instructions=_BUZZ_SYSTEM_PROMPT,
-    tools=[WebSearchTool()],
+    tools=_WEB_TOOLS,
 )
 
 
@@ -270,14 +273,15 @@ async def _fetch_dossier(
     run_config = RunConfig(tracing_disabled=True, model_provider=provider)
     try:
         try:
-            # max_turns is generous — the inner agent may run several
-            # web_search rounds before producing the dossier. Two is enough in
-            # practice but we give it four so a slow research path doesn't
-            # tripwire.
+            # max_turns is generous — the inner agent runs a search round and
+            # then several fetch rounds (rendered fetches for JS-only pages)
+            # before producing the dossier. The local model researches one
+            # call per turn and bails around six; twelve covers a full
+            # multi-source pass (ratings site, charts, Reddit, cross-checks).
             result = await Runner.run(
                 agent,
                 user_prompt,
-                max_turns=4,
+                max_turns=12,
                 run_config=run_config,
             )
         finally:
