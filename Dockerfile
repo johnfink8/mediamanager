@@ -7,7 +7,7 @@ COPY src ./src
 COPY relay.config.js ./
 RUN npm run build
 
-FROM python:3.11-bullseye as runner
+FROM python:3.11-bookworm as runner
 ENV PYTHONUNBUFFERED=1
 WORKDIR /opt/servermonitor
 COPY requirements.txt ./
