@@ -15,7 +15,7 @@ from indexer_utils.models import IgnoreItem
 from indexer_utils.session import db_session
 from indexer_utils.vector_search import synopsis_neighbor_summary
 
-VECTOR_DIMS = 1536
+VECTOR_DIMS = 768
 
 # A dim-0 unit vector and two neighbours relative to it: aligned (cosine
 # distance 0) and off-axis (~0.29), so "nearest" ordering is deterministic.
