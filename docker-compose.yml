@@ -92,6 +92,8 @@ services:
       - db
       - vdiag
     networks: [proxy]
+    ports:
+      - 8000:8000
   builder:
     build:
       context: .
