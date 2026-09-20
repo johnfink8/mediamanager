@@ -127,7 +127,10 @@ async def run_recommendation(
     # exit. Per-run scoping also keeps httpx transports bound to the loop
     # that opened them — required when scheduler threads spin up short-lived
     # loops via ``asyncio.run``.
-    openai_client = AsyncOpenAI(api_key=config("OPENAI_API_KEY"))
+    openai_client = AsyncOpenAI(
+        api_key=config("OPENAI_API_KEY"),
+        base_url=config("OPENAI_BASE_URL", default=None),
+    )
     provider = OpenAIProvider(openai_client=openai_client)
     run_config = RunConfig(tracing_disabled=True, model_provider=provider)
 

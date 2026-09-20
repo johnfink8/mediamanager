@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent
 PROMPTS_DIR = BASE_DIR / "prompts"
-OPENAI_MODEL = config("OPENAI_MODEL", default="gpt-5.5")
+OPENAI_MODEL = config("OPENAI_MODEL", default="qwen3.8")
 
 AGENT_MAX_TURNS = int(config("AI_AGENT_MAX_TURNS", default=6))
 AGENT_MAX_TOOL_CALLS = int(config("AI_AGENT_MAX_TOOL_CALLS", default=16))
@@ -121,7 +121,9 @@ def get_openai_client() -> Optional[OpenAI]:
         return _openai_client
     try:
         api_key = config("OPENAI_API_KEY")
-        _openai_client = OpenAI(api_key=api_key)
+        _openai_client = OpenAI(
+            api_key=api_key, base_url=config("OPENAI_BASE_URL", default=None)
+        )
         return _openai_client
     except Exception:
         logger.exception("Failed to initialize OpenAI client")

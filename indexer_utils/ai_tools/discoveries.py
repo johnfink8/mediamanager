@@ -29,9 +29,8 @@ _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
 logger = logging.getLogger(__name__)
 
-# Box Office Mojo's weekend chart is stable enough that the cheapest
-# mini tier handles it. Bump to "gpt-5.1" if research quality slips.
-MODEL = "gpt-5.4-mini"
+# Served locally; the gateway's only chat model (see OPENAI_BASE_URL).
+MODEL = "qwen3.8"
 
 REPORT_CHAR_CAP = 12000
 
@@ -263,7 +262,10 @@ async def _fetch_dossier(
     # Per-call client so the httpx transport is bound to this event loop
     # and closed before the task exits — see indexer_utils/ai_tools/agent.py
     # for the same pattern in the parent loop.
-    openai_client = AsyncOpenAI(api_key=config("OPENAI_API_KEY"))
+    openai_client = AsyncOpenAI(
+        api_key=config("OPENAI_API_KEY"),
+        base_url=config("OPENAI_BASE_URL", default=None),
+    )
     provider = OpenAIProvider(openai_client=openai_client)
     run_config = RunConfig(tracing_disabled=True, model_provider=provider)
     try:

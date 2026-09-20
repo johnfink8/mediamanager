@@ -25,7 +25,7 @@ from .session import db_session
 
 logger = logging.getLogger(__name__)
 
-EMBEDDING_MODEL = config("OPENAI_EMBEDDING_MODEL", default="text-embedding-3-small")
+EMBEDDING_MODEL = config("OPENAI_EMBEDDING_MODEL", default="embeddinggemma-cpu:latest")
 
 # Neighbours are constrained to the candidate's release window so the count
 # means the same thing regardless of how recent the candidate is. Inbound
@@ -54,7 +54,10 @@ def _get_openai_client() -> Optional[AsyncOpenAI]:
     if _openai_client is not None:
         return _openai_client
     try:
-        _openai_client = AsyncOpenAI(api_key=config("OPENAI_API_KEY"))
+        _openai_client = AsyncOpenAI(
+            api_key=config("OPENAI_API_KEY"),
+            base_url=config("OPENAI_BASE_URL", default=None),
+        )
         return _openai_client
     except Exception:
         logger.exception("Failed to initialize OpenAI client for embeddings")
