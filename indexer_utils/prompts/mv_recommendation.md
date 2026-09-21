@@ -39,3 +39,7 @@ When `taste_signal` and the genre rank disagree — a top genre but a low-add `c
 - `release_count` on the candidate is screenings across regions; very low values often indicate low-effort B-movies and weigh against recommending.
 
 Your `reason` field should name the single strongest signal — for or against — pointing at concrete evidence (the candidate's `taste_signal` cell counts or a specific nearest title, candidate_match position, specific Plex view count, specific buzz finding) rather than vague "the user likes horror."
+
+## Alignment check
+
+Before submitting, verify your two verdict fields agree: a score ≥ 0.5 must pair with recommend=true, and a score < 0.5 with recommend=false. If they disagree, fix the score to match the verdict — the verdict is the user-facing one, the score only ranks the queue.
