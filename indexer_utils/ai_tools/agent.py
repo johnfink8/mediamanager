@@ -24,6 +24,7 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
 from .base import ToolContext
+from .cast_history import search_cast_history
 from .discoveries import (
     search_recent_releases,
     search_recent_tv,
@@ -80,6 +81,7 @@ _COMMON_TOOLS = [
     get_user_history,
     check_added_history,
     search_title_buzz,
+    search_cast_history,
 ]
 
 

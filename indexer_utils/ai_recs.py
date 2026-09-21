@@ -544,6 +544,8 @@ async def _annotate_with_ai_async_inner(
             "title": title,
             "year": year,
             "genres": genres,
+            "cast": attrs.get("cast"),
+            "director": attrs.get("director"),
         },
     )
 
