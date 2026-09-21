@@ -45,7 +45,7 @@ _SYSTEM_PROMPT = (_PROMPTS_DIR / "cast_history.md").read_text()
 # The dossier goes stale when the user adds/deletes titles; 6h matches the
 # discoveries and taste-signal era caches. Bump the version on prompt change.
 CACHE_TTL_SECONDS = 6 * 60 * 60
-CACHE_KEY_VERSION = "v2"
+CACHE_KEY_VERSION = "v3"
 
 CAST_LIMIT = 10
 TITLES_PER_PERSON_CAP = 15
@@ -61,6 +61,7 @@ SELECT lower(btrim(p.name)) AS person,
        i.uid,
        i.title,
        i.attributes->>'year' AS yr,
+       i.attributes->>'tmdb_title' AS tmdb_title,
        i.added,
        EXISTS (SELECT 1
                FROM jsonb_array_elements_text(i.attributes->'cast') c
@@ -128,7 +129,13 @@ async def _cross_ref(
         role = "both" if (r.is_cast and r.is_dir) else ("dir" if r.is_dir else "cast")
         block = out.setdefault(r.person, {"titles": [], "added": 0})
         block["titles"].append(
-            {"t": r.title, "y": year, "added": bool(r.added), "role": role}
+            {
+                "t": r.title,
+                "y": year,
+                "added": bool(r.added),
+                "role": role,
+                "tt": r.tmdb_title,
+            }
         )
         if r.added:
             block["added"] += 1
@@ -143,8 +150,14 @@ async def _plex_annotate(item_type: str, titles: List[Dict[str, Any]]) -> None:
     ``in_library`` when the Plex server has the title (follow evidence even
     if never added through the curator); ``missing`` when added but gone
     (deleted — strong negative). Never-added titles get no key: absence
-    carries no signal. Plex is only tracked for movies upstream. Failures
-    degrade to no plex data — the dossier still works on ``added`` alone.
+    carries no signal. Plex is only tracked for movies upstream.
+
+    ``find_movie`` matches the query string against the Plex metadata title
+    *exactly*, so a raw release filename can never match — a row therefore
+    only gets a plex verdict when it carries a clean ``tmdb_title``.
+    Infrastructure failures and unresolvable titles degrade to no plex
+    data rather than a fabricated "missing" — the dossier still works on
+    ``added`` alone.
     """
     if item_type != "mv" or not titles:
         return
@@ -155,12 +168,17 @@ async def _plex_annotate(item_type: str, titles: List[Dict[str, Any]]) -> None:
     picked = sorted(titles, key=_priority)[:PLEX_LOOKUP_CAP]
 
     async def _one(t: Dict[str, Any]) -> None:
+        clean = t.get("tt") or ""
+        if not clean:
+            # No clean title to query with; a raw filename would never match
+            # Plex's exact-title gate, so "not found" would be noise.
+            return
         try:
-            found = await aget_plex_details(t["t"], t["y"])
+            found = await aget_plex_details(clean, t["y"])
         except Exception:
             # Plex unreachable is not "deleted" — leave the plex axis empty
             # rather than fabricating a negative.
-            logger.exception("cast_history plex lookup failed for %s", t["t"])
+            logger.exception("cast_history plex lookup failed for %s", clean)
             return
         if found:
             t["plex"] = "in_library"

@@ -137,19 +137,22 @@ class TestPlexAnnotate:
 
         async def fake_plex(title, year):
             calls.append(title)
-            if title == "boom":
+            if title == "Boom":
                 raise RuntimeError("plex down")
             return (
-                {"viewCount": 1} if title in ("present-added", "present-not") else None
+                {"viewCount": 1} if title in ("Present Added", "Present Not") else None
             )
 
         monkeypatch.setattr(ch, "aget_plex_details", fake_plex)
         titles = [
-            {"t": "present-added", "y": 2025, "added": True},
-            {"t": "gone-added", "y": 2024, "added": True},
-            {"t": "present-not", "y": 2023, "added": False},
-            {"t": "absent-not", "y": 2022, "added": False},
-            {"t": "boom", "y": 2021, "added": True},
+            {"t": "present-added.raw", "tt": "Present Added", "y": 2025, "added": True},
+            {"t": "gone-added.raw", "tt": "Gone Added", "y": 2024, "added": True},
+            {"t": "present-not.raw", "tt": "Present Not", "y": 2023, "added": False},
+            {"t": "absent-not.raw", "tt": "Absent Not", "y": 2022, "added": False},
+            {"t": "boom.raw", "tt": "Boom", "y": 2021, "added": True},
+            # no clean title: a raw filename alone must never be labelled
+            # "missing" — Plex's exact-title gate just can't match it
+            {"t": "filename-only.2020.1080p.x264", "y": 2020, "added": True},
         ]
         await ch._plex_annotate("mv", titles)
 
@@ -159,6 +162,9 @@ class TestPlexAnnotate:
         assert "plex" not in titles[3]
         # infrastructure failure must not read as "deleted"
         assert "plex" not in titles[4]
+        # a filename-only row gets no plex verdict at all
+        assert "plex" not in titles[5]
+        # ...and is never queried
         assert len(calls) == 5
 
     async def test_cap_limits_lookups(self, monkeypatch):
@@ -170,7 +176,8 @@ class TestPlexAnnotate:
 
         monkeypatch.setattr(ch, "aget_plex_details", fake_plex)
         titles = [
-            {"t": f"t{i}", "y": 2025 - (i // 10), "added": i < 10} for i in range(25)
+            {"t": f"t{i}", "tt": f"T {i}", "y": 2025 - (i // 10), "added": i < 10}
+            for i in range(25)
         ]
         await ch._plex_annotate("mv", titles)
         assert len(calls) == ch.PLEX_LOOKUP_CAP
