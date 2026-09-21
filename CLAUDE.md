@@ -32,7 +32,7 @@ Full-stack media manager app: **FastAPI + Strawberry GraphQL** backend (Python),
   - `ai_recs.py` — orchestrates the per-candidate recommendation flow
   - `ai_tools/` — the openai-agents-SDK recommendation Agent and its tools
   - `prompts/` — system prompts for the recommendation agent + discovery subagents (`.md`)
-  - `vector_search.py` — pgvector embedding + synopsis-similarity queries
+  - `vector_search.py` — pgvector embedding + synopsis-similarity queries (768-dim, `embeddinggemma-cpu`)
   - `taste_signal.py` — builds the `taste_signal` payload block (neighbour×critic cohort cross-tab + per-attribute add-rates + whole-library cast cross-reference), the cohort cross-tab Redis-cached by era
 - `src/` — React/TypeScript frontend (Relay, MUI)
 - `alembic/` — DB migrations
@@ -54,7 +54,7 @@ Full-stack media manager app: **FastAPI + Strawberry GraphQL** backend (Python),
 Postgres 16 with the **pgvector** extension (`pgvector/pgvector:pg16` image). The app talks to it through **async SQLAlchemy 2.0** over **psycopg 3** (`postgresql+psycopg://…`).
 
 - `indexer_utils/session.py` — `db_session()` returns an `AsyncSession`; always `async with db_session() as session:`. The engine/sessionmaker are cached module-level singletons. Model classmethods (`IgnoreItem.create`, `.filter`, `MovieRecommendationRecord.recent_history`, …) are all `async`.
-- `indexer_utils/models.py` — `IgnoreItem` (the catalog row; `attributes` is a Postgres `JSONB` blob, `synopsis_vector` is a **deferred** `Vector(1536)` column), `MovieRecommendationRecord` (recommendation history + LIKE/NOT_NOW/NEVER feedback), `FilterRule`.
+- `indexer_utils/models.py` — `IgnoreItem` (the catalog row; `attributes` is a Postgres `JSONB` blob, `synopsis_vector` is a **deferred** `Vector(768)` column), `MovieRecommendationRecord` (recommendation history + LIKE/NOT_NOW/NEVER feedback), `FilterRule`.
 - **Test DB isolation**: `session.py` checks `sys.argv` for `pytest` and swaps `DB_NAME`→`TEST_DB_NAME`, so the same `.env` serves both the app and the suite without ever pointing tests at the real DB. Don't pass DB env vars on the command line.
 - **Don't read/grep `.env`** to discover DB config — reads of it are permission-denied, and you don't need it: `decouple`/`session.py` already load it. Any script using `db_session()` connects to the real DB automatically (and the running container is `mediamanager-db-1`).
 - The MySQL + Weaviate → Postgres + pgvector swap is **done** (commit `253e198`), and the one-shot migration tooling has been removed. Don't reintroduce either dependency.
@@ -64,7 +64,7 @@ Postgres 16 with the **pgvector** extension (`pgvector/pgvector:pg16` image). Th
 Entry point: `annotate_with_ai_async(item_type, uid, title, attrs)` in `indexer_utils/ai_recs.py`, called during candidate ingest (`vid_utils.py`) and on GraphQL re-annotation (`schema.py`). Per candidate it:
 
 1. Hydrates metadata (TMDB cast/director/release-count via `tmdb.py`).
-2. Generates a short synopsis (plain OpenAI JSON call) and embeds `title + synopsis` into the pgvector `synopsis_vector` column (`vector_search.upsert_item_vector`). For brand-new candidates the row doesn't exist yet, so the vector is stashed in `attrs["_synopsis_vector_tmp"]` and attached after insert.
+2. Generates a short synopsis (plain OpenAI-SDK JSON call to the local model) and embeds `title + synopsis` into the pgvector `synopsis_vector` column (`vector_search.upsert_item_vector`). For brand-new candidates the row doesn't exist yet, so the vector is stashed in `attrs["_synopsis_vector_tmp"]` and attached after insert.
 3. Builds a user payload including a pre-computed `library_profile` (aggregate taste, see `library_profile.py`) and a `taste_signal` block (`taste_signal.py`): raw historical add counts over the candidate's decided ±2yr same-type cohort, broken out by the synopsis-neighbour × critic-presence cross-tab and per-attribute (network/language/genre), plus a `cast_xref` counting how many added titles each of the candidate's cast appears in (whole-library, cross-era — not bounded to the cohort window). The model reads counts as rates itself; the cohort cross-tab is Redis-cached by `(item_type, year)`.
 4. Runs the recommendation **Agent** and writes a single consolidated `ai` block back onto `attrs` (verdict, score, reason, synopsis, tool log, turn/tool-call counts, failure info).
 
@@ -74,12 +74,12 @@ The agent itself lives in `indexer_utils/ai_tools/` and is built on the **openai
 - **Tools** (all `@safe_tool`-wrapped so a tool exception comes back to the model as an error payload instead of killing the run):
   - `searches.py` — `search_similar_by_synopsis` (pgvector cosine distance), `search_by_genre`, `search_by_network`. All query *added* library items only; rating filters are per-source (`imdb_min`, `rt_min`, …).
   - `inspections.py` — `get_item_details`, `get_user_history`, `check_added_history` (fan out to DB / Plex / Radarr / Sonarr).
-  - `discoveries.py` — `search_recent_releases` (movies only), `search_recent_tv` (TV only), `search_title_buzz`. These are **nested subagents** with the hosted `WebSearchTool`; they return prose dossiers (no JSON schema — the consumer is another LLM) and cache results in Redis.
-  - `cast_history.py` — `search_cast_history`, an mv-only subagent. Precomputes (deterministic SQL) the candidate's top-10 cast plus director and, for each person, every library title they appear in (cast or director) with added/ignore status and year, then a subagent interprets each person's known career against that slice and returns a prose dossier. Plex presence (in-library/missing) is checked for up to 20 of those movies but **only when a clean `tmdb_title` is present** — raw filenames never match Plex's exact-title gate, so a "missing" is never asserted from one, and a Plex lookup failure yields no key at all. Cached 6h at `mediamanager:cast_history:v3:{type}:{uid}`.
+  - `discoveries.py` — `search_recent_releases` (movies only), `search_recent_tv` (TV only), `search_title_buzz`. These are nested subagents that research with the local `brave_search` + `web_fetch` tools from `webtools.py` (static fetch by default; `render=true` runs a headless chromium) instead of OpenAI's hosted WebSearchTool; they return prose dossiers (no JSON schema — the consumer is another LLM) and cache results in Redis.
+  - `cast_history.py` — `search_cast_history`, a tool-bearing research subagent. The people-set is the candidate's top-10 cast (billing order) plus director; a deterministic-SQL catalog cross-reference (cast and/or director, leave-one-out, type-scoped) is embedded as a *seed only*. The subagent then establishes each person's actual career (own knowledge + `brave_search`/`web_fetch` — incl. a `web_search` alias, since qwen insists on that name) and verifies a sample of it against the user's Plex with `check_titles`, which delegates matching to Plex's own `/hubs/search` API (via `plex_utils.hub_search`) and only checks title + year ±1 on what Plex returns — no local matching, no watch history. The dossier reports career-relative rates ("X of Y works are in your library") and a per-person pattern label. Cached 6h at `mediamanager:cast_history:v5:{type}:{uid}`; a failed subagent returns `error` (no signal), never a negative.
 - `hooks.py` — `AuditHooks` records per-call timing/outcome and enforces a cumulative tool-call budget (the SDK only caps turns).
 - `base.py` — `ToolContext` (item_type + candidate) passed to every tool via `RunContextWrapper`.
 
-Relevant env (via `python-decouple`/`.env`): `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-5.5`), `OPENAI_EMBEDDING_MODEL` (default `text-embedding-3-small`), `AI_AGENT_MAX_TURNS` (6), `AI_AGENT_MAX_TOOL_CALLS` (16). Discovery subagents are pinned to `gpt-5.4-mini` in `discoveries.py`.
+Relevant env (via `python-decouple`/`.env`): `OPENAI_BASE_URL` (local OpenAI-compatible gateway), `OPENAI_API_KEY` (fake — the gateway is unauthenticated), `OPENAI_MODEL` (default `qwen3.8`), `OPENAI_EMBEDDING_MODEL` (default `embeddinggemma-cpu:latest`, 768-dim L2-normalized), `AI_AGENT_MAX_TURNS` (6), `AI_AGENT_MAX_TOOL_CALLS` (16), `BRAVE_API_KEY` (Brave Search API for the discovery subagents). The gateway serves both `/v1/chat/completions` and `/v1/embeddings` from one base URL.
 
 ## Code Style & Tooling
 
@@ -112,7 +112,7 @@ npm run lint        # relay-compiler + tsc + prettier + eslint
 ## Common Pitfalls
 
 - **Relay-generated files** in `src/__generated__/` are auto-generated — never edit. Re-run `npx relay-compiler` after changing GraphQL queries/mutations or the Strawberry schema in `indexer_utils/schema.py`.
-- **alembic**: `alembic upgrade head` to apply, `alembic revision --autogenerate -m "…"` to create. pgvector bits are hand-written, not autogenerated — `add_pgvector_synopsis.py` `op.execute`s `CREATE EXTENSION vector` and the HNSW cosine index, and imports `Vector` from `pgvector.sqlalchemy`. Mirror that pattern for vector changes.
+- **alembic**: `alembic upgrade head` to apply, `alembic revision --autogenerate -m "…"` to create. pgvector bits are hand-written, not autogenerated — `add_pgvector_synopsis.py` `op.execute`s `CREATE EXTENSION vector` and the HNSW cosine index, and `resize_pgvector_synopsis.py` carries the 1536→768 column migration (old data kept in `synopsis_vector_1536` until `drop_pgvector_synopsis_1536.py`). Mirror that pattern for vector changes.
 - **Async DB**: the whole DB layer is async — `db_session()` yields an `AsyncSession` and must be used with `async with`/`await`. Don't reintroduce sync `Session` calls.
 - **Missing tool**: if a Python tool isn't found, the activate hook didn't fire — check `./venv/bin/` directly (most likely a worktree missing the symlink).
 
