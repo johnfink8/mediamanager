@@ -7,10 +7,10 @@ denominator silently degrades their signal. This script fills the gap.
 
 Matching is by title, never by `uid`: `uid` in this catalog is a source-level
 identifier that is neither unique nor stable (ingestion has retitled rows in
-place), so TMDB `/find/{imdb_id}` results must be validated against the row's
-title before anything is written. On a mismatch it falls back to
-`/search/movie` (cleaned title + year); if no hit is trustworthy, the row is
-skipped and reported — never written blind.
+place). Each row is looked up with TMDB `/search/movie` or `/search/tv`
+(cleaned title + year) and the hit is validated against the row's title
+before anything is written; if no hit is trustworthy, the row is skipped and
+reported — never written blind.
 
 Writes `attributes->'tmdb_id'` (int), `attributes->'tmdb_title'` (clean
 title, used for Plex lookups), `attributes->'cast'` (top-N names, plain
@@ -91,37 +91,33 @@ def fetch_person_data(item_type: str, row_title: str) -> dict | None:
     clean = clean_title(row_title)
     clean_q = re.sub(r"\s+\d{4}$", "", clean)
 
-    hit = None
-    # First try the row's own tmdb_id if it has one (cheapest, most precise).
-    # (Caller passes it in row dict as '_tmdb_id'.)
-    if hit is None:
-        search = f"/search/movie?query={urllib.parse.quote(clean_q)}&language=en-US"
+    search = f"/search/movie?query={urllib.parse.quote(clean_q)}&language=en-US"
+    if raw_year:
+        search += f"&primary_release_year={raw_year}"
+    if item_type == "tv":
+        search = f"/search/tv?query={urllib.parse.quote(clean_q)}&language=en-US"
         if raw_year:
-            search += f"&primary_release_year={raw_year}"
-        if item_type == "tv":
-            search = f"/search/tv?query={urllib.parse.quote(clean_q)}&language=en-US"
-            if raw_year:
-                search += f"&first_air_date_year={raw_year}"
-        res = tmdb_json(search)
-        hits = res.get("results", [])
-        exact = [
-            h
-            for h in hits
-            if (h.get("title") or h.get("name") or "").lower() == clean_q.lower()
-        ]
-        hit = exact[0] if exact else (hits[0] if hits else None)
-        if hit and not titles_related(
-            row_title, hit.get("title") or hit.get("name") or ""
-        ):
-            hit = None  # wrong movie — do not write it onto this row
+            search += f"&first_air_date_year={raw_year}"
+    res = tmdb_json(search)
+    hits = res.get("results", [])
+    exact = [
+        h
+        for h in hits
+        if (h.get("title") or h.get("name") or "").lower() == clean_q.lower()
+    ]
+    hit = exact[0] if exact else (hits[0] if hits else None)
+    if hit and not titles_related(row_title, hit.get("title") or hit.get("name") or ""):
+        hit = None  # wrong movie — do not write it onto this row
 
     if not hit:
         return None
 
     mid = hit["id"]
     if item_type == "tv":
-        c = tmdb_json(f"/tv/{mid}/contents?language=en-US")
-        cast = list({c2["name"] for c2 in c.get("cast", [])[:25]})[:CAST_LIMIT]
+        c = tmdb_json(f"/tv/{mid}/credits?language=en-US")
+        # dict.fromkeys dedupes while keeping billing order.
+        names = dict.fromkeys(c2["name"] for c2 in c.get("cast", []))
+        cast = list(names)[:CAST_LIMIT]
         return {
             "tmdb_id": mid,
             "tmdb_title": hit.get("name"),
@@ -156,7 +152,7 @@ SELECT_SQL = """
 async def load_rows(session, item_type: str, scope: str, limit: int | None):
     sql = SELECT_SQL
     if scope == "added":
-        sql += " AND i.attributes::jsonb->>'added' = 'true'"
+        sql += " AND i.added"
     sql += " ORDER BY i.title LIMIT :lim"
     rows = (
         await session.execute(text(sql), {"it": item_type, "lim": limit or 10_000})
@@ -217,15 +213,18 @@ async def main() -> None:
                 print(f"  [{i}] SKIP (no trustworthy TMDB match): {row['title']!r}")
                 continue
 
-            patch: dict = {"tmdb_id": data["tmdb_id"], "tmdb_title": data["tmdb_title"]}
-            if data["cast"]:
-                patch["cast"] = data["cast"]
-            if data["director"]:
-                patch["director"] = data["director"]
-
-            if not (patch.get("cast") or patch.get("director")):
+            if not (data["cast"] or data["director"]):
                 skipped += 1
                 print(f"  [{i}] SKIP (no cast/director returned): {row['title']!r}")
+                continue
+
+            # Only fill keys that are empty on the row; `||` would otherwise
+            # overwrite values ingestion already wrote.
+            existing = row["attributes"]
+            patch: dict = {k: v for k, v in data.items() if v and not existing.get(k)}
+            if not patch:
+                skipped += 1
+                print(f"  [{i}] SKIP (nothing missing): {row['title']!r}")
                 continue
             print(
                 f"  [{i}] {row['title']!r} -> {data['tmdb_title']!r} ({len(data['cast'])} cast)"
