@@ -14,6 +14,7 @@ Three concerns live here:
 
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import Numeric, String, and_, cast
@@ -43,7 +44,10 @@ logger = logging.getLogger(__name__)
 # a 4 KB Plex summary, etc.) can't push the conversation past the model's
 # context limit.
 SYNOPSIS_CLIP = 480
-REASON_CLIP = 240
+# Also the recommendation ``reason`` schema cap: the model is asked for
+# ~300 chars, and the headroom keeps guided decoding from cutting a
+# sentence off at the limit.
+REASON_CLIP = 400
 PLEX_SUMMARY_CLIP = 320
 CAST_LIMIT = 10
 TOOL_RESULT_BUDGET_BYTES = 24_000
@@ -391,3 +395,25 @@ def row_passes_filters(item: IgnoreItem, filters: Dict[str, Any]) -> bool:
             return False
 
     return True
+
+
+# The local model narrates its last step before the dossier ("All sources
+# gathered. Compiling the dossier.") however firmly the prompt forbids it.
+_PREAMBLE = re.compile(
+    r"here'?s the dossier|(writing|compiling|drafting) the dossier"
+    r"|^all (sources|lookups)\b",
+    re.IGNORECASE,
+)
+
+
+def strip_preamble(text: str) -> str:
+    """Drop a leading status paragraph from a subagent dossier.
+
+    Only a short first paragraph that reads as narration, with more text
+    after it, is dropped; a heading ("US TV-RELEASE DOSSIER — …") or the
+    first real paragraph never matches.
+    """
+    head, sep, rest = text.partition("\n\n")
+    if sep and rest.strip() and len(head) <= 250 and _PREAMBLE.search(head.strip()):
+        return rest.lstrip()
+    return text

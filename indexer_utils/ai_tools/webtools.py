@@ -33,7 +33,11 @@ _FETCH_TIMEOUT = 20.0  # seconds, static + API
 _RENDER_TIMEOUT_MS = 30_000
 # A single page the model should never need more of; the dossier subagent
 # caps its own output, so oversized fetches are pure token waste.
-_MAX_CONTENT_CHARS = 20_000
+# A single page the model should never need more of; the dossier subagent
+# caps its own output, and every fetched page accumulates in the model's
+# context — 8k chars (≈2-3k tokens) keeps even a 12-fetch research run far
+# under the 92k context ceiling of the local model.
+_MAX_CONTENT_CHARS = 8_000
 
 # Rendered fetches run a real Chromium — by far the heaviest path here. Cap
 # concurrent renders per event loop (two) so a burst of subagent calls

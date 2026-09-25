@@ -18,6 +18,7 @@ from indexer_utils.tmdb import (
 )
 
 from .ai_tools import AgentRunResult, ToolContext, run_recommendation
+from .ai_tools.shared import REASON_CLIP
 from .library_profile import compute_candidate_match, compute_library_profile
 from .log import item_context
 from .models import IgnoreItem
@@ -399,7 +400,7 @@ def _ai_details_from_run(
             {
                 "value": bool(submission.get("recommend")),
                 "score": float(submission.get("score") or 0.0),
-                "reason": str(submission.get("reason") or "")[:240],
+                "reason": str(submission.get("reason") or "")[:REASON_CLIP],
                 "failure": failure,
                 "failed": failure is not None,
             }
@@ -546,6 +547,7 @@ async def _annotate_with_ai_async_inner(
             "genres": genres,
             "cast": attrs.get("cast"),
             "director": attrs.get("director"),
+            "tmdb_id": attrs.get("tmdb_id"),
         },
     )
 

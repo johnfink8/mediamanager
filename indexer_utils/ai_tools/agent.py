@@ -33,6 +33,8 @@ from .discoveries import (
 from .hooks import AuditHooks, ToolCallBudgetExceeded
 from .inspections import check_added_history, get_item_details, get_user_history
 from .searches import search_by_genre, search_by_network, search_similar_by_synopsis
+from .shared import REASON_CLIP
+from .turn_budget import TurnBudget
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +59,12 @@ class Recommendation(BaseModel):
         ),
     )
     reason: str = Field(
-        max_length=240,
-        description="Single strongest signal driving the verdict, naming concrete evidence.",
+        max_length=REASON_CLIP,
+        description=(
+            "One or two complete sentences (about 300 characters at most) naming "
+            "the single strongest signal driving the verdict and its concrete "
+            "evidence."
+        ),
     )
 
     @field_validator("score")
@@ -151,6 +157,7 @@ async def run_recommendation(
     )
     provider = OpenAIProvider(openai_client=openai_client)
     run_config = RunConfig(tracing_disabled=True, model_provider=provider)
+    agent = TurnBudget(max_turns).prepare(agent, provider)
 
     try:
         try:
@@ -208,7 +215,7 @@ async def run_recommendation(
     submission = {
         "recommend": bool(rec.recommend),
         "score": max(0.0, min(float(rec.score), 1.0)),
-        "reason": str(rec.reason)[:240],
+        "reason": str(rec.reason)[:REASON_CLIP],
     }
     logger.info(
         "%s submitted recommend=%s score=%s turns=%d tool_calls=%d reason=%s",
