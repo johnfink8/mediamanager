@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 from decouple import config
@@ -70,3 +70,55 @@ def get_tv_cast(tv_id: int, n: int = 10) -> List[str]:
     if not response.get("cast"):
         print("cast not found", response, tv_id)
     return [cast["name"] for cast in response["cast"][:n]]
+
+
+def get_credit_person_ids(item_type: str, tmdb_id: int) -> Dict[str, int]:
+    """Lower-cased name → TMDB person id for a title's cast and directors.
+
+    Resolving people through the title's own credits avoids the namesake
+    collisions a name search can hit.
+    """
+    path = (
+        f"movie/{tmdb_id}/credits"
+        if item_type == "mv"
+        else f"tv/{tmdb_id}/aggregate_credits"
+    )
+    url = f"https://api.themoviedb.org/3/{path}?language=en-US"
+    data = requests.get(url, headers=_auth_headers(), timeout=20).json()
+    out: Dict[str, int] = {}
+    for person in data.get("cast") or []:
+        out.setdefault(str(person.get("name") or "").strip().lower(), person["id"])
+    for person in data.get("crew") or []:
+        # movie credits carry ``job``; tv aggregate credits carry ``jobs``.
+        jobs = {person.get("job")} | {
+            j.get("job") for j in person.get("jobs") or [] if isinstance(j, dict)
+        }
+        if "Director" in jobs:
+            out.setdefault(str(person.get("name") or "").strip().lower(), person["id"])
+    out.pop("", None)
+    return out
+
+
+def search_person_id(name: str) -> Optional[int]:
+    """Most popular TMDB person matching ``name`` exactly, or None."""
+    url = "https://api.themoviedb.org/3/search/person"
+    data = requests.get(
+        url,
+        headers=_auth_headers(),
+        params={"query": name, "language": "en-US"},
+        timeout=20,
+    ).json()
+    for person in data.get("results") or []:
+        if str(person.get("name") or "").strip().lower() == name.strip().lower():
+            return int(person["id"])
+    return None
+
+
+def get_person_combined_credits(person_id: int) -> Dict[str, Any]:
+    """TMDB ``/person/{id}/combined_credits``: movie + tv, cast + crew."""
+    url = (
+        f"https://api.themoviedb.org/3/person/{person_id}/combined_credits"
+        "?language=en-US"
+    )
+    data: Dict[str, Any] = requests.get(url, headers=_auth_headers(), timeout=20).json()
+    return data

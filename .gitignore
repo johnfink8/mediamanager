@@ -97,3 +97,5 @@ authelia_config
 weaviate_data
 *.tar.gz
 local
+.claude/
+nginx.conf.bak*

@@ -18,10 +18,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from indexer_utils.session import Base, db_session
 
-# OpenAI text-embedding-3-small dimensionality. Mirrors the constant in
-# alembic/versions/add_pgvector_synopsis.py so the model and the
-# migration stay in lockstep.
-SYNOPSIS_VECTOR_DIMS = 1536
+# embeddinggemma-cpu dimensionality (L2-normalized). Mirrors the constant in
+# alembic/versions/resize_pgvector_synopsis.py so the model and the migration
+# stay in lockstep.
+SYNOPSIS_VECTOR_DIMS = 768
 
 
 class IgnoreItem(Base):
@@ -43,7 +43,7 @@ class IgnoreItem(Base):
     )  # Unix timestamp, default None
     shown: Mapped[bool] = mapped_column(Boolean, default=False)
     defer_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    # Deferred: 6KB per row, only loaded when a search/index path asks for it.
+    # Deferred: 3KB per row, only loaded when a search/index path asks for it.
     synopsis_vector: Mapped[Optional[Any]] = mapped_column(
         Vector(SYNOPSIS_VECTOR_DIMS), nullable=True, deferred=True
     )

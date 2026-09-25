@@ -12,7 +12,7 @@ from indexer_utils.models import IgnoreItem
 from indexer_utils.session import db_session
 from indexer_utils.taste_signal import _cast_xref, build_taste_signal
 
-VECTOR_DIMS = 1536
+VECTOR_DIMS = 768
 _VEC = [1.0] + [0.0] * (VECTOR_DIMS - 1)
 CAND_ATTRS = {
     "genres": ["Horror"],

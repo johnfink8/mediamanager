@@ -4,8 +4,8 @@
 Walks items that don't yet have a vector (or all items with ``--reindex-all``),
 embeds each item's ``attributes["synopsis"]``, and writes the result into
 pgvector via ``vector_search.upsert_item_vector``. Items missing a synopsis get
-one generated via ``gpt-5.5`` first — unless ``--require-synopsis`` is set, in
-which case they're skipped (embed-only, no generation).
+one generated via the configured model first — unless ``--require-synopsis``
+is set, in which case they're skipped (embed-only, no generation).
 """
 
 import argparse
@@ -140,7 +140,7 @@ async def backfill(
             synopsis = attrs.get("synopsis") or attrs.get("ai", {}).get("synopsis")
 
             # --require-synopsis never generates: it only embeds the synopses
-            # that already exist (the cheap path that skips gpt-5.5 entirely).
+            # that already exist (the cheap path that skips synopsis generation entirely).
             if not require_synopsis and (force or synopsis is None):
                 logger.info(f"Generating synopsis for {item.uid}")
                 synopsis, _synopsis_failure = await agenerate_synopsis_for_candidate(
@@ -232,7 +232,7 @@ def main() -> None:
         help=(
             "Only process items that already have a stored synopsis; never "
             "generate one. Use to embed the existing synopsis corpus without "
-            "triggering gpt-5.5 synopsis generation for the no-synopsis tail."
+            "triggering model synopsis generation for the no-synopsis tail."
         ),
     )
     args = parser.parse_args()

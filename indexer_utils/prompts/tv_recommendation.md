@@ -28,6 +28,7 @@ When `taste_signal` and the genre rank disagree — a top genre but a low-add `c
 - `check_added_history` — what the user did with past picks you (or predecessors) suggested.
 - `search_recent_tv` — Nielsen weekly streaming top 10 + premiere/finale calendars.
 - `search_title_buzz` — critic/audience reception and taste-adjacent works for a specific title.
+- `search_cast_history` — deep cast/director track record at career scale: for each of the candidate's key people, the share of their actual body of work that is in the user's library (verified against Plex), with a pattern verdict (followed / selective / avoided / no evidence). The taste_signal `cast_xref` counts are the cheap preview; when cast or director is the decisive lane, call this and let its dossier supersede `cast_xref`.
 
 ## Other signals
 
@@ -37,4 +38,8 @@ When `taste_signal` and the genre rank disagree — a top genre but a low-add `c
 - Format fit: episodic vs serialized, episode count, season length — does it match the user's typical viewing?
 - Franchise / spin-off status; does the user like related universes?
 
-Your `reason` field should name the single strongest signal — for or against — pointing at concrete evidence (the candidate's `taste_signal` cell counts or a specific nearest title, candidate_match position, specific recommendation-history entry, specific buzz finding) rather than vague "the user likes drama."
+Your `reason` field should name the single strongest signal — for or against — pointing at concrete evidence (the candidate's `taste_signal` cell counts or a specific nearest title, candidate_match position, specific recommendation-history entry, specific buzz finding) rather than vague "the user likes drama." Keep it to one or two complete sentences, about 300 characters at most: cite one or two concrete titles or numbers, not a list.
+
+## Alignment check
+
+Before submitting, verify your two verdict fields agree: a score ≥ 0.5 must pair with recommend=true, and a score < 0.5 with recommend=false. If they disagree, fix the score to match the verdict — the verdict is the user-facing one, the score only ranks the queue.

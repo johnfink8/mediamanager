@@ -461,6 +461,15 @@ def _search_hub(query: str, hub_type: str) -> List[Dict[str, Any]]:
     return []
 
 
+def hub_search(query: str, hub_type: str) -> List[Dict[str, Any]]:
+    """Public surface of :func:`_search_hub` for callers outside this module.
+
+    Plex does the matching; callers verify that a result is what they asked
+    for (title + year) rather than re-implementing the match.
+    """
+    return _search_hub(query, hub_type)
+
+
 def search_videos(
     title: str,
     item_type: str,

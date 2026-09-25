@@ -2,10 +2,11 @@
 
 Unlike the other tools in this package, these make a nested LLM call rather
 than reading project state. Each delegates to an inner Agent equipped with
-the hosted ``WebSearchTool`` and returns the prose dossier directly to the
-recommendation agent. No JSON post-processing — the consumer is another LLM
-that reads prose fluently, so imposing a schema would just add latency, cost,
-and parse-failure modes without helping the reader.
+the ``brave_search`` / ``web_fetch`` tools (see webtools.py) and returns the
+prose dossier directly to the recommendation agent. No JSON post-processing
+— the consumer is another LLM that reads prose fluently, so imposing a schema
+would just add latency, cost, and parse-failure modes without helping the
+reader.
 """
 
 import logging
@@ -16,29 +17,34 @@ from zoneinfo import ZoneInfo
 
 from agents import Agent, RunConfig, RunContextWrapper, Runner
 from agents.models.openai_provider import OpenAIProvider
-from agents.tool import WebSearchTool
 from decouple import config
 from openai import AsyncOpenAI
 
 from ..redis_client import get_redis_client, redis_get_json, redis_set_json
 from .base import ToolContext
 from .safe_tool import safe_tool
-from .shared import enforce_result_budget
+from .shared import enforce_result_budget, strip_preamble
+from .turn_budget import TurnBudget
+from .webtools import brave_search, web_fetch
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
 logger = logging.getLogger(__name__)
 
-# Box Office Mojo's weekend chart is stable enough that the cheapest
-# mini tier handles it. Bump to "gpt-5.1" if research quality slips.
-MODEL = "gpt-5.4-mini"
+# Served locally; the gateway's only chat model (see OPENAI_BASE_URL).
+MODEL = "qwen3.8"
 
 REPORT_CHAR_CAP = 12000
 
+# Generous: the inner agent runs a search round and then several fetch rounds
+# (rendered fetches for JS-only pages) before producing the dossier. Twelve
+# covers a full multi-source pass (ratings site, charts, Reddit, cross-checks).
+SUBAGENT_MAX_TURNS = 12
+
 # Cache the dossier in Redis so repeated calls within a window don't pay the
-# LLM + web_search cost. Bump the version suffix on prompt/schema changes.
+# LLM + web cost. Bump the version suffix on prompt/tool changes.
 CACHE_TTL_SECONDS = 6 * 60 * 60
-CACHE_KEY_VERSION = "v1"
+CACHE_KEY_VERSION = "v3"
 
 # US release day rolls over latest on the West Coast — Pacific keeps the
 # cache key and the queried windows stable for a UTC host during late-Sunday-US
@@ -50,23 +56,25 @@ _MOVIES_SYSTEM_PROMPT = (_PROMPTS_DIR / "search_recent_releases.md").read_text()
 _TV_SYSTEM_PROMPT = (_PROMPTS_DIR / "search_recent_tv.md").read_text()
 _BUZZ_SYSTEM_PROMPT = (_PROMPTS_DIR / "search_title_buzz.md").read_text()
 
+_WEB_TOOLS = [brave_search, web_fetch]
+
 _MOVIES_AGENT = Agent(
     name="search_recent_releases",
     model=MODEL,
     instructions=_MOVIES_SYSTEM_PROMPT,
-    tools=[WebSearchTool()],
+    tools=_WEB_TOOLS,
 )
 _TV_AGENT = Agent(
     name="search_recent_tv",
     model=MODEL,
     instructions=_TV_SYSTEM_PROMPT,
-    tools=[WebSearchTool()],
+    tools=_WEB_TOOLS,
 )
 _BUZZ_AGENT = Agent(
     name="search_title_buzz",
     model=MODEL,
     instructions=_BUZZ_SYSTEM_PROMPT,
-    tools=[WebSearchTool()],
+    tools=_WEB_TOOLS,
 )
 
 
@@ -125,10 +133,11 @@ def _build_tv_prompt(
         ),
         "",
         "Cover:",
-        f"- The most recent Nielsen weekly streaming top 10 (top {top_n} "
-        "rows; combine originals and acquired). For each row include "
-        "rank, title, network/streamer, and viewership figure if "
-        "published.",
+        f"- The most recent Nielsen weekly streaming chart: the top {top_n} "
+        "series, merging Nielsen's originals and acquired top-10 lists "
+        "(films excluded — list notable films from the movies chart "
+        "separately). For each row include rank, title, network/streamer, "
+        "and minutes viewed.",
         "- Series with new premieres in the window — full-season debuts "
         "or new-season debuts — with title, premiere date, "
         "network/streamer, and whether returning or brand-new.",
@@ -149,8 +158,9 @@ def _build_tv_prompt(
         "genuinely unrated titles (brand-new premieres yet to air, "
         "obscure regional series).",
         "",
-        "Method: pull Nielsen's most recent weekly streaming top 10 "
-        "from Variety or THR coverage, premiere/finale calendars from "
+        "Method: pull Nielsen's most recent weekly streaming charts from "
+        "https://www.nielsen.com/data-center/top-ten/ (all lists are plain "
+        "text), premiere/finale calendars from "
         f"Wikipedia's 'List of American television programs of {today.year}' "
         "or trade week-ahead recaps, IMDb Most Popular TV for "
         "supplementary buzz signal, and per-title ratings from IMDb, "
@@ -263,19 +273,18 @@ async def _fetch_dossier(
     # Per-call client so the httpx transport is bound to this event loop
     # and closed before the task exits — see indexer_utils/ai_tools/agent.py
     # for the same pattern in the parent loop.
-    openai_client = AsyncOpenAI(api_key=config("OPENAI_API_KEY"))
+    openai_client = AsyncOpenAI(
+        api_key=config("OPENAI_API_KEY"),
+        base_url=config("OPENAI_BASE_URL", default=None),
+    )
     provider = OpenAIProvider(openai_client=openai_client)
     run_config = RunConfig(tracing_disabled=True, model_provider=provider)
     try:
         try:
-            # max_turns is generous — the inner agent may run several
-            # web_search rounds before producing the dossier. Two is enough in
-            # practice but we give it four so a slow research path doesn't
-            # tripwire.
             result = await Runner.run(
-                agent,
+                TurnBudget(SUBAGENT_MAX_TURNS).prepare(agent, provider),
                 user_prompt,
-                max_turns=4,
+                max_turns=SUBAGENT_MAX_TURNS,
                 run_config=run_config,
             )
         finally:
@@ -287,7 +296,7 @@ async def _fetch_dossier(
         logger.exception("%s subagent failed", log_tag)
         return {"error": f"{exc.__class__.__name__}: {exc}"}
 
-    dossier = str(result.final_output or "").strip()
+    dossier = strip_preamble(str(result.final_output or "").strip())
     if not dossier:
         return {"error": "subagent returned empty dossier"}
 

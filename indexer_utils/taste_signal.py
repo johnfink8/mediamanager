@@ -39,7 +39,7 @@ from .vector_search import NEIGHBOR_YEAR_WINDOW, synopsis_neighbor_summary
 logger = logging.getLogger(__name__)
 
 CACHE_TTL_SECONDS = 6 * 60 * 60
-CACHE_VERSION = "v1"
+CACHE_VERSION = "v2"  # v2: synopsis vectors moved to embeddinggemma (768-dim)
 
 # Candidate attribute key → block label. Whichever the candidate has are used.
 # Movie `studio` is dropped: it's only populated on notable/added films, so its

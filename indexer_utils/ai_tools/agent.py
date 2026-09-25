@@ -21,9 +21,10 @@ from agents.exceptions import MaxTurnsExceeded
 from agents.models.openai_provider import OpenAIProvider
 from decouple import config
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .base import ToolContext
+from .cast_history import search_cast_history
 from .discoveries import (
     search_recent_releases,
     search_recent_tv,
@@ -32,6 +33,8 @@ from .discoveries import (
 from .hooks import AuditHooks, ToolCallBudgetExceeded
 from .inspections import check_added_history, get_item_details, get_user_history
 from .searches import search_by_genre, search_by_network, search_similar_by_synopsis
+from .shared import REASON_CLIP
+from .turn_budget import TurnBudget
 
 logger = logging.getLogger(__name__)
 
@@ -56,9 +59,29 @@ class Recommendation(BaseModel):
         ),
     )
     reason: str = Field(
-        max_length=240,
-        description="Single strongest signal driving the verdict, naming concrete evidence.",
+        max_length=REASON_CLIP,
+        description=(
+            "One or two complete sentences (about 300 characters at most) naming "
+            "the single strongest signal driving the verdict and its concrete "
+            "evidence."
+        ),
     )
+
+    @field_validator("score")
+    @classmethod
+    def _align_score_with_verdict(cls, v: float, info: Any) -> float:
+        # Observed ~8% of the time the model pairs a confident score with the
+        # opposite verdict (e.g. 0.9 + recommend=false for an already-watched
+        # title). The verdict is what the user consumes; the score only ranks
+        # the queue — so on a disagreement, clamp the score to the verdict's side.
+        rec: Optional[bool] = info.data.get("recommend")
+        if rec is True and v < 0.5:
+            logger.info("score %.2f clamped to 0.5 (recommend=true)", v)
+            return 0.5
+        if rec is False and v >= 0.5:
+            logger.info("score %.2f clamped to 0.49 (recommend=false)", v)
+            return 0.49
+        return v
 
 
 @dataclass
@@ -80,6 +103,7 @@ _COMMON_TOOLS = [
     get_user_history,
     check_added_history,
     search_title_buzz,
+    search_cast_history,
 ]
 
 
@@ -127,9 +151,13 @@ async def run_recommendation(
     # exit. Per-run scoping also keeps httpx transports bound to the loop
     # that opened them — required when scheduler threads spin up short-lived
     # loops via ``asyncio.run``.
-    openai_client = AsyncOpenAI(api_key=config("OPENAI_API_KEY"))
+    openai_client = AsyncOpenAI(
+        api_key=config("OPENAI_API_KEY"),
+        base_url=config("OPENAI_BASE_URL", default=None),
+    )
     provider = OpenAIProvider(openai_client=openai_client)
     run_config = RunConfig(tracing_disabled=True, model_provider=provider)
+    agent = TurnBudget(max_turns).prepare(agent, provider)
 
     try:
         try:
@@ -187,7 +215,7 @@ async def run_recommendation(
     submission = {
         "recommend": bool(rec.recommend),
         "score": max(0.0, min(float(rec.score), 1.0)),
-        "reason": str(rec.reason)[:240],
+        "reason": str(rec.reason)[:REASON_CLIP],
     }
     logger.info(
         "%s submitted recommend=%s score=%s turns=%d tool_calls=%d reason=%s",
