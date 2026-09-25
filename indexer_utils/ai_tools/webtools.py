@@ -11,10 +11,13 @@ here rather than dumping raw HTML at the model.
 """
 
 import asyncio
+import ipaddress
 import logging
 import re
+import socket
 from html.parser import HTMLParser
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+from urllib.parse import urljoin, urlsplit
 
 from agents import RunContextWrapper
 from decouple import config
@@ -32,12 +35,11 @@ _USER_AGENT = (
 _FETCH_TIMEOUT = 20.0  # seconds, static + API
 _RENDER_TIMEOUT_MS = 30_000
 # A single page the model should never need more of; the dossier subagent
-# caps its own output, so oversized fetches are pure token waste.
-# A single page the model should never need more of; the dossier subagent
 # caps its own output, and every fetched page accumulates in the model's
 # context — 8k chars (≈2-3k tokens) keeps even a 12-fetch research run far
 # under the 92k context ceiling of the local model.
 _MAX_CONTENT_CHARS = 8_000
+_MAX_REDIRECTS = 5
 
 # Rendered fetches run a real Chromium — by far the heaviest path here. Cap
 # concurrent renders per event loop (two) so a burst of subagent calls
@@ -128,6 +130,43 @@ def _extract(html: str) -> str:
     return parser.text()
 
 
+async def _resolve(host: str, port: int) -> list[str]:
+    infos = await asyncio.get_running_loop().getaddrinfo(
+        host, port, type=socket.SOCK_STREAM
+    )
+    return [str(info[4][0]) for info in infos]
+
+
+async def _blocked(url: str) -> Optional[str]:
+    """Why ``url`` must not be fetched, or None when it's a public http(s) URL.
+
+    The URL comes from the model, and the model reads pages that can carry
+    injected instructions, while this process sits on the Docker network
+    next to Radarr, Sonarr, Authelia, Redis and Postgres. So every target
+    — and every redirect hop — must resolve only to globally routable
+    addresses: no loopback, private, link-local (cloud metadata), shared or
+    reserved ranges, and no bare service names that resolve to them.
+    """
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return "url must be an absolute http(s) URL"
+    host = parts.hostname
+    try:
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        addresses = await _resolve(host, port)
+    except (OSError, ValueError):
+        return f"could not resolve {host}"
+    if not addresses:
+        return f"could not resolve {host}"
+    for address in addresses:
+        ip = ipaddress.ip_address(address.split("%")[0])
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        if not ip.is_global:
+            return f"refusing to fetch {host}: it resolves to a non-public address"
+    return None
+
+
 def _page_payload(url: str, text: str, **extra: Any) -> Dict[str, Any]:
     return {
         "url": url,
@@ -209,18 +248,29 @@ async def web_fetch(
             rendering). Use only when a static fetch came back empty.
     """
     url = (url or "").strip()
-    if not url.startswith(("http://", "https://")):
-        return {"error": "url must be an absolute http(s) URL"}
+    if reason := await _blocked(url):
+        return {"error": reason}
 
     if render:
         return await _fetch_rendered(url)
 
+    # Redirects are followed by hand so every hop passes the same check.
     async with AsyncClient(
         timeout=_FETCH_TIMEOUT,
-        follow_redirects=True,
+        follow_redirects=False,
         headers={"User-Agent": _USER_AGENT},
     ) as client:
-        resp = await client.get(url)
+        target = url
+        for _ in range(_MAX_REDIRECTS + 1):
+            resp = await client.get(target)
+            location = resp.headers.get("location")
+            if not (resp.is_redirect and location):
+                break
+            target = urljoin(target, location)
+            if reason := await _blocked(target):
+                return {"error": f"redirect blocked: {reason}"}
+        else:
+            return {"error": f"too many redirects for {url}"}
     if resp.status_code >= 400:
         return {"error": f"HTTP {resp.status_code} for {url}"}
     return _page_payload(url, _extract(resp.text))
@@ -236,9 +286,31 @@ async def _fetch_rendered(url: str) -> Dict[str, Any]:
             browser = await pw.chromium.launch()
             try:
                 page = await browser.new_page(user_agent=_USER_AGENT)
-                await page.goto(
+                verdicts: Dict[str, Optional[str]] = {}
+
+                async def guard(route: Any) -> None:
+                    """Abort any request the page makes to a non-public host."""
+                    parts = urlsplit(route.request.url)
+                    key = f"{parts.scheme}://{parts.netloc}"
+                    if key not in verdicts:
+                        verdicts[key] = await _blocked(route.request.url)
+                    if verdicts[key]:
+                        await route.abort()
+                    else:
+                        await route.continue_()
+
+                await page.route("**/*", guard)
+                response = await page.goto(
                     url, timeout=_RENDER_TIMEOUT_MS, wait_until="domcontentloaded"
                 )
+                # Route handlers only see the first URL of a redirect chain,
+                # so check the navigation's hops after the fact and withhold
+                # the page if any of them was internal.
+                request = response.request if response else None
+                while request is not None:
+                    if reason := await _blocked(request.url):
+                        return {"error": f"redirect blocked: {reason}"}
+                    request = request.redirected_from
                 # Give client-side hydration a beat before reading the DOM.
                 await page.wait_for_timeout(1500)
                 text = await page.inner_text("body")
