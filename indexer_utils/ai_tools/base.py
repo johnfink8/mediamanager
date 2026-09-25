@@ -8,10 +8,10 @@ class ToolContext:
 
     item_type: "mv" or "tv". Tools scope their data to this type so the model
     can stay agnostic about which DB filter is in play.
-    candidate: the item being scored {uid, title, year, genres, cast, director}.
-    Tools use this to avoid recommending the candidate itself in similarity
-    results; ``cast`` (billing order) and ``director`` feed the cast
-    track-record subagent.
+    candidate: the item being scored {uid, title, year, genres, cast, director,
+    tmdb_id}. Tools use this to avoid recommending the candidate itself in
+    similarity results; ``cast`` (billing order), ``director`` and
+    ``tmdb_id`` feed the cast track-record subagent.
     """
 
     item_type: str
