@@ -85,27 +85,71 @@ def titles_related(row_title: str, tmdb_title: str) -> bool:
     return len(a & b) / len(b) >= 0.6
 
 
-def fetch_person_data(item_type: str, row_title: str) -> dict | None:
-    """Return {tmdb_id, tmdb_title, cast, director} validated against row_title, or None."""
-    raw_year = year_of(row_title)
+def _hit_year(hit: dict) -> int | None:
+    date = str(hit.get("release_date") or hit.get("first_air_date") or "")
+    return int(date[:4]) if date[:4].isdigit() else None
+
+
+def pick_hit(item_type: str, hits: list, query: str, year: int | None) -> dict | None:
+    """The TMDB search result that is this row's work, or None.
+
+    Exact title matches win over fuzzy ones. With a known year, a movie hit
+    must be within a year of it; a series hit must have premiered no later
+    than a year after it (a row's year can be a later season's), and the
+    closest premiere wins — so a same-named remake or reboot is never
+    picked just for being listed first.
+    """
+    exact = [
+        h
+        for h in hits
+        if (h.get("title") or h.get("name") or "").lower() == query.lower()
+    ]
+    pool = exact or hits
+    if year is not None:
+
+        def fits(h: dict) -> bool:
+            hy = _hit_year(h)
+            if hy is None:
+                return False
+            return abs(hy - year) <= 1 if item_type == "mv" else hy <= year + 1
+
+        pool = sorted(
+            (h for h in pool if fits(h)), key=lambda h: abs(year - (_hit_year(h) or 0))
+        )
+    return pool[0] if pool else None
+
+
+def _stored_year(attrs: dict) -> int | None:
+    try:
+        return int(str(attrs.get("year")))
+    except (TypeError, ValueError):
+        return None
+
+
+def fetch_person_data(
+    item_type: str, row_title: str, stored_year: int | None = None
+) -> dict | None:
+    """Return {tmdb_id, tmdb_title, cast, director} validated against row_title, or None.
+
+    ``stored_year`` is the row's ``attributes["year"]``, for titles that don't
+    embed one (TV rows usually carry the plain series title).
+    """
+    title_year = year_of(row_title)
+    year = title_year or stored_year
     clean = clean_title(row_title)
     clean_q = re.sub(r"\s+\d{4}$", "", clean)
 
     search = f"/search/movie?query={urllib.parse.quote(clean_q)}&language=en-US"
-    if raw_year:
-        search += f"&primary_release_year={raw_year}"
+    if year:
+        search += f"&primary_release_year={year}"
     if item_type == "tv":
         search = f"/search/tv?query={urllib.parse.quote(clean_q)}&language=en-US"
-        if raw_year:
-            search += f"&first_air_date_year={raw_year}"
+        # Only a year in the title names the series; a stored year may be a
+        # later season's, which would filter the right show out.
+        if title_year:
+            search += f"&first_air_date_year={title_year}"
     res = tmdb_json(search)
-    hits = res.get("results", [])
-    exact = [
-        h
-        for h in hits
-        if (h.get("title") or h.get("name") or "").lower() == clean_q.lower()
-    ]
-    hit = exact[0] if exact else (hits[0] if hits else None)
+    hit = pick_hit(item_type, res.get("results", []), clean_q, year)
     if hit and not titles_related(row_title, hit.get("title") or hit.get("name") or ""):
         hit = None  # wrong movie — do not write it onto this row
 
@@ -201,7 +245,10 @@ async def main() -> None:
                 break
             try:
                 data = await asyncio.to_thread(
-                    fetch_person_data, args.item_type, row["title"]
+                    fetch_person_data,
+                    args.item_type,
+                    row["title"],
+                    _stored_year(row["attributes"]),
                 )
                 await asyncio.sleep(args.sleep)
             except Exception as e:
