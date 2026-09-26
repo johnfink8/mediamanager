@@ -393,7 +393,11 @@ def _ai_details_from_run(
     details["turns"] = run.turns
     details["tool_calls"] = run.tool_calls
 
-    failure = synopsis_failure or run.failure
+    # A failed synopsis doesn't fail the assessment: the verdict is what the
+    # user consumes, and it stands without the synopsis. Record it on its
+    # own key so a completed verdict is never shown as "AI assessment failed".
+    details["synopsis_failure"] = synopsis_failure
+    failure = run.failure or synopsis_failure
     submission = run.submission
     if submission is not None and run.failure is None:
         details.update(
@@ -401,8 +405,8 @@ def _ai_details_from_run(
                 "value": bool(submission.get("recommend")),
                 "score": float(submission.get("score") or 0.0),
                 "reason": str(submission.get("reason") or "")[:REASON_CLIP],
-                "failure": failure,
-                "failed": failure is not None,
+                "failure": None,
+                "failed": False,
             }
         )
     else:
