@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
@@ -91,26 +92,43 @@ _PLEX_DETAIL_FIELDS = (
 )
 
 
-def get_plex_details(
-    title: str, year: Optional[int] = None
-) -> Optional[Dict[str, Any]]:
-    """Look up a movie in Plex and return a slim dict with view/rating fields.
+_YEAR_TOKEN = re.compile(r"(?<=\s)(?:19|20)\d\d\b")
 
-    Returns None when not found or on error.
+
+def release_title(name: str) -> str:
+    """The film's title from a release name, for searching Plex.
+
+    ``The.Uprising.2026.1080p.AMZN.WEB-DL`` -> ``The Uprising``. A name
+    that already has spaces is taken to be a real title and kept as is.
     """
-    try:
-        movie = find_movie(title, year)
-    except Exception:
-        return None
-    if not movie:
-        return None
-    return {key: movie.get(key) for key in _PLEX_DETAIL_FIELDS if key in movie}
+    if " " in name.strip():
+        return name.strip()
+    spaced = name.replace(".", " ").replace("_", " ")
+    match = _YEAR_TOKEN.search(spaced)
+    return (spaced[: match.start()] if match else spaced).strip()
+
+
+def get_plex_details(
+    imdb_id: str, titles: List[Optional[str]]
+) -> Optional[Dict[str, Any]]:
+    """Find a movie in Plex by IMDb id; a slim dict with view/rating fields.
+
+    Plex searches by title, so each of ``titles`` is tried in turn and a
+    result only counts when its IMDb guid is ``imdb_id`` — the catalog
+    title is often a release name, which an exact title match never finds.
+    Returns None when Plex doesn't have it; raises when Plex can't be asked.
+    """
+    for title in dict.fromkeys(t for t in titles if t):
+        for entry in _search_hub(title, "movie"):
+            if _extract_ids_from_metadata(entry)[0] == imdb_id:
+                return {k: entry.get(k) for k in _PLEX_DETAIL_FIELDS if k in entry}
+    return None
 
 
 async def aget_plex_details(
-    title: str, year: Optional[int] = None
+    imdb_id: str, titles: List[Optional[str]]
 ) -> Optional[Dict[str, Any]]:
-    return await asyncio.to_thread(get_plex_details, title, year)
+    return await asyncio.to_thread(get_plex_details, imdb_id, titles)
 
 
 async def aget_recently_played(limit: int = 40) -> List[Dict[str, Any]]:
@@ -453,7 +471,10 @@ def _search_hub(query: str, hub_type: str) -> List[Dict[str, Any]]:
     ``Media``/``Part`` inline so the file path comes back without a second
     fetch. Returns the items from the hub of the requested ``type``.
     """
-    hubs = _plex_get("/hubs/search", query=query, limit=20).get("Hub") or []
+    hubs = (
+        _plex_get("/hubs/search", query=query, limit=20, includeGuids=1).get("Hub")
+        or []
+    )
     for hub in hubs:
         if hub.get("type") == hub_type:
             items: List[Dict[str, Any]] = hub.get("Metadata") or []

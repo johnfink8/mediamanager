@@ -19,7 +19,7 @@ from agents import RunContextWrapper
 from sqlalchemy import select
 
 from ..models import IgnoreItem, MovieRecommendationRecord
-from ..plex_utils import aget_plex_details, aget_recently_played
+from ..plex_utils import aget_plex_details, aget_recently_played, release_title
 from ..radarr_utils import aget_movie
 from ..session import db_session
 from ..sonarr_utils import aget_series
@@ -53,7 +53,7 @@ async def get_item_details(
     high count = strong like), 'missing_from_library' (added in DB but no
     longer in Plex; likely deleted — strong negative signal),
     'not_in_library' (never added; absence carries no signal), 'unknown'
-    (not queried, e.g. shows). Use after a search tool surfaces a uid you
+    (not queried, e.g. shows, or Plex couldn't be reached — no signal). Use after a search tool surfaces a uid you
     want to dig into.
 
     Args:
@@ -77,7 +77,7 @@ async def get_item_details(
         attrs = row.attributes or {}
         ai = attrs.get("ai") or {}
         added_flag = bool(row.added)
-        title_for_plex = row.title
+        plex_titles = [attrs.get("tmdb_title"), release_title(row.title or "")]
         details: Dict[str, Any] = {
             "uid": row.uid,
             "title": row.title,
@@ -122,13 +122,14 @@ async def get_item_details(
             if val is not None:
                 details[label] = val
 
-    if ctx.item_type == "mv" and title_for_plex:
-        year = attrs.get("year")
+    if ctx.item_type == "mv" and any(plex_titles):
         try:
-            year_int = int(year) if year is not None else None
-        except (TypeError, ValueError):
-            year_int = None
-        plex = await aget_plex_details(title_for_plex, year_int)
+            plex = await aget_plex_details(row.uid, plex_titles)
+        except Exception:
+            # Not reaching Plex says nothing about whether the user kept it.
+            logger.exception("get_item_details: plex lookup failed for %s", uid)
+            plex = None
+            plex_titles = []
         if plex:
             details["view_count"] = plex.get("viewCount", 0)
             details["last_viewed_at"] = plex.get("lastViewedAt")
@@ -145,7 +146,7 @@ async def get_item_details(
                 extras["summary"] = clip(extras["summary"], PLEX_SUMMARY_CLIP)
             if extras:
                 details["plex_extras"] = extras
-        else:
+        elif plex_titles:
             details["plex_status"] = (
                 "missing_from_library" if added_flag else "not_in_library"
             )
