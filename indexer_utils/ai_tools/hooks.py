@@ -2,7 +2,8 @@
 
 The SDK has ``max_turns`` but no cumulative tool-call cap. ``on_tool_start``
 fills that gap so ``AI_AGENT_MAX_TOOL_CALLS`` bounds total work, even when a
-single turn fires several tools in parallel.
+single turn fires several tools in parallel. The research subagents use the
+same hooks for their audit log, with no cap (``max_tool_calls=None``).
 """
 
 import logging
@@ -30,11 +31,12 @@ class ToolCallBudgetExceeded(RuntimeError):
 class AuditHooks(RunHooks[ToolContext]):
     """Records per-tool-call timing + outcome onto an in-memory ``tool_log``.
 
-    Also enforces ``max_tool_calls`` by raising ``ToolCallBudgetExceeded``
-    before dispatch when the budget would be breached.
+    Also enforces ``max_tool_calls``, when set, by raising
+    ``ToolCallBudgetExceeded`` before dispatch when the budget would be
+    breached.
     """
 
-    def __init__(self, *, max_tool_calls: int, log_tag: str) -> None:
+    def __init__(self, *, max_tool_calls: Optional[int], log_tag: str) -> None:
         self.max_tool_calls = max_tool_calls
         self.log_tag = log_tag
         self.turns = 0
@@ -79,7 +81,8 @@ class AuditHooks(RunHooks[ToolContext]):
     ) -> None:
         # Check + increment must be free of awaits so concurrent on_tool_start
         # invocations within a turn can't both pass the cap.
-        if self.tool_calls + 1 > self.max_tool_calls:
+        cap = self.max_tool_calls
+        if cap is not None and self.tool_calls + 1 > cap:
             raise ToolCallBudgetExceeded(
                 f"agent exceeded {self.max_tool_calls} tool calls"
             )
@@ -104,6 +107,7 @@ class AuditHooks(RunHooks[ToolContext]):
         self.tool_log.append(
             {
                 "name": tool.name,
+                "arguments": getattr(context, "tool_arguments", None),
                 "duration_ms": duration_ms,
                 "error": None,
                 "output_preview": preview,

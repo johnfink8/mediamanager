@@ -99,3 +99,5 @@ weaviate_data
 local
 .claude/
 nginx.conf.bak*
+
+research_runs/

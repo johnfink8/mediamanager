@@ -33,12 +33,9 @@ import logging
 import re
 from datetime import date
 from pathlib import Path
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional
 
-from agents import Agent, RunConfig, RunContextWrapper, Runner
-from agents.models.openai_provider import OpenAIProvider
-from decouple import config
-from openai import AsyncOpenAI
+from agents import Agent, RunContextWrapper
 from pydantic import BaseModel
 from sqlalchemy import bindparam, text
 
@@ -47,10 +44,9 @@ from ..redis_client import get_redis_client, redis_get_json, redis_set_json
 from ..session import db_session
 from ..tmdb import get_credit_person_ids, get_person_combined_credits, search_person_id
 from .base import ToolContext
+from .research import ResearchSpec, run_research
 from .safe_tool import safe_tool
-from .shared import strip_preamble
-from .turn_budget import TurnBudget
-from .webtools import brave_search, web_fetch
+from .webtools import WEB_TOOLS
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 logger = logging.getLogger(__name__)
@@ -507,33 +503,32 @@ async def check_titles(
     return {"item_type": ctx.item_type, "results": results}
 
 
-async def _web_search(
-    wrapper: RunContextWrapper[ToolContext],
-    query: str,
-    count: int = 10,
-    freshness: str = "",
-) -> Dict[str, Any]:
-    """Search the web — alias for brave_search.
-
-    Some models insist on the name ``web_search`` regardless of the tool
-    list; exposing both avoids a wasted turn on a "tool not found" error.
-    """
-    raw = getattr(brave_search, "__wrapped__")
-    return cast(
-        Dict[str, Any],
-        await raw(wrapper, query=query, count=count, freshness=freshness),
-    )
-
-
-web_search = safe_tool(_web_search, name_override="web_search")
-
-
-_CAST_AGENT = Agent(
+CAST_HISTORY = ResearchSpec(
     name="cast_history",
-    model=MODEL,
-    instructions=_SYSTEM_PROMPT,
-    tools=[brave_search, web_search, web_fetch, check_titles],
+    agent=Agent(
+        name="cast_history",
+        model=MODEL,
+        instructions=_SYSTEM_PROMPT,
+        tools=[*WEB_TOOLS, check_titles],
+    ),
+    max_turns=SUBAGENT_MAX_TURNS,
 )
+
+
+async def build_cast_input(item_type: str, candidate: Dict[str, Any]) -> str:
+    """The subagent's user prompt: each person's TMDB filmography + catalog seed.
+
+    Needs the DB (catalog cross-reference), TMDB and Plex. Callers check
+    ``_person_names(candidate)`` first — with no people there is nothing
+    to research.
+    """
+    names = _person_names(candidate)
+    blocks, filmographies = await asyncio.gather(
+        _cross_ref(item_type, names, str(candidate.get("uid") or "")),
+        _filmographies(item_type, candidate, names),
+    )
+    await _plex_annotate(item_type, [t for b in blocks.values() for t in b["titles"]])
+    return _user_prompt(item_type, candidate, blocks, filmographies)
 
 
 async def _fetch_dossier(
@@ -544,41 +539,14 @@ async def _fetch_dossier(
     ``ctx`` is passed through so ``check_titles`` can reach the user's
     Plex via the tool context.
     """
-    # Per-call client so the httpx transport is bound to this event loop
-    # and closed before the task exits — see agent.py.
-    openai_client = AsyncOpenAI(
-        api_key=config("OPENAI_API_KEY"),
-        base_url=config("OPENAI_BASE_URL", default=None),
-    )
-    provider = OpenAIProvider(openai_client=openai_client)
-    run_config = RunConfig(tracing_disabled=True, model_provider=provider)
-    try:
-        try:
-            result = await Runner.run(
-                TurnBudget(SUBAGENT_MAX_TURNS).prepare(_CAST_AGENT, provider),
-                user_prompt,
-                context=ctx,
-                max_turns=SUBAGENT_MAX_TURNS,
-                run_config=run_config,
-            )
-        finally:
-            await provider.aclose()
-            await openai_client.close()
-    except Exception as exc:
-        logger.exception("cast_history subagent failed")
-        return {"error": f"{exc.__class__.__name__}: {exc}"}
-
-    dossier = strip_preamble(str(result.final_output or "").strip())
-    if not dossier:
-        return {
-            "error": "subagent returned no dossier "
-            f"(responses={len(result.raw_responses)}, "
-            f"max_turns={SUBAGENT_MAX_TURNS})"
-        }
+    run = await run_research(CAST_HISTORY, user_prompt, context=ctx)
+    if run.error:
+        return {"error": run.error}
+    dossier = str(run.output)
     if len(dossier) > REPORT_CHAR_CAP:
         dossier = dossier[: REPORT_CHAR_CAP - 1] + "\u2026"
 
-    payload = {"as_of": date.today().isoformat(), "report": dossier[:REPORT_CHAR_CAP]}
+    payload = {"as_of": date.today().isoformat(), "report": dossier}
     redis_set_json(get_redis_client(), cache_key, payload, CACHE_TTL_SECONDS)
     return payload
 
@@ -621,12 +589,5 @@ async def search_cast_history(
         logger.info("cast_history cache hit key=%s", cache_key)
         return cached
 
-    blocks, filmographies = await asyncio.gather(
-        _cross_ref(ctx.item_type, names, str(candidate.get("uid") or "")),
-        _filmographies(ctx.item_type, candidate, names),
-    )
-    await _plex_annotate(
-        ctx.item_type, [t for b in blocks.values() for t in b["titles"]]
-    )
-    user_prompt = _user_prompt(ctx.item_type, candidate, blocks, filmographies)
+    user_prompt = await build_cast_input(ctx.item_type, candidate)
     return await _fetch_dossier(cache_key, user_prompt, ctx)

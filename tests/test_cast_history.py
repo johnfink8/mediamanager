@@ -18,6 +18,8 @@ from agents import RunContextWrapper
 from agents.tool_context import ToolContext as SdkToolContext
 
 from indexer_utils.ai_tools import cast_history as ch
+from indexer_utils.ai_tools import research
+from indexer_utils.ai_tools import webtools as wt
 from indexer_utils.ai_tools.base import ToolContext
 from indexer_utils.models import IgnoreItem
 from indexer_utils.session import db_session
@@ -343,7 +345,7 @@ class TestCheckTitles:
 
 class TestWebSearchAlias:
     def test_tool_is_exposed_as_web_search(self):
-        assert ch.web_search.name == "web_search"
+        assert wt.web_search.name == "web_search"
 
     async def test_delegates_to_brave_search(self, monkeypatch):
         async def fake_brave(wrapper, query, count=10, freshness=""):
@@ -352,11 +354,11 @@ class TestWebSearchAlias:
         class FakeTool:
             __wrapped__ = fake_brave
 
-        monkeypatch.setattr(ch, "brave_search", FakeTool)
+        monkeypatch.setattr(wt, "brave_search", FakeTool)
         # Invoke through the SDK, not the raw function: a sync alias that
         # returns the un-awaited coroutine only shows up on this path.
         args = json.dumps({"query": "q", "count": 3})
-        out = await ch.web_search.on_invoke_tool(
+        out = await wt.web_search.on_invoke_tool(
             SdkToolContext(
                 context=ToolContext(item_type="mv", candidate={"uid": "x"}),
                 tool_name="web_search",
@@ -475,11 +477,11 @@ class TestFetchDossier:
             async def run(*args, **kwargs):
                 return EmptyResult()
 
-        monkeypatch.setattr(ch, "Runner", FakeRunner)
+        monkeypatch.setattr(research, "Runner", FakeRunner)
         out = await ch._fetch_dossier(
             "k", "{}", ToolContext(item_type="mv", candidate={})
         )
-        assert out["error"].startswith("subagent returned no dossier")
+        assert out["error"].startswith("subagent returned nothing")
 
 
 def _credit(title, released, *, media="movie", **extra):

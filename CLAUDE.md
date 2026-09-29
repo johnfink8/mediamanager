@@ -64,7 +64,7 @@ Postgres 16 with the **pgvector** extension (`pgvector/pgvector:pg16` image). Th
 Entry point: `annotate_with_ai_async(item_type, uid, title, attrs)` in `indexer_utils/ai_recs.py`, called during candidate ingest (`vid_utils.py`) and on GraphQL re-annotation (`schema.py`). Per candidate it:
 
 1. Hydrates metadata (TMDB cast/director/release-count via `tmdb.py`).
-2. Generates a short synopsis (plain OpenAI-SDK JSON call to the local model) and embeds `title + synopsis` into the pgvector `synopsis_vector` column (`vector_search.upsert_item_vector`). For brand-new candidates the row doesn't exist yet, so the vector is stashed in `attrs["_synopsis_vector_tmp"]` and attached after insert.
+2. Researches a short synopsis with the synopsis agent (`ai_tools/synopsis.py`: web tools, fed TMDB's overview/franchise/networks via `tmdb.get_title_details`, told never to invent a plot) and embeds `title + synopsis` into the pgvector `synopsis_vector` column (`vector_search.upsert_item_vector`). The title is TMDB's (`tmdb_title`), never a release filename. For brand-new candidates the row doesn't exist yet, so the vector is stashed in `attrs["_synopsis_vector_tmp"]` and attached after insert.
 3. Builds a user payload including a pre-computed `library_profile` (aggregate taste, see `library_profile.py`) and a `taste_signal` block (`taste_signal.py`): raw historical add counts over the candidate's decided ±2yr same-type cohort, broken out by the synopsis-neighbour × critic-presence cross-tab and per-attribute (network/language/genre), plus a `cast_xref` counting how many added titles each of the candidate's cast appears in (whole-library, cross-era — not bounded to the cohort window). The model reads counts as rates itself; the cohort cross-tab is Redis-cached by `(item_type, year)`.
 4. Runs the recommendation **Agent** and writes a single consolidated `ai` block back onto `attrs` (verdict, score, reason, synopsis, tool log, turn/tool-call counts, failure info).
 
@@ -76,10 +76,21 @@ The agent itself lives in `indexer_utils/ai_tools/` and is built on the **openai
   - `inspections.py` — `get_item_details`, `get_user_history`, `check_added_history` (fan out to DB / Plex / Radarr / Sonarr).
   - `discoveries.py` — `search_recent_releases` (movies only), `search_recent_tv` (TV only), `search_title_buzz`. These are nested subagents that research with the local `brave_search` + `web_fetch` tools from `webtools.py` (static fetch by default; `render=true` runs a headless chromium) instead of OpenAI's hosted WebSearchTool; they return prose dossiers (no JSON schema — the consumer is another LLM) and cache results in Redis.
   - `cast_history.py` — `search_cast_history`, a tool-bearing research subagent. The people-set is the candidate's top-10 cast (billing order) plus director; a deterministic-SQL catalog cross-reference (cast and/or director, leave-one-out, type-scoped) is embedded as a *seed only*. The subagent then establishes each person's actual career (own knowledge + `brave_search`/`web_fetch` — incl. a `web_search` alias, since qwen insists on that name) and verifies a sample of it against the user's Plex with `check_titles`, which delegates matching to Plex's own `/hubs/search` API (via `plex_utils.hub_search`) and only checks title + year ±1 on what Plex returns — no local matching, no watch history. The dossier reports career-relative rates ("X of Y works are in your library") and a per-person pattern label. Cached 6h at `mediamanager:cast_history:v5:{type}:{uid}`; a failed subagent returns `error` (no signal), never a negative.
-- `hooks.py` — `AuditHooks` records per-call timing/outcome and enforces a cumulative tool-call budget (the SDK only caps turns).
+- `research.py` — `ResearchSpec` + `run_research`, the one runner behind every research subagent (synopsis, buzz, cast history, release windows): per-run client, `TurnBudget`, `AuditHooks` tool log, errors returned not raised.
+- `hooks.py` — `AuditHooks` records per-call timing/outcome/arguments and enforces a cumulative tool-call budget (the SDK only caps turns).
 - `base.py` — `ToolContext` (item_type + candidate) passed to every tool via `RunContextWrapper`.
 
 Relevant env (via `python-decouple`/`.env`): `OPENAI_BASE_URL` (local OpenAI-compatible gateway), `OPENAI_API_KEY` (fake — the gateway is unauthenticated), `OPENAI_MODEL` (default `qwen3.8`), `OPENAI_EMBEDDING_MODEL` (default `embeddinggemma-cpu:latest`, 768-dim L2-normalized), `AI_AGENT_MAX_TURNS` (6), `AI_AGENT_MAX_TOOL_CALLS` (16), `BRAVE_API_KEY` (Brave Search API for the discovery subagents). The gateway serves both `/v1/chat/completions` and `/v1/embeddings` from one base URL.
+
+### Research harness
+
+`research_harness.py` runs any research subagent live — `synopsis`, `buzz`, `cast`, `recent-releases`, `recent-tv` — through the same prompt builders and real inputs production uses (catalog row hydrated from TMDB; nothing written to the DB), skipping only the Redis caches. `--cases` runs a curated set of real candidates (new releases, sequels, remakes, non-English TV); `--dry-run` prints the input only; records (input, output, tool log with arguments) land in `research_runs/` (gitignored). Run it on the app's network:
+
+```bash
+docker run --rm --network container:servermonitor-servermonitor-1 \
+    -v "$PWD":/opt/servermonitor servermonitor-servermonitor \
+    python research_harness.py synopsis --cases
+```
 
 ## Code Style & Tooling
 
