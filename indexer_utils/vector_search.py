@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 
 from decouple import config
 from openai import AsyncOpenAI
-from sqlalchemy import Integer, Select, String, and_, cast, func, select, update
+from sqlalchemy import Integer, Select, String, and_, cast, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import IgnoreItem
@@ -125,6 +125,19 @@ async def upsert_item_vector(
     return attrs
 
 
+def decided_by_user() -> Any:
+    """Rows the user actually decided on: kept, or passed on after seeing it.
+
+    ``ignore`` alone isn't a decision — filter rules ignore most candidates
+    on ingest (``shown=False``) before anyone sees them. Plex-scanned library
+    rows are ``added`` without ever being ``shown``, so ``added`` stands alone.
+    """
+    return or_(
+        IgnoreItem.added.is_(True),
+        and_(IgnoreItem.ignore.is_(True), IgnoreItem.shown.is_(True)),
+    )
+
+
 async def synopsis_neighbor_summary(
     session: AsyncSession,
     item_type: str,
@@ -142,9 +155,11 @@ async def synopsis_neighbor_summary(
     keeps things like *this* candidate, independent of how the genre is
     labelled. Two constraints make the raw count honest:
 
-    * **decided only** (``ignore=True``) — a still-in-queue candidate is
-      neither kept nor passed, so it must not count as a negative. Keeps the
-      signal stable if the review queue ever backs up.
+    * **decided only** (added, or ignored after being shown) — a
+      still-in-queue candidate is neither kept nor passed, so it must not
+      count as a negative; nor may one a filter rule ignored on ingest
+      without the user ever seeing it. Keeps the signal stable if the review
+      queue ever backs up.
     * **same release era** (``candidate_year ± year_window``) — inbound
       candidates are always current releases and live in a mostly-passed-on
       neighbourhood; bounding to the candidate's window stops a decades-old,
@@ -161,7 +176,7 @@ async def synopsis_neighbor_summary(
         IgnoreItem.item_type == item_type,
         IgnoreItem.synopsis_vector.is_not(None),
         IgnoreItem.uid != uid,
-        IgnoreItem.ignore.is_(True),
+        decided_by_user(),
     ]
     era: Optional[List[int]] = None
     if candidate_year is not None:

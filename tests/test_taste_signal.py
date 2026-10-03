@@ -27,7 +27,7 @@ def _no_redis(monkeypatch):
     monkeypatch.setattr(ts, "get_redis_client", lambda: None)
 
 
-def _item(uid, *, added, has_critic, genre, year=2025, ignore=True):
+def _item(uid, *, added, has_critic, genre, year=2025, ignore=True, shown=True):
     attrs = {"year": year, "genres": [genre], "originalLanguage": ["English"]}
     if has_critic:
         attrs["rottenTomatoesuser_value"] = 80
@@ -37,7 +37,7 @@ def _item(uid, *, added, has_critic, genre, year=2025, ignore=True):
         item_type="mv",
         added=added,
         ignore=ignore,
-        shown=True,
+        shown=shown,
         attributes=attrs,
         synopsis_vector=_VEC,
     )
@@ -100,6 +100,21 @@ async def test_cohort_counts_decided_same_era_only(cohort):
     # 8 decided 2025 titles, 4 added — undecided and the 2010 title excluded.
     assert block["cohort"]["n"] == 8
     assert block["cohort"]["added"] == 4
+
+
+async def test_cohort_leaves_out_auto_filtered_titles(cohort):
+    """Ignored-but-never-shown titles were filtered by a rule, not passed on
+    by the user; a Plex-scanned library title is kept though never shown."""
+    cohort.add(
+        _item("auto", added=False, has_critic=False, genre="Horror", shown=False)
+    )
+    cohort.add(_item("plex", added=True, has_critic=False, genre="Horror", shown=False))
+    await cohort.commit()
+
+    block = await _build(cohort)
+
+    assert block["cohort"]["n"] == 9
+    assert block["cohort"]["added"] == 5
 
 
 async def test_matrix_partitions_the_cohort(cohort):

@@ -24,14 +24,14 @@ _ALIGNED = [1.0] + [0.0] * (VECTOR_DIMS - 1)
 _OFF_AXIS = [1.0, 1.0] + [0.0] * (VECTOR_DIMS - 2)
 
 
-def _item(uid, *, added, ignore, year, vec=_ALIGNED):
+def _item(uid, *, added, ignore, year, vec=_ALIGNED, shown=True):
     return IgnoreItem(
         uid=uid,
         title=uid,
         item_type="mv",
         added=added,
         ignore=ignore,
-        shown=True,
+        shown=shown,
         attributes={"year": year},
         synopsis_vector=vec,
     )
@@ -112,3 +112,19 @@ async def test_returns_none_without_decided_neighbors(session):
     result = await synopsis_neighbor_summary(session, "mv", "cand", _CANDIDATE, 2025)
 
     assert result is None
+
+
+async def test_auto_filtered_items_are_not_rejections(pool):
+    """A filter rule ignores most candidates on ingest (``shown=False``)
+    before the user ever sees them: not a pass, so not in the pool. A
+    Plex-scanned library title is never shown either, but it is kept."""
+    pool.add(_item("auto-filtered", added=False, ignore=True, year=2025, shown=False))
+    pool.add(_item("plex-kept", added=True, ignore=True, year=2025, shown=False))
+    await pool.commit()
+
+    result = await synopsis_neighbor_summary(pool, "mv", "cand", _CANDIDATE, 2025)
+
+    assert "auto-filtered" not in _titles(result)
+    assert "plex-kept" in _titles(result)
+    assert result["k"] == 5
+    assert result["added_of_top"] == 4

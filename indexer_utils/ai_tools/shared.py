@@ -153,17 +153,21 @@ def decision(item: IgnoreItem) -> str:
     Replaces the (added, ignored) pair the model previously had to reason
     through. ``ignored=True`` does NOT mean rejected — added items also have
     ``ignored=True`` once they've been processed. The model was conflating
-    these.
+    these. Nor does it when the item was never ``shown``: a filter rule
+    (e.g. any pre-2024 movie) ignores it on ingest, unseen, so it's
+    ``auto_filtered``, not a choice the user made.
     """
     if item.added:
         return "added"
-    if item.ignore:
+    if item.ignore and item.shown:
         return "rejected"
+    if item.ignore:
+        return "auto_filtered"
     return "pending"
 
 
 def empty_decision_counts() -> Dict[str, int]:
-    return {"added": 0, "rejected": 0, "pending": 0}
+    return {"added": 0, "rejected": 0, "auto_filtered": 0, "pending": 0}
 
 
 # Per-rating-source fields actually populated in attrs.
