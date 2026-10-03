@@ -39,7 +39,6 @@ Full-stack media manager app: **FastAPI + Strawberry GraphQL** backend (Python),
 - `tests/` — Python unit tests (run against a real pgvector Postgres, see below)
 - `e2e/` — Playwright end-to-end tests
 - `scripts/postgres-init/` — `create-test-db.sql`, mounted as Postgres `initdb.d` by the compose files to create the test DB
-- `backfill_synopsis_vectors.py` (repo root) — (re)embed `synopsis_vector` across the catalog; `--reindex-all`, `--check-vectors`, `--added-only`, etc.
 
 ## MCP Server (claude.ai connector)
 

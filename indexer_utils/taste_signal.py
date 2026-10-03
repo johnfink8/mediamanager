@@ -39,7 +39,7 @@ from .vector_search import NEIGHBOR_YEAR_WINDOW, synopsis_neighbor_summary
 logger = logging.getLogger(__name__)
 
 CACHE_TTL_SECONDS = 6 * 60 * 60
-CACHE_VERSION = "v2"  # v2: synopsis vectors moved to embeddinggemma (768-dim)
+CACHE_VERSION = "v3"  # v3: auto-filtered (never shown) rows left out of the cohort
 
 # Candidate attribute key → block label. Whichever the candidate has are used.
 # Movie `studio` is dropped: it's only populated on notable/added films, so its
@@ -63,7 +63,10 @@ WITH cohort AS (
          attributes->'originalLanguage' AS language,
          attributes->'genres'           AS genres
   FROM indexer_utils_ignoreitem
-  WHERE item_type = :it AND synopsis_vector IS NOT NULL AND ignore IS TRUE
+  WHERE item_type = :it AND synopsis_vector IS NOT NULL
+    -- decided by the user: kept, or passed on after being shown (a filter
+    -- rule ignores most candidates unseen); see vector_search.decided_by_user
+    AND (added IS TRUE OR (ignore IS TRUE AND shown IS TRUE))
     AND attributes->>'year' ~ '^[0-9]+$'
     AND abs((attributes->>'year')::int - :y) <= :w
 ),
