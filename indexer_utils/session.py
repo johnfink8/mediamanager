@@ -35,11 +35,21 @@ def get_db_url() -> str:
     )
 
 
+# pgvector's HNSW index returns only its ``ef_search`` (40) nearest rows
+# from the whole table, and WHERE filters run after that: a similarity
+# search over added TV items (a few percent of the vectors) came back
+# with 3 of 10 rows, and with none once any other filter was added.
+# Iterative scan keeps walking the index until the filtered query is
+# satisfied; strict order keeps results sorted by distance.
+_CONNECT_OPTIONS = "-c hnsw.iterative_scan=strict_order"
+
+
 def get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
         _engine = create_async_engine(
             get_db_url(),
+            connect_args={"options": _CONNECT_OPTIONS},
             pool_size=5,
             max_overflow=5,
             pool_pre_ping=True,

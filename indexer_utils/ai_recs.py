@@ -19,6 +19,7 @@ from indexer_utils.tmdb import (
 
 from .ai_tools import AgentRunResult, ToolContext, run_recommendation
 from .ai_tools.shared import REASON_CLIP
+from .ai_tools.synopsis import SynopsisResult, research_synopsis, tmdb_details
 from .library_profile import compute_candidate_match, compute_library_profile
 from .log import item_context
 from .models import IgnoreItem
@@ -42,21 +43,6 @@ def load_prompt(filename: str) -> str:
     with open(PROMPTS_DIR / filename, "r") as f:
         return f.read()
 
-
-SYNOPSIS_PROMPTS = {
-    "mv": """
-    You are a helpful assistant that writes a brief synopsis for a movie.
-    The synopsis should briefly describe the story type, mention main star(s) if known,
-    and indicate if the item is part of or a sequel to an existing property.
-    Return strict JSON with the single field: synopsis (1-3 sentences).
-    """,
-    "tv": """
-    You are a helpful assistant that writes a brief synopsis for a TV show.
-    The synopsis should briefly describe the story type, mention main star(s) if known,
-    mention the main genre, network, country of origin, and language.
-    Return strict JSON with the single field: synopsis (1-3 sentences).
-    """,
-}
 
 RECOMMENDATION_PROMPTS = {
     "mv": load_prompt("mv_recommendation.md"),
@@ -166,61 +152,6 @@ async def acall_openai_json(
     system_prompt: str, user_prompt: str
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     return await asyncio.to_thread(call_openai_json, system_prompt, user_prompt)
-
-
-def generate_synopsis_for_candidate(
-    title: str,
-    year: Optional[int],
-    genres: List[str],
-    language: List[str],
-    item_type: str,
-    cast: Optional[List[str]] = None,
-) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
-    system_prompt = SYNOPSIS_PROMPTS.get(item_type)
-    user_payload = {
-        "title": title,
-        "year": year,
-        "genres": genres,
-        "language": language,
-        "cast": cast,
-    }
-    user_prompt = json.dumps(user_payload)
-    result, failure = call_openai_json(system_prompt, user_prompt)
-    synopsis_failure = failure.copy() if failure else None
-    if synopsis_failure:
-        synopsis_failure.setdefault("stage", "synopsis")
-        synopsis_failure.setdefault("step", "synopsis")
-    if not result:
-        if synopsis_failure is None:
-            synopsis_failure = {
-                "code": "empty_response",
-                "message": "No synopsis result returned",
-                "stage": "synopsis",
-                "step": "synopsis",
-            }
-        return None, synopsis_failure
-    synopsis = result.get("synopsis")
-    if synopsis is None and synopsis_failure is None:
-        synopsis_failure = {
-            "code": "missing_synopsis",
-            "message": "Synopsis missing from AI response",
-            "stage": "synopsis",
-            "step": "synopsis",
-        }
-    return synopsis, synopsis_failure
-
-
-async def agenerate_synopsis_for_candidate(
-    title: str,
-    year: Optional[int],
-    genres: List[str],
-    language: List[str],
-    item_type: str,
-    cast: Optional[List[str]] = None,
-) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
-    return await asyncio.to_thread(
-        generate_synopsis_for_candidate, title, year, genres, language, item_type, cast
-    )
 
 
 def _add_attr(attrs: Dict[str, Any], show: Dict[str, Any], key: str) -> None:
@@ -382,18 +313,24 @@ async def _build_user_payload(
 
 def _ai_details_from_run(
     run: AgentRunResult,
-    candidate_synopsis: Optional[str],
-    synopsis_failure: Optional[Dict[str, Any]],
+    synopsis: SynopsisResult,
     base_ai: Dict[str, Any],
 ) -> Dict[str, Any]:
     details = dict(base_ai)
     details.setdefault("model", OPENAI_MODEL)
-    details["synopsis"] = candidate_synopsis
+    details["synopsis"] = synopsis.synopsis
+    details["synopsis_sources"] = synopsis.sources
+    details["synopsis_research"] = synopsis.run.audit()
+    synopsis_failure = synopsis.failure
     details["tool_log"] = run.tool_log
     details["turns"] = run.turns
     details["tool_calls"] = run.tool_calls
 
-    failure = synopsis_failure or run.failure
+    # A failed synopsis doesn't fail the assessment: the verdict is what the
+    # user consumes, and it stands without the synopsis. Record it on its
+    # own key so a completed verdict is never shown as "AI assessment failed".
+    details["synopsis_failure"] = synopsis_failure
+    failure = run.failure or synopsis_failure
     submission = run.submission
     if submission is not None and run.failure is None:
         details.update(
@@ -401,8 +338,8 @@ def _ai_details_from_run(
                 "value": bool(submission.get("recommend")),
                 "score": float(submission.get("score") or 0.0),
                 "reason": str(submission.get("reason") or "")[:REASON_CLIP],
-                "failure": failure,
-                "failed": failure is not None,
+                "failure": None,
+                "failed": False,
             }
         )
     else:
@@ -423,43 +360,15 @@ def _ai_details_from_run(
     return details
 
 
-async def annotate_with_ai_async(
-    item_type: str,
-    uid: str,
-    title: str,
-    attrs: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Async agentic recommendation flow.
+async def hydrate_candidate(
+    item_type: str, uid: str, attrs: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Fill TMDB id, cast, director and release count onto ``attrs`` (in place).
 
-    Steps: (1) hydrate cast/release_count, (2) generate synopsis + embed it
-    into the pgvector ``synopsis_vector`` column, (3) run the recommendation
-    Agent (openai-agents SDK), (4) write a single consolidated ``ai`` block
-    back to ``attrs``.
+    Returns TMDB's curated details for the title (see
+    ``tmdb.get_title_details``), or None when it can't be resolved, and
+    records its canonical title as ``tmdb_title`` when the row has none.
     """
-    with item_context(f"{item_type}:{uid}"):
-        return await _annotate_with_ai_async_inner(item_type, uid, title, attrs)
-
-
-async def _annotate_with_ai_async_inner(
-    item_type: str,
-    uid: str,
-    title: str,
-    attrs: Dict[str, Any],
-) -> Dict[str, Any]:
-    import time as _time
-
-    started_at = _time.monotonic()
-    logger.info(
-        "annotate START %s:%s '%s' genres=%s",
-        item_type,
-        uid,
-        title,
-        _to_list_of_str(attrs.get("genres")),
-    )
-    genres = _to_list_of_str(attrs.get("genres"))
-    lang = _to_list_of_str(attrs.get("originalLanguage"))
-    year = _year_from_attrs(attrs)
-
     if item_type == "mv":
         if not attrs.get("tmdb_id"):
             tmdb_id = await asyncio.to_thread(get_movie_id, uid)
@@ -495,9 +404,71 @@ async def _annotate_with_ai_async_inner(
             except Exception:
                 logger.exception("get_tv_cast failed for %s", uid)
 
-    candidate_synopsis, synopsis_failure = await agenerate_synopsis_for_candidate(
-        title, year, genres, lang, item_type, attrs.get("cast")
+    tmdb = await tmdb_details(item_type, attrs.get("tmdb_id"))
+    if tmdb and tmdb.get("title") and not attrs.get("tmdb_title"):
+        attrs["tmdb_title"] = tmdb["title"]
+    return tmdb
+
+
+def candidate_context(
+    item_type: str, uid: str, title: str, attrs: Dict[str, Any]
+) -> Dict[str, Any]:
+    """The candidate as the agents and their tools see it (``ToolContext``)."""
+    return {
+        "uid": uid,
+        "title": title,
+        "tmdb_title": attrs.get("tmdb_title"),
+        "year": _year_from_attrs(attrs),
+        "genres": _to_list_of_str(attrs.get("genres")),
+        "language": _to_list_of_str(attrs.get("originalLanguage")),
+        "network": attrs.get("network"),
+        "cast": attrs.get("cast"),
+        "director": attrs.get("director"),
+        "tmdb_id": attrs.get("tmdb_id"),
+    }
+
+
+async def annotate_with_ai_async(
+    item_type: str,
+    uid: str,
+    title: str,
+    attrs: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Async agentic recommendation flow.
+
+    Steps: (1) hydrate cast/release_count, (2) generate synopsis + embed it
+    into the pgvector ``synopsis_vector`` column, (3) run the recommendation
+    Agent (openai-agents SDK), (4) write a single consolidated ``ai`` block
+    back to ``attrs``.
+    """
+    with item_context(f"{item_type}:{uid}"):
+        return await _annotate_with_ai_async_inner(item_type, uid, title, attrs)
+
+
+async def _annotate_with_ai_async_inner(
+    item_type: str,
+    uid: str,
+    title: str,
+    attrs: Dict[str, Any],
+) -> Dict[str, Any]:
+    import time as _time
+
+    started_at = _time.monotonic()
+    logger.info(
+        "annotate START %s:%s '%s' genres=%s",
+        item_type,
+        uid,
+        title,
+        _to_list_of_str(attrs.get("genres")),
     )
+    tmdb = await hydrate_candidate(item_type, uid, attrs)
+    # Release filenames ("Some.Film.2026.1080p.WEB…") reach here on retries;
+    # every model downstream gets TMDB's own title when there is one.
+    title = attrs.get("tmdb_title") or title
+    candidate = candidate_context(item_type, uid, title, attrs)
+
+    synopsis = await research_synopsis(item_type, candidate, tmdb)
+    candidate_synopsis, synopsis_failure = synopsis.synopsis, synopsis.failure
     if synopsis_failure:
         logger.warning(
             "annotate %s:%s synopsis FAILED: %s",
@@ -527,9 +498,7 @@ async def _annotate_with_ai_async_inner(
             }
         )
         attrs_out = dict(attrs)
-        attrs_out["ai"] = _ai_details_from_run(
-            run, candidate_synopsis, synopsis_failure, base_ai
-        )
+        attrs_out["ai"] = _ai_details_from_run(run, synopsis, base_ai)
         return attrs_out
 
     system_prompt = RECOMMENDATION_PROMPTS.get(item_type, "")
@@ -538,18 +507,7 @@ async def _annotate_with_ai_async_inner(
     )
     user_prompt = json.dumps(user_payload, default=str)
 
-    ctx = ToolContext(
-        item_type=item_type,
-        candidate={
-            "uid": uid,
-            "title": title,
-            "year": year,
-            "genres": genres,
-            "cast": attrs.get("cast"),
-            "director": attrs.get("director"),
-            "tmdb_id": attrs.get("tmdb_id"),
-        },
-    )
+    ctx = ToolContext(item_type=item_type, candidate=candidate)
 
     run = await run_recommendation(
         item_type=item_type,
@@ -562,9 +520,7 @@ async def _annotate_with_ai_async_inner(
     )
 
     attrs_out = dict(attrs)
-    attrs_out["ai"] = _ai_details_from_run(
-        run, candidate_synopsis, synopsis_failure, base_ai
-    )
+    attrs_out["ai"] = _ai_details_from_run(run, synopsis, base_ai)
     elapsed = _time.monotonic() - started_at
     ai_out = attrs_out["ai"]
     if ai_out.get("failed"):

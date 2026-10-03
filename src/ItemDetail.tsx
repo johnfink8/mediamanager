@@ -38,6 +38,8 @@ interface AIInfo {
     recommended: boolean | null;
     failed: boolean;
     failure: Record<string, unknown> | null;
+    // Set when the synopsis step failed; the verdict can still be complete.
+    synopsisFailure: string | null;
 }
 
 function getAIInfo(item: itemType): AIInfo {
@@ -49,6 +51,7 @@ function getAIInfo(item: itemType): AIInfo {
             recommended: null,
             failed: false,
             failure: null,
+            synopsisFailure: null,
         };
     const rawScore = details["score"] ?? details["ai_score"];
     const score = typeof rawScore === "number" ? rawScore : null;
@@ -66,7 +69,21 @@ function getAIInfo(item: itemType): AIInfo {
             ? rawVal.toLowerCase() === "true"
             : null;
     const failure = (details["failure"] as Record<string, unknown>) ?? null;
-    return { score, reason, recommended, failed: !!failure, failure };
+    const rawSynopsisFailure = details["synopsis_failure"] as
+        | Record<string, unknown>
+        | null
+        | undefined;
+    const synopsisFailure = rawSynopsisFailure
+        ? String(rawSynopsisFailure["message"] ?? "synopsis generation failed")
+        : null;
+    return {
+        score,
+        reason,
+        recommended,
+        failed: !!failure,
+        failure,
+        synopsisFailure,
+    };
 }
 
 function aiVerdict(ai: AIInfo): string {
@@ -163,6 +180,17 @@ const AIBlock: React.FC<{
                     </div>
                 )}
                 {ai.reason && <div className="ai-reason">{ai.reason}</div>}
+                {ai.synopsisFailure && (
+                    <div
+                        style={{
+                            color: "var(--fg-mute)",
+                            fontSize: 12,
+                            marginTop: 4,
+                        }}
+                    >
+                        Synopsis unavailable: {ai.synopsisFailure}
+                    </div>
+                )}
                 <div
                     style={{
                         display: "flex",

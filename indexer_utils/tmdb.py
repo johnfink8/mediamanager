@@ -122,3 +122,56 @@ def get_person_combined_credits(person_id: int) -> Dict[str, Any]:
     )
     data: Dict[str, Any] = requests.get(url, headers=_auth_headers(), timeout=20).json()
     return data
+
+
+def get_title_details(item_type: str, tmdb_id: int) -> Dict[str, Any]:
+    """The facts TMDB holds about a movie or series, curated for a model.
+
+    Only what describes the work: its canonical title, the distributor's
+    plot overview and tagline, franchise (movie collection), dates,
+    genres, origin and, for series, networks, creators and season count.
+    Empty values are dropped.
+    """
+    kind = "movie" if item_type == "mv" else "tv"
+    url = f"https://api.themoviedb.org/3/{kind}/{tmdb_id}?language=en-US"
+    data = requests.get(url, headers=_auth_headers(), timeout=20).json()
+
+    def names(key: str) -> List[str]:
+        return [str(x.get("name")) for x in data.get(key) or [] if x.get("name")]
+
+    out: Dict[str, Any] = {
+        "title": data.get("title") or data.get("name"),
+        "original_title": data.get("original_title") or data.get("original_name"),
+        "overview": data.get("overview"),
+        "tagline": data.get("tagline"),
+        "genres": names("genres"),
+        "original_language": data.get("original_language"),
+        "countries": data.get("origin_country")
+        or [c.get("iso_3166_1") for c in data.get("production_countries") or []],
+        "status": data.get("status"),
+    }
+    if kind == "movie":
+        collection = data.get("belongs_to_collection") or {}
+        out.update(
+            {
+                "release_date": data.get("release_date"),
+                "runtime_min": data.get("runtime"),
+                "collection": collection.get("name"),
+                "studios": names("production_companies")[:3],
+            }
+        )
+    else:
+        out.update(
+            {
+                "first_air_date": data.get("first_air_date"),
+                "last_air_date": data.get("last_air_date"),
+                "seasons": data.get("number_of_seasons"),
+                "episodes": data.get("number_of_episodes"),
+                "networks": names("networks"),
+                "created_by": names("created_by"),
+                "type": data.get("type"),
+            }
+        )
+    if out["original_title"] == out["title"]:
+        out["original_title"] = None
+    return {k: v for k, v in out.items() if v not in (None, "", [])}

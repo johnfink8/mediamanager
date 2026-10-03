@@ -16,7 +16,7 @@ import logging
 import re
 import socket
 from html.parser import HTMLParser
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 from urllib.parse import urljoin, urlsplit
 
 from agents import RunContextWrapper
@@ -228,6 +228,27 @@ async def brave_search(
     return {"query": query, "results": results[:count]}
 
 
+async def _web_search(
+    wrapper: RunContextWrapper[Any],
+    query: str,
+    count: int = 10,
+    freshness: str = "",
+) -> Dict[str, Any]:
+    """Search the web — alias for brave_search.
+
+    Some models insist on the name ``web_search`` regardless of the tool
+    list; exposing both avoids a wasted turn on a "tool not found" error.
+    """
+    raw = getattr(brave_search, "__wrapped__")
+    return cast(
+        Dict[str, Any],
+        await raw(wrapper, query=query, count=count, freshness=freshness),
+    )
+
+
+web_search = safe_tool(_web_search, name_override="web_search")
+
+
 @safe_tool
 async def web_fetch(
     wrapper: RunContextWrapper[Any],
@@ -317,3 +338,7 @@ async def _fetch_rendered(url: str) -> Dict[str, Any]:
             finally:
                 await browser.close()
     return _page_payload(url, text, rendered=True)
+
+
+# The tools every research subagent gets.
+WEB_TOOLS = [brave_search, web_search, web_fetch]

@@ -10,22 +10,20 @@ reader.
 """
 
 import logging
+import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional
 from zoneinfo import ZoneInfo
 
-from agents import Agent, RunConfig, RunContextWrapper, Runner
-from agents.models.openai_provider import OpenAIProvider
-from decouple import config
-from openai import AsyncOpenAI
+from agents import Agent, RunContextWrapper
 
 from ..redis_client import get_redis_client, redis_get_json, redis_set_json
 from .base import ToolContext
+from .research import ResearchSpec, run_research
 from .safe_tool import safe_tool
-from .shared import enforce_result_budget, strip_preamble
-from .turn_budget import TurnBudget
-from .webtools import brave_search, web_fetch
+from .shared import enforce_result_budget
+from .webtools import WEB_TOOLS
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
@@ -44,7 +42,7 @@ SUBAGENT_MAX_TURNS = 12
 # Cache the dossier in Redis so repeated calls within a window don't pay the
 # LLM + web cost. Bump the version suffix on prompt/tool changes.
 CACHE_TTL_SECONDS = 6 * 60 * 60
-CACHE_KEY_VERSION = "v3"
+CACHE_KEY_VERSION = "v4"
 
 # US release day rolls over latest on the West Coast — Pacific keeps the
 # cache key and the queried windows stable for a UTC host during late-Sunday-US
@@ -56,25 +54,35 @@ _MOVIES_SYSTEM_PROMPT = (_PROMPTS_DIR / "search_recent_releases.md").read_text()
 _TV_SYSTEM_PROMPT = (_PROMPTS_DIR / "search_recent_tv.md").read_text()
 _BUZZ_SYSTEM_PROMPT = (_PROMPTS_DIR / "search_title_buzz.md").read_text()
 
-_WEB_TOOLS = [brave_search, web_fetch]
-
-_MOVIES_AGENT = Agent(
+RECENT_RELEASES = ResearchSpec(
     name="search_recent_releases",
-    model=MODEL,
-    instructions=_MOVIES_SYSTEM_PROMPT,
-    tools=_WEB_TOOLS,
+    agent=Agent(
+        name="search_recent_releases",
+        model=MODEL,
+        instructions=_MOVIES_SYSTEM_PROMPT,
+        tools=WEB_TOOLS,
+    ),
+    max_turns=SUBAGENT_MAX_TURNS,
 )
-_TV_AGENT = Agent(
+RECENT_TV = ResearchSpec(
     name="search_recent_tv",
-    model=MODEL,
-    instructions=_TV_SYSTEM_PROMPT,
-    tools=_WEB_TOOLS,
+    agent=Agent(
+        name="search_recent_tv",
+        model=MODEL,
+        instructions=_TV_SYSTEM_PROMPT,
+        tools=WEB_TOOLS,
+    ),
+    max_turns=SUBAGENT_MAX_TURNS,
 )
-_BUZZ_AGENT = Agent(
+TITLE_BUZZ = ResearchSpec(
     name="search_title_buzz",
-    model=MODEL,
-    instructions=_BUZZ_SYSTEM_PROMPT,
-    tools=_WEB_TOOLS,
+    agent=Agent(
+        name="search_title_buzz",
+        model=MODEL,
+        instructions=_BUZZ_SYSTEM_PROMPT,
+        tools=WEB_TOOLS,
+    ),
+    max_turns=SUBAGENT_MAX_TURNS,
 )
 
 
@@ -177,9 +185,19 @@ def _build_buzz_prompt(
     title: str,
     year: Optional[int],
     item_type: str,
+    known: Optional[Dict[str, Any]] = None,
 ) -> str:
     type_word = {"mv": "movie", "tv": "TV series"}.get(item_type, "title")
     year_part = f" ({year})" if year else ""
+    identity = []
+    if known:
+        identity = [
+            "",
+            "Known facts about this title (from TMDB and the user's catalog) "
+            "— use them to be sure every page you cite is about this exact "
+            "work, not a namesake or remake:",
+            *(f"- {k}: {v}" for k, v in known.items()),
+        ]
     return "\n".join(
         [
             f"Today is {today.isoformat()}.",
@@ -190,6 +208,7 @@ def _build_buzz_prompt(
                 f"whether it's a good film — surface the signals that "
                 f"question needs."
             ),
+            *identity,
             "",
             "Cover:",
             "- Quantitative scores from primary sources where you can "
@@ -226,6 +245,42 @@ def _build_buzz_prompt(
     )
 
 
+def _normalized(title: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(title or "").lower())
+
+
+def candidate_facts(
+    item_type: str, candidate: Dict[str, Any], title: str
+) -> Optional[Dict[str, Any]]:
+    """Identifying facts for ``title`` when it is the candidate itself.
+
+    The recommendation agent usually asks for buzz on the candidate; its
+    IDs, director and lead cast are known, so the subagent can pin the
+    exact work instead of guessing among namesakes. Other titles get none.
+    """
+    names = {_normalized(candidate.get(k)) for k in ("title", "tmdb_title")} - {""}
+    if _normalized(title) not in names:
+        return None
+    facts: Dict[str, Any] = {}
+    uid = str(candidate.get("uid") or "")
+    if item_type == "mv" and uid.startswith("tt"):
+        facts["IMDb id"] = f"{uid} (https://www.imdb.com/title/{uid}/)"
+    elif item_type == "tv" and uid:
+        facts["TVDB id"] = uid
+    if candidate.get("tmdb_id"):
+        kind = "movie" if item_type == "mv" else "tv"
+        facts["TMDB id"] = (
+            f"{candidate['tmdb_id']} "
+            f"(https://www.themoviedb.org/{kind}/{candidate['tmdb_id']})"
+        )
+    if candidate.get("director"):
+        facts["director"] = candidate["director"]
+    cast = [str(c) for c in (candidate.get("cast") or [])[:4]]
+    if cast:
+        facts["lead cast"] = ", ".join(cast)
+    return facts or None
+
+
 def _cache_key(
     *,
     prefix: str,
@@ -248,17 +303,20 @@ def _buzz_cache_key(
     title: str,
     year: Optional[int],
     item_type: str,
+    uid: Optional[str] = None,
 ) -> str:
+    """``uid`` is the candidate's when its identity is in the prompt, so a
+    namesake looked up by title alone never shares that report."""
     return (
         f"mediamanager:search_title_buzz:{CACHE_KEY_VERSION}:"
         f"{today.isoformat()}:{item_type}:{title.strip().lower()}:"
-        f"{year or ''}"
+        f"{year or ''}:{uid or ''}"
     )
 
 
 async def _fetch_dossier(
     *,
-    agent: Agent[Any],
+    spec: ResearchSpec,
     cache_key: str,
     user_prompt: str,
     today: date,
@@ -270,35 +328,10 @@ async def _fetch_dossier(
         logger.info("%s cache hit key=%s", log_tag, cache_key)
         return cached
 
-    # Per-call client so the httpx transport is bound to this event loop
-    # and closed before the task exits — see indexer_utils/ai_tools/agent.py
-    # for the same pattern in the parent loop.
-    openai_client = AsyncOpenAI(
-        api_key=config("OPENAI_API_KEY"),
-        base_url=config("OPENAI_BASE_URL", default=None),
-    )
-    provider = OpenAIProvider(openai_client=openai_client)
-    run_config = RunConfig(tracing_disabled=True, model_provider=provider)
-    try:
-        try:
-            result = await Runner.run(
-                TurnBudget(SUBAGENT_MAX_TURNS).prepare(agent, provider),
-                user_prompt,
-                max_turns=SUBAGENT_MAX_TURNS,
-                run_config=run_config,
-            )
-        finally:
-            # OpenAIProvider.aclose intentionally leaves the AsyncOpenAI
-            # client open (in case it's shared), so we close it ourselves.
-            await provider.aclose()
-            await openai_client.close()
-    except Exception as exc:
-        logger.exception("%s subagent failed", log_tag)
-        return {"error": f"{exc.__class__.__name__}: {exc}"}
-
-    dossier = strip_preamble(str(result.final_output or "").strip())
-    if not dossier:
-        return {"error": "subagent returned empty dossier"}
+    run = await run_research(spec, user_prompt, log_tag=log_tag)
+    if run.error:
+        return {"error": run.error}
+    dossier = str(run.output)
 
     payload = {"as_of": today.isoformat(), "report": dossier[:REPORT_CHAR_CAP]}
     redis_set_json(redis, cache_key, payload, CACHE_TTL_SECONDS)
@@ -357,7 +390,7 @@ async def search_recent_releases(
         focus=focus_clean,
     )
     payload = await _fetch_dossier(
-        agent=_MOVIES_AGENT,
+        spec=RECENT_RELEASES,
         cache_key=cache_key,
         user_prompt=user_prompt,
         today=today,
@@ -420,7 +453,7 @@ async def search_recent_tv(
         focus=focus_clean,
     )
     payload = await _fetch_dossier(
-        agent=_TV_AGENT,
+        spec=RECENT_TV,
         cache_key=cache_key,
         user_prompt=user_prompt,
         today=today,
@@ -470,14 +503,23 @@ async def search_title_buzz(
     resolved_type = item_type if item_type in ("mv", "tv") else ctx.item_type
 
     today = datetime.now(_TODAY_TZ).date()
+    known = candidate_facts(resolved_type, ctx.candidate, title)
     user_prompt = _build_buzz_prompt(
-        today=today, title=title, year=year_int, item_type=resolved_type
+        today=today,
+        title=title,
+        year=year_int,
+        item_type=resolved_type,
+        known=known,
     )
     cache_key = _buzz_cache_key(
-        today=today, title=title, year=year_int, item_type=resolved_type
+        today=today,
+        title=title,
+        year=year_int,
+        item_type=resolved_type,
+        uid=ctx.candidate.get("uid") if known else None,
     )
     payload = await _fetch_dossier(
-        agent=_BUZZ_AGENT,
+        spec=TITLE_BUZZ,
         cache_key=cache_key,
         user_prompt=user_prompt,
         today=today,

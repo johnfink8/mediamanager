@@ -4,7 +4,7 @@
 Walks items that don't yet have a vector (or all items with ``--reindex-all``),
 embeds each item's ``attributes["synopsis"]``, and writes the result into
 pgvector via ``vector_search.upsert_item_vector``. Items missing a synopsis get
-one generated via the configured model first — unless ``--require-synopsis``
+one researched by the synopsis agent first (see ``ai_tools/synopsis.py``) — unless ``--require-synopsis``
 is set, in which case they're skipped (embed-only, no generation).
 """
 
@@ -13,13 +13,13 @@ import asyncio
 import json
 import logging
 from datetime import datetime
-from typing import List, Optional
 
 from decouple import config
 from sqlalchemy import select, text
 from sqlalchemy.orm.attributes import flag_modified
 
-from indexer_utils.ai_recs import agenerate_synopsis_for_candidate
+from indexer_utils.ai_recs import candidate_context
+from indexer_utils.ai_tools.synopsis import research_synopsis, tmdb_details
 from indexer_utils.filters import should_ignore_by_rules
 from indexer_utils.models import IgnoreItem
 from indexer_utils.session import db_session
@@ -28,28 +28,6 @@ from indexer_utils.vector_search import upsert_item_vector
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 logger.addHandler(logging.StreamHandler())
-
-
-def _to_list_of_str(value) -> List[str]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return [str(v) for v in value]
-    if isinstance(value, dict):
-        return [str(v) for v in value.values()]
-    return [str(value)]
-
-
-def _year_from_attrs(attrs) -> Optional[int]:
-    try:
-        y = attrs.get("year")
-        if isinstance(y, list) and y:
-            return int(str(y[0]))
-        if isinstance(y, (str, int)):
-            return int(str(y))
-    except Exception:
-        return None
-    return None
 
 
 async def backfill(
@@ -132,10 +110,8 @@ async def backfill(
                 logger.error(f"Error evaluating rules for item {item.uid}: {e}")
                 continue
 
-            title = item.checked_title or item.title
-            year = _year_from_attrs(attrs)
-            genres = _to_list_of_str((attrs).get("genres"))
-            language = _to_list_of_str((attrs).get("originalLanguage"))
+            # Embed TMDB's title, as production does, never a release name.
+            title = attrs.get("tmdb_title") or item.checked_title or item.title
 
             synopsis = attrs.get("synopsis") or attrs.get("ai", {}).get("synopsis")
 
@@ -143,9 +119,12 @@ async def backfill(
             # that already exist (the cheap path that skips synopsis generation entirely).
             if not require_synopsis and (force or synopsis is None):
                 logger.info(f"Generating synopsis for {item.uid}")
-                synopsis, _synopsis_failure = await agenerate_synopsis_for_candidate(
-                    title, year, genres, language, item.item_type
-                )
+                tmdb = await tmdb_details(item.item_type, attrs.get("tmdb_id"))
+                title = (tmdb or {}).get("title") or title
+                candidate = candidate_context(item.item_type, item.uid, title, attrs)
+                synopsis = (
+                    await research_synopsis(item.item_type, candidate, tmdb)
+                ).synopsis
                 if synopsis:
                     attrs["synopsis"] = synopsis
 
