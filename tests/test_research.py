@@ -5,7 +5,7 @@ builders are pure, and TMDB is stubbed.
 """
 
 import json
-from typing import Any
+from typing import Any, Dict
 
 from agents import Agent, function_tool
 
@@ -97,7 +97,8 @@ class TestResearchSynopsis:
             return run
 
         monkeypatch.setattr(syn, "run_research", fake_run)
-        return await syn.research_synopsis("mv", {"uid": "tt1"}, None)
+        tmdb = {"overview": "A crew plans a heist."}
+        return await syn.research_synopsis("mv", {"uid": "tt1"}, tmdb)
 
     async def test_success(self, monkeypatch: Any) -> None:
         reply = "A  heist\nfilm.\n\nSources:\n- TMDB overview\n- https://x.org/never"
@@ -194,22 +195,76 @@ def test_title_details_are_curated(monkeypatch: Any) -> None:
     }
 
 
+def _fetch(url: str, preview: str) -> Dict[str, Any]:
+    return {
+        "name": "web_fetch",
+        "arguments": json.dumps({"url": url}),
+        "output_preview": preview,
+    }
+
+
+WIKI = "https://en.wikipedia.org/wiki/X"
+IMDB = "https://www.imdb.com/title/tt313973/"
+LOG = [
+    {"name": "brave_search", "arguments": '{"query": "x"}'},
+    _fetch(WIKI, "{'url': 'https://en.wikipedia.org/wiki/X', 'chars': 5120, '…"),
+    {"name": "web_fetch", "arguments": "not json", "output_preview": ""},
+]
+
+
 def test_only_fetched_pages_count_as_sources() -> None:
-    log = [
-        {"name": "brave_search", "arguments": '{"query": "x"}'},
-        {
-            "name": "web_fetch",
-            "arguments": '{"url": "https://en.wikipedia.org/wiki/X"}',
-        },
-        {"name": "web_fetch", "arguments": "not json"},
-    ]
     kept, dropped = syn.verify_sources(
-        [
-            "TMDB overview",
-            "https://en.wikipedia.org/wiki/X/",
-            "https://www.imdb.com/title/tt313973/",
-        ],
-        log,
+        ["TMDB overview", WIKI + "/", IMDB], LOG, had_overview=True
     )
-    assert kept == ["TMDB overview", "https://en.wikipedia.org/wiki/X/"]
-    assert dropped == ["https://www.imdb.com/title/tt313973/"]
+    assert kept == ["TMDB overview", WIKI + "/"]
+    assert dropped == [IMDB]
+
+
+def test_a_failed_or_empty_fetch_is_not_a_source() -> None:
+    log = [
+        _fetch(IMDB, "{'error': 'HTTP 403 for https://www.imdb.com/title/tt313973/'}"),
+        _fetch(WIKI, "{'url': 'https://en.wikipedia.org/wiki/X', 'chars': 0, '…"),
+    ]
+    assert syn.verify_sources([IMDB, WIKI], log, had_overview=True) == (
+        [],
+        [IMDB, WIKI],
+    )
+
+
+def test_tmdb_overview_needs_an_overview() -> None:
+    kept, dropped = syn.verify_sources(["TMDB overview"], LOG, had_overview=False)
+    assert (kept, dropped) == ([], ["TMDB overview"])
+
+
+async def test_a_missing_api_key_is_returned_not_raised(monkeypatch: Any) -> None:
+    from decouple import UndefinedValueError
+
+    from indexer_utils.ai_tools import research
+
+    def config(key: str, **kw: Any) -> Any:
+        if key == "OPENAI_API_KEY":
+            raise UndefinedValueError("OPENAI_API_KEY not found")
+        return kw.get("default")
+
+    monkeypatch.setattr(research, "config", config)
+    run = await run_research(_spec(ArgsModel()), "go")
+    assert run.output is None
+    assert run.error is not None and "OPENAI_API_KEY" in run.error
+
+
+def test_buzz_cache_is_per_candidate_when_its_facts_are_used() -> None:
+    from datetime import date
+
+    from indexer_utils.ai_tools.discoveries import _buzz_cache_key
+
+    def key(uid: Any) -> str:
+        return _buzz_cache_key(
+            today=date(2026, 10, 3),
+            title="The Guilty",
+            year=None,
+            item_type="mv",
+            uid=uid,
+        )
+
+    assert key("tt0039439") != key("tt9054192")
+    assert key(None) != key("tt0039439")

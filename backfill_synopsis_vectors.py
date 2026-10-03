@@ -110,7 +110,8 @@ async def backfill(
                 logger.error(f"Error evaluating rules for item {item.uid}: {e}")
                 continue
 
-            title = item.checked_title or item.title
+            # Embed TMDB's title, as production does, never a release name.
+            title = attrs.get("tmdb_title") or item.checked_title or item.title
 
             synopsis = attrs.get("synopsis") or attrs.get("ai", {}).get("synopsis")
 
@@ -118,8 +119,9 @@ async def backfill(
             # that already exist (the cheap path that skips synopsis generation entirely).
             if not require_synopsis and (force or synopsis is None):
                 logger.info(f"Generating synopsis for {item.uid}")
-                candidate = candidate_context(item.item_type, item.uid, title, attrs)
                 tmdb = await tmdb_details(item.item_type, attrs.get("tmdb_id"))
+                title = (tmdb or {}).get("title") or title
+                candidate = candidate_context(item.item_type, item.uid, title, attrs)
                 synopsis = (
                     await research_synopsis(item.item_type, candidate, tmdb)
                 ).synopsis

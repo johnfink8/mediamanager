@@ -89,10 +89,13 @@ async def run_research(
 
     # Per-run client so the httpx transport is bound to this event loop and
     # closed before the task exits — see agent.py for the same pattern.
-    openai_client = AsyncOpenAI(
-        api_key=config("OPENAI_API_KEY"),
-        base_url=config("OPENAI_BASE_URL", default=None),
-    )
+    try:
+        openai_client = AsyncOpenAI(
+            api_key=config("OPENAI_API_KEY"),
+            base_url=config("OPENAI_BASE_URL", default=None),
+        )
+    except Exception as exc:
+        return done(error=f"client not configured: {exc}")
     provider = OpenAIProvider(openai_client=openai_client)
     run_config = RunConfig(tracing_disabled=True, model_provider=provider)
     try:

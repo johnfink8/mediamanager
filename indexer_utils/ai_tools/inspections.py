@@ -77,7 +77,14 @@ async def get_item_details(
         attrs = row.attributes or {}
         ai = attrs.get("ai") or {}
         added_flag = bool(row.added)
-        plex_titles = [attrs.get("tmdb_title"), release_title(row.title or "")]
+        try:
+            release_year: Optional[int] = int(attrs["year"])
+        except (KeyError, TypeError, ValueError):
+            release_year = None
+        plex_titles = [
+            attrs.get("tmdb_title"),
+            release_title(row.title or "", release_year),
+        ]
         details: Dict[str, Any] = {
             "uid": row.uid,
             "title": row.title,

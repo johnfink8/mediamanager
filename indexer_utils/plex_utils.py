@@ -95,17 +95,20 @@ _PLEX_DETAIL_FIELDS = (
 _YEAR_TOKEN = re.compile(r"(?<=\s)(?:19|20)\d\d\b")
 
 
-def release_title(name: str) -> str:
+def release_title(name: str, year: Optional[int] = None) -> str:
     """The film's title from a release name, for searching Plex.
 
-    ``The.Uprising.2026.1080p.AMZN.WEB-DL`` -> ``The Uprising``. A name
+    ``The.Uprising.2026.1080p.AMZN.WEB-DL`` -> ``The Uprising``. The cut
+    is at the release ``year`` when given, else the last year-like token,
+    so a year in the title survives (``Blade.Runner.2049.2017``). A name
     that already has spaces is taken to be a real title and kept as is.
     """
     if " " in name.strip():
         return name.strip()
     spaced = name.replace(".", " ").replace("_", " ")
-    match = _YEAR_TOKEN.search(spaced)
-    return (spaced[: match.start()] if match else spaced).strip()
+    tokens = list(_YEAR_TOKEN.finditer(spaced))
+    cut = [m for m in tokens if year and m.group() == str(year)] or tokens
+    return (spaced[: cut[-1].start()] if cut else spaced).strip()
 
 
 def get_plex_details(

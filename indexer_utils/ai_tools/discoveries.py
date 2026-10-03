@@ -42,7 +42,7 @@ SUBAGENT_MAX_TURNS = 12
 # Cache the dossier in Redis so repeated calls within a window don't pay the
 # LLM + web cost. Bump the version suffix on prompt/tool changes.
 CACHE_TTL_SECONDS = 6 * 60 * 60
-CACHE_KEY_VERSION = "v3"
+CACHE_KEY_VERSION = "v4"
 
 # US release day rolls over latest on the West Coast — Pacific keeps the
 # cache key and the queried windows stable for a UTC host during late-Sunday-US
@@ -303,11 +303,14 @@ def _buzz_cache_key(
     title: str,
     year: Optional[int],
     item_type: str,
+    uid: Optional[str] = None,
 ) -> str:
+    """``uid`` is the candidate's when its identity is in the prompt, so a
+    namesake looked up by title alone never shares that report."""
     return (
         f"mediamanager:search_title_buzz:{CACHE_KEY_VERSION}:"
         f"{today.isoformat()}:{item_type}:{title.strip().lower()}:"
-        f"{year or ''}"
+        f"{year or ''}:{uid or ''}"
     )
 
 
@@ -500,15 +503,20 @@ async def search_title_buzz(
     resolved_type = item_type if item_type in ("mv", "tv") else ctx.item_type
 
     today = datetime.now(_TODAY_TZ).date()
+    known = candidate_facts(resolved_type, ctx.candidate, title)
     user_prompt = _build_buzz_prompt(
         today=today,
         title=title,
         year=year_int,
         item_type=resolved_type,
-        known=candidate_facts(resolved_type, ctx.candidate, title),
+        known=known,
     )
     cache_key = _buzz_cache_key(
-        today=today, title=title, year=year_int, item_type=resolved_type
+        today=today,
+        title=title,
+        year=year_int,
+        item_type=resolved_type,
+        uid=ctx.candidate.get("uid") if known else None,
     )
     payload = await _fetch_dossier(
         spec=TITLE_BUZZ,

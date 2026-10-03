@@ -32,16 +32,19 @@ def _hit(imdb_id: str) -> Dict[str, Any]:
 
 
 @pytest.mark.parametrize(
-    "name, title",
+    "name, year, title",
     [
-        (RELEASE, "The Death Of Robin hood"),
-        ("2001.A.Space.Odyssey.1968.1080p.BluRay", "2001 A Space Odyssey"),
-        ("Heat", "Heat"),
-        ("Mission: Impossible 2", "Mission: Impossible 2"),
+        (RELEASE, 2026, "The Death Of Robin hood"),
+        ("2001.A.Space.Odyssey.1968.1080p.BluRay", 1968, "2001 A Space Odyssey"),
+        ("Blade.Runner.2049.2017.1080p.BluRay", 2017, "Blade Runner 2049"),
+        ("Blade.Runner.2049.2017.1080p.BluRay", None, "Blade Runner 2049"),
+        ("Class.of.1984.1982.720p.BluRay", 1982, "Class of 1984"),
+        ("Heat", 1995, "Heat"),
+        ("Mission: Impossible 2", None, "Mission: Impossible 2"),
     ],
 )
-def test_release_title(name: str, title: str) -> None:
-    assert plex_utils.release_title(name) == title
+def test_release_title(name: str, year: Any, title: str) -> None:
+    assert plex_utils.release_title(name, year) == title
 
 
 def test_matches_on_imdb_id_not_title(monkeypatch: Any) -> None:

@@ -197,7 +197,10 @@ def report(prep: Prepared, run: ResearchRun, record_path: Path) -> None:
         print("\n" + _output_text(run))
     if prep.spec is SYNOPSIS and run.output:
         synopsis, cited = parse_reply(str(run.output))
-        kept, dropped = verify_sources(cited, run.tool_log)
+        tmdb = (prep.candidate or {}).get("_tmdb") or {}
+        kept, dropped = verify_sources(
+            cited, run.tool_log, had_overview=bool(tmdb.get("overview"))
+        )
         print(f"\nPARSED ({len(synopsis)} chars): {synopsis}\nSOURCES: {kept}")
         if dropped:
             print(f"UNFETCHED SOURCES (dropped in production): {dropped}")

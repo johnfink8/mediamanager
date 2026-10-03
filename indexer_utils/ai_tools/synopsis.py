@@ -127,11 +127,19 @@ def synopsis_input(
 TMDB_SOURCE = "TMDB overview"
 
 
+# ``web_fetch`` returns ``{'url': …, 'chars': N, …}`` for a page and
+# ``{'error': …}`` for a blocked URL, HTTP error or timeout.
+_FETCHED_CHARS = re.compile(r"""^\{['"]url['"].*?['"]chars['"]: (\d+)""")
+
+
 def fetched_urls(tool_log: List[Dict[str, Any]]) -> List[str]:
-    """Every URL the run passed to ``web_fetch``, in order."""
+    """Every URL the run fetched with ``web_fetch`` and got content back from."""
     urls = []
     for call in tool_log:
         if call.get("name") != "web_fetch":
+            continue
+        got = _FETCHED_CHARS.match(str(call.get("output_preview") or ""))
+        if not got or not int(got.group(1)):
             continue
         try:
             url = json.loads(call.get("arguments") or "{}").get("url")
@@ -143,19 +151,21 @@ def fetched_urls(tool_log: List[Dict[str, Any]]) -> List[str]:
 
 
 def verify_sources(
-    sources: List[str], tool_log: List[Dict[str, Any]]
+    sources: List[str], tool_log: List[Dict[str, Any]], *, had_overview: bool
 ) -> tuple[List[str], List[str]]:
     """Split cited ``sources`` into (kept, dropped).
 
     The model cites pages it never opened, and even constructs URLs from
     the IDs it was given, so a source is kept only if it is the TMDB
-    overview it was handed or a URL it actually fetched in this run.
+    overview it was handed (``had_overview``) or a URL it actually fetched
+    in this run.
     """
     fetched = {u.rstrip("/") for u in fetched_urls(tool_log)}
     kept, dropped = [], []
     for src in sources:
         s = str(src).strip()
-        if s.lower() == TMDB_SOURCE.lower() or s.rstrip("/") in fetched:
+        is_overview = had_overview and s.lower() == TMDB_SOURCE.lower()
+        if is_overview or s.rstrip("/") in fetched:
             kept.append(s)
         else:
             dropped.append(s)
@@ -198,7 +208,9 @@ async def research_synopsis(
             },
             run=run,
         )
-    sources, dropped = verify_sources(cited, run.tool_log)
+    sources, dropped = verify_sources(
+        cited, run.tool_log, had_overview=bool((tmdb or {}).get("overview"))
+    )
     if dropped:
         logger.warning(
             "synopsis[%s:%s] cited pages it never fetched: %s",
