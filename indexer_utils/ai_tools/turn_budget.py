@@ -8,9 +8,10 @@ every model call (one per turn) passes through it:
 - A short note is appended to the end of the call's input. The end, so the
   cached prompt prefix is untouched; it is added to the outgoing request
   only, never to the run's history, so each call carries exactly one note,
-  the current one. It is a ``developer`` message because Qwen's chat
-  template (applied inside vLLM) rejects any ``system`` message that isn't
-  first.
+  the current one. It is a ``user`` message: Qwen's chat template
+  (applied inside vLLM) rejects any ``system`` message that isn't first,
+  and open models follow ``developer`` messages poorly or not at all —
+  that role is OpenAI's.
 - On the final turn the call goes out with no tools, and with the
   conversation rewritten as a plain write-up request (``_as_write_up``),
   so the model's only move is to answer. The final turn comes early when the context fills up:
@@ -55,6 +56,9 @@ FINAL_MAX_TOKENS = 8_000
 
 
 FINAL_RETRIES = 2
+# Role of the notes injected into a call's input (see the module docstring).
+_NOTE_ROLE = "user"
+
 _NO_TOOLS_RETRY = (
     "Tools are unavailable on this turn: the tool calls in your last reply "
     "were discarded and nothing ran. Reply with the complete final answer "
@@ -180,7 +184,7 @@ class _BudgetedModel(Model):  # type: ignore[misc]
                 self._budget.max_turns,
                 len(_tool_calls(response)),
             )
-            input = [*input, {"role": "developer", "content": _NO_TOOLS_RETRY}]
+            input = [*input, {"role": _NOTE_ROLE, "content": _NO_TOOLS_RETRY}]
         response.output = [
             o for o in response.output if getattr(o, "type", None) != "function_call"
         ]
@@ -295,7 +299,7 @@ class TurnBudget:
         )
         chars = len(json.dumps(items, default=str)) + len(system_instructions or "")
         context_tokens = int(chars / _CHARS_PER_TOKEN)
-        note = {"role": "developer", "content": self.note(self.calls, context_tokens)}
+        note = {"role": _NOTE_ROLE, "content": self.note(self.calls, context_tokens)}
         final = self.calls >= self.max_turns or context_tokens >= self.finalize_at
         if final:
             return [*_as_write_up(items), note], []

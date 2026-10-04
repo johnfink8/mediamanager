@@ -110,11 +110,15 @@ class StubbornModel(GreedyModel):
         return response
 
 
-def _developer_notes(items: List[Any]) -> List[str]:
+def _notes(items: List[Any]) -> List[str]:
+    """The budget's notes: user messages other than the task and the research."""
     return [
         i["content"]
         for i in items
-        if isinstance(i, dict) and i.get("role") == "developer"
+        if isinstance(i, dict)
+        and i.get("role") == "user"
+        and i["content"] != "go"
+        and not str(i["content"]).startswith("Research gathered")
     ]
 
 
@@ -133,9 +137,9 @@ async def test_tools_removed_on_final_turn_and_one_note_per_call() -> None:
     assert [c["tools"] for c in model.calls] == [["ping"], ["ping"], ["ping"], []]
     for turn, call in enumerate(model.calls, start=1):
         # exactly one note (earlier ones aren't persisted), and it is last
-        notes = _developer_notes(call["input"])
+        notes = _notes(call["input"])
         assert len(notes) == 1 and f"{turn} of 4" in notes[0]
-        assert call["input"][-1]["role"] == "developer"
+        assert call["input"][-1]["role"] == "user"
     # only the final call answers without thinking, under an output cap
     for call in model.calls[:-1]:
         assert call["settings"].max_tokens is None
@@ -159,7 +163,7 @@ async def test_full_context_ends_the_run_early() -> None:
 
     assert result.final_output == "final answer"
     assert [c["tools"] for c in model.calls] == [["ping"], []]
-    assert "context is nearly full" in _developer_notes(model.calls[1]["input"])[0]
+    assert "context is nearly full" in _notes(model.calls[1]["input"])[0]
 
 
 @pytest.mark.parametrize("stubborn", [1, 5])
@@ -179,7 +183,7 @@ async def test_stray_tool_calls_on_final_turn_never_overrun(stubborn: int) -> No
     assert len(finals) == min(stubborn, FINAL_RETRIES) + 1
     # each retry carries the discarded-calls note
     for call in finals[1:]:
-        assert any("were discarded" in n for n in _developer_notes(call["input"]))
+        assert any("were discarded" in n for n in _notes(call["input"]))
 
 
 async def test_final_call_gets_research_as_prose() -> None:
@@ -199,7 +203,7 @@ async def test_final_call_gets_research_as_prose() -> None:
     research = final[-2]["content"]
     assert research.startswith("Research gathered so far")
     assert research.count("### ping({})\npong") == 2
-    assert final[-1]["role"] == "developer"
+    assert final[-1]["role"] == "user"
 
 
 def test_source_agent_is_not_mutated() -> None:
