@@ -155,8 +155,6 @@ async def search_similar_by_synopsis(
     )
 
     stmt = await synopsis_select(query, ctx.item_type)
-    if stmt is None:
-        return {"results": []}
     stmt = stmt.where(IgnoreItem.added.is_(True))
     if candidate_uid:
         stmt = stmt.where(IgnoreItem.uid != candidate_uid)

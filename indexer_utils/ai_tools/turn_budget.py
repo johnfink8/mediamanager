@@ -49,9 +49,13 @@ _CHARS_PER_TOKEN = 3.5
 # The final call answers without thinking. Left to reason over a full
 # context with no tools, Qwen deliberates until it runs out of window and
 # never writes the answer. ``enable_thinking`` is Qwen's chat-template
-# switch, passed through by vLLM; the output cap bounds the answer itself
-# (a dossier is ~12k chars, ~3.5k tokens).
-_NO_THINKING = {"chat_template_kwargs": {"enable_thinking": False}}
+# switch, passed through by vLLM; Strata ignores it and takes the Responses
+# API's own ``reasoning.effort`` instead (vLLM accepts both). The output cap
+# bounds the answer itself (a dossier is ~12k chars, ~3.5k tokens).
+_NO_THINKING = {
+    "chat_template_kwargs": {"enable_thinking": False},
+    "reasoning": {"effort": "none"},
+}
 FINAL_MAX_TOKENS = 8_000
 
 

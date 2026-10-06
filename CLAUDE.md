@@ -79,7 +79,7 @@ The agent itself lives in `indexer_utils/ai_tools/` and is built on the **openai
 - `hooks.py` — `AuditHooks` records per-call timing/outcome/arguments and enforces a cumulative tool-call budget (the SDK only caps turns).
 - `base.py` — `ToolContext` (item_type + candidate) passed to every tool via `RunContextWrapper`.
 
-Relevant env (via `python-decouple`/`.env`): `OPENAI_BASE_URL` (local OpenAI-compatible gateway), `OPENAI_API_KEY` (fake — the gateway is unauthenticated), `OPENAI_MODEL` (default `qwen3.8`), `OPENAI_EMBEDDING_MODEL` (default `embeddinggemma-cpu:latest`, 768-dim L2-normalized), `AI_AGENT_MAX_TURNS` (6), `AI_AGENT_MAX_TOOL_CALLS` (16), `BRAVE_API_KEY` (Brave Search API for the discovery subagents). The gateway serves both `/v1/chat/completions` and `/v1/embeddings` from one base URL.
+Relevant env (via `python-decouple`/`.env`): `OPENAI_BASE_URL` (local OpenAI-compatible chat server), `OPENAI_API_KEY` (fake — the servers are unauthenticated), `OPENAI_MODEL` (default `qwen3.8`; every agent, including the research subagents, runs on it), `OPENAI_EMBEDDING_MODEL` (default `embeddinggemma-cpu:latest`, 768-dim L2-normalized), `OPENAI_EMBEDDING_BASE_URL` (where embeddings are served; defaults to `OPENAI_BASE_URL`), `OPENAI_CONTEXT_TOKENS` (the chat model's window, for the turn budget), `AI_AGENT_MAX_TURNS` (6), `AI_AGENT_MAX_TOOL_CALLS` (16), `BRAVE_API_KEY` (Brave Search API for the discovery subagents). A gateway that serves both chat and `/v1/embeddings` needs only `OPENAI_BASE_URL`; a chat-only server (e.g. Strata) needs `OPENAI_EMBEDDING_BASE_URL` pointed at one that embeds.
 
 ### Research harness
 

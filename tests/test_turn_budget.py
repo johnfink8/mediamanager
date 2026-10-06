@@ -145,6 +145,7 @@ async def test_tools_removed_on_final_turn_and_one_note_per_call() -> None:
         assert call["settings"].max_tokens is None
     final = model.calls[-1]["settings"]
     assert final.extra_body["chat_template_kwargs"] == {"enable_thinking": False}
+    assert final.extra_body["reasoning"] == {"effort": "none"}
     assert final.max_tokens == FINAL_MAX_TOKENS
     # the prefix up to the note grows append-only, so it stays cacheable
     first = model.calls[0]["input"][:-1]

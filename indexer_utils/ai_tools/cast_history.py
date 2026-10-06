@@ -44,7 +44,7 @@ from ..redis_client import get_redis_client, redis_get_json, redis_set_json
 from ..session import db_session
 from ..tmdb import get_credit_person_ids, get_person_combined_credits, search_person_id
 from .base import ToolContext
-from .research import ResearchSpec, run_research
+from .research import MODEL, ResearchSpec, run_research
 from .safe_tool import safe_tool
 from .webtools import WEB_TOOLS
 
@@ -52,7 +52,6 @@ _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 logger = logging.getLogger(__name__)
 
 # Served locally; the gateway's only chat model (see OPENAI_BASE_URL).
-MODEL = "qwen3.8"
 
 # Loaded at import time, matching the discoveries subagents.
 _SYSTEM_PROMPT = (_PROMPTS_DIR / "cast_history.md").read_text()
