@@ -20,7 +20,7 @@ from agents import Agent, RunContextWrapper
 
 from ..redis_client import get_redis_client, redis_get_json, redis_set_json
 from .base import ToolContext
-from .research import ResearchSpec, run_research
+from .research import MODEL, ResearchSpec, run_research
 from .safe_tool import safe_tool
 from .shared import enforce_result_budget
 from .webtools import WEB_TOOLS
@@ -30,7 +30,6 @@ _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 logger = logging.getLogger(__name__)
 
 # Served locally; the gateway's only chat model (see OPENAI_BASE_URL).
-MODEL = "qwen3.8"
 
 REPORT_CHAR_CAP = 12000
 

@@ -25,6 +25,10 @@ from .turn_budget import TurnBudget
 
 logger = logging.getLogger(__name__)
 
+# The chat model every research agent runs on, the same one the
+# recommendation agent uses (``ai_recs.OPENAI_MODEL``).
+MODEL = config("OPENAI_MODEL", default="qwen3.8")
+
 
 @dataclass(frozen=True)
 class ResearchSpec:

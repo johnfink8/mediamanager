@@ -26,6 +26,11 @@ from .session import db_session
 logger = logging.getLogger(__name__)
 
 EMBEDDING_MODEL = config("OPENAI_EMBEDDING_MODEL", default="embeddinggemma-cpu:latest")
+# Embeddings may be served elsewhere than the chat model (a chat-only server
+# such as Strata has none); unset, they share ``OPENAI_BASE_URL``.
+EMBEDDING_BASE_URL = config(
+    "OPENAI_EMBEDDING_BASE_URL", default=config("OPENAI_BASE_URL", default=None)
+)
 
 # Neighbours are constrained to the candidate's release window so the count
 # means the same thing regardless of how recent the candidate is. Inbound
@@ -56,7 +61,7 @@ def _get_openai_client() -> Optional[AsyncOpenAI]:
     try:
         _openai_client = AsyncOpenAI(
             api_key=config("OPENAI_API_KEY"),
-            base_url=config("OPENAI_BASE_URL", default=None),
+            base_url=EMBEDDING_BASE_URL,
         )
         return _openai_client
     except Exception:

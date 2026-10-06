@@ -21,13 +21,12 @@ from typing import Any, Dict, List, Optional
 from agents import Agent
 
 from ..tmdb import get_title_details
-from .research import ResearchRun, ResearchSpec, run_research
+from .research import MODEL, ResearchRun, ResearchSpec, run_research
 from .webtools import WEB_TOOLS
 
 logger = logging.getLogger(__name__)
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
-MODEL = "qwen3.8"
 # Usually 1-3 turns: read the overview, maybe check franchise status.
 SYNOPSIS_MAX_TURNS = 6
 SYNOPSIS_CLIP = 600
