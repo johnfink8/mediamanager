@@ -485,9 +485,26 @@ async def _annotate_with_ai_async_inner(
             if len(candidate_synopsis) > 480
             else candidate_synopsis,
         )
-    attrs = await upsert_item_vector(attrs, item_type, uid, title, candidate_synopsis)
-
     base_ai = dict(attrs.get("ai") or {})
+    try:
+        attrs = await upsert_item_vector(
+            attrs, item_type, uid, title, candidate_synopsis
+        )
+    except Exception as exc:
+        # Without its vector the candidate has no neighbours and no taste
+        # signal, so a verdict now would be uninformed: fail visibly
+        # (Retry AI re-runs it) rather than recommend blind.
+        logger.exception("annotate %s:%s embedding FAILED", item_type, uid)
+        run = AgentRunResult(
+            failure={
+                "code": "embedding_failed",
+                "message": f"{exc.__class__.__name__}: {exc}",
+                "stage": "embedding",
+            }
+        )
+        attrs_out = dict(attrs)
+        attrs_out["ai"] = _ai_details_from_run(run, synopsis, base_ai)
+        return attrs_out
 
     if not config("OPENAI_API_KEY", default=""):
         run = AgentRunResult(

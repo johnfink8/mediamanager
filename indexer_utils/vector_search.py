@@ -54,29 +54,25 @@ def _year_between(lo: int, hi: int) -> Any:
 _openai_client: Optional[AsyncOpenAI] = None
 
 
-def _get_openai_client() -> Optional[AsyncOpenAI]:
+def _get_openai_client() -> AsyncOpenAI:
     global _openai_client
-    if _openai_client is not None:
-        return _openai_client
-    try:
+    if _openai_client is None:
         _openai_client = AsyncOpenAI(
             api_key=config("OPENAI_API_KEY"),
             base_url=EMBEDDING_BASE_URL,
         )
-        return _openai_client
-    except Exception:
-        logger.exception("Failed to initialize OpenAI client for embeddings")
-        return None
+    return _openai_client
 
 
-async def _embed(text: str) -> Optional[List[float]]:
-    client = _get_openai_client()
-    if client is None:
-        return None
+async def _embed(text: str) -> List[float]:
+    """Embed ``text``. Raises on any failure: a missing vector silently
+    empties every similarity signal downstream, so callers must see it."""
     cleaned = (text or "").strip()
     if not cleaned:
-        return None
-    resp = await client.embeddings.create(model=EMBEDDING_MODEL, input=cleaned)
+        raise ValueError("nothing to embed")
+    resp = await _get_openai_client().embeddings.create(
+        model=EMBEDDING_MODEL, input=cleaned
+    )
     return list(resp.data[0].embedding)
 
 
@@ -100,20 +96,14 @@ async def upsert_item_vector(
     path annotates *before* ``IgnoreItem.create``, see
     ``vid_utils._arun_movie_candidates`` — the vector is stashed into
     ``attrs["_synopsis_vector_tmp"]`` so the caller can attach it after
-    insert. Silently no-ops if there's nothing to embed or OpenAI is
-    unavailable; annotation should not fail just because the vector
-    couldn't be written.
+    insert. A no-op only when there's nothing to embed; an embedding failure
+    raises, so the caller can record it instead of carrying on without a
+    vector.
     """
     text_to_embed = _embedding_source(title, synopsis)
     if not text_to_embed:
         return attrs
-    try:
-        vec = await _embed(text_to_embed)
-    except Exception:
-        logger.exception("Embedding failed for %s:%s", item_type, uid)
-        return attrs
-    if vec is None:
-        return attrs
+    vec = await _embed(text_to_embed)
     async with db_session() as session:
         result = await session.execute(
             update(IgnoreItem)
@@ -224,21 +214,15 @@ async def synopsis_neighbor_summary(
     }
 
 
-async def synopsis_select(query_text: str, item_type: str) -> Optional[Select]:
+async def synopsis_select(query_text: str, item_type: str) -> Select:
     """Build ``SELECT IgnoreItem, distance ORDER BY synopsis_vector <=> :q``.
 
     No LIMIT, no ``added`` filter, no candidate-exclusion — the caller
-    layers those (and any other constraints) before executing. Returns
-    ``None`` if embedding the query failed; callers should treat that as
-    "no results."
+    layers those (and any other constraints) before executing. Raises if
+    the query can't be embedded: "no results" would read as "nothing in the
+    library is like this", which it isn't.
     """
-    try:
-        vec = await _embed(query_text)
-    except Exception:
-        logger.exception("Embedding failed for query: %r", query_text[:120])
-        return None
-    if vec is None:
-        return None
+    vec = await _embed(query_text)
     distance = IgnoreItem.synopsis_vector.cosine_distance(vec)
     return (
         select(IgnoreItem, distance.label("distance"))
