@@ -18,6 +18,7 @@ from indexer_utils.tmdb import (
 )
 
 from .ai_tools import AgentRunResult, ToolContext, run_recommendation
+from .ai_tools.research import MODEL as OPENAI_MODEL
 from .ai_tools.shared import REASON_CLIP
 from .ai_tools.synopsis import SynopsisResult, research_synopsis, tmdb_details
 from .library_profile import compute_candidate_match, compute_library_profile
@@ -33,7 +34,6 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent
 PROMPTS_DIR = BASE_DIR / "prompts"
-OPENAI_MODEL = config("OPENAI_MODEL", default="qwen3.8")
 
 AGENT_MAX_TURNS = int(config("AI_AGENT_MAX_TURNS", default=6))
 AGENT_MAX_TOOL_CALLS = int(config("AI_AGENT_MAX_TOOL_CALLS", default=16))
