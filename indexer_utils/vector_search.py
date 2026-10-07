@@ -51,28 +51,19 @@ def _year_between(lo: int, hi: int) -> Any:
     return and_(expr.op("~")(_YEAR_RE), cast(expr, Integer).between(lo, hi))
 
 
-_openai_client: Optional[AsyncOpenAI] = None
-
-
-def _get_openai_client() -> AsyncOpenAI:
-    global _openai_client
-    if _openai_client is None:
-        _openai_client = AsyncOpenAI(
-            api_key=config("OPENAI_API_KEY"),
-            base_url=EMBEDDING_BASE_URL,
-        )
-    return _openai_client
-
-
 async def _embed(text: str) -> List[float]:
     """Embed ``text``. Raises on any failure: a missing vector silently
     empties every similarity signal downstream, so callers must see it."""
     cleaned = (text or "").strip()
     if not cleaned:
         raise ValueError("nothing to embed")
-    resp = await _get_openai_client().embeddings.create(
-        model=EMBEDDING_MODEL, input=cleaned
-    )
+    # A client per call: callers run under separate ``asyncio.run`` loops, and
+    # a cached client's pooled connections die with the loop that opened them
+    # ("Event loop is closed" on the next call).
+    async with AsyncOpenAI(
+        api_key=config("OPENAI_API_KEY"), base_url=EMBEDDING_BASE_URL
+    ) as client:
+        resp = await client.embeddings.create(model=EMBEDDING_MODEL, input=cleaned)
     return list(resp.data[0].embedding)
 
 
