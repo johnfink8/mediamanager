@@ -84,3 +84,25 @@ def run_check_titles() -> None:
     logger.info("Scheduled check_titles starting")
     asyncio.run(_run_check_titles_async())
     logger.info("Scheduled check_titles finished")
+
+
+def run_annotation_repairs() -> None:
+    """Job: re-annotate pending candidates whose AI verdict failed.
+
+    Keeps the queue self-healing after transient model-server outages; see
+    ``indexer_utils.repairs`` for the selection + backoff policy.
+    """
+    from .repairs import repair_broken_annotations
+
+    logger.info("Scheduled annotation repair starting")
+    stats = asyncio.run(repair_broken_annotations())
+    logger.info(
+        "Scheduled annotation repair finished: found=%s backed_off=%s "
+        "attempted=%s repaired=%s still_failed=%s decided_away=%s",
+        stats["found"],
+        stats["backed_off"],
+        stats["attempted"],
+        stats["repaired"],
+        stats["still_failed"],
+        stats["decided_away"],
+    )

@@ -44,9 +44,11 @@ logger = logging.getLogger(__name__)
 # a 4 KB Plex summary, etc.) can't push the conversation past the model's
 # context limit.
 SYNOPSIS_CLIP = 480
-# Also the recommendation ``reason`` schema cap: the model is asked for
-# ~300 chars, and the headroom keeps guided decoding from cutting a
-# sentence off at the limit.
+# Cap on the stored recommendation ``reason``: the model is asked for ~300
+# characters and this clips on the way in. The schema cap in
+# ``agent.Recommendation`` is deliberately looser — the gateway validates the
+# model's JSON against the schema and fails the whole run on a violation, so
+# the schema must not be the thing that kills a verdict over sentence length.
 REASON_CLIP = 400
 PLEX_SUMMARY_CLIP = 320
 CAST_LIMIT = 10

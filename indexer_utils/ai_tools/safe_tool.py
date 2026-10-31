@@ -11,6 +11,16 @@ failure was caught in user code or surfaced by the SDK.
 JSON-shaped error payload — ``{"error": ..., "error_type": ..., "tool": ...}``
 — so every error a tool can produce reads the same way to the model. It also
 logs the exception with its traceback, which the default handler drops.
+
+It also defaults ``strict_mode=False``. Strict mode (the SDK default) forces
+every parameter into ``required`` with a nullable type, so a model that omits
+an optional filter — which Qwen does routinely — produces arguments that fail
+the schema. The serving gateway rejects such a response with a 502 and the
+whole agent run dies. Lenient schemas require only the parameters that
+genuinely have no default: omitting ``language`` is then simply "no filter",
+and the model stops paying ~15 null keys per search call. A malformed value
+that still slips through is caught by the function's own defaults or by the
+run-level retry in ``agent.run_recommendation``.
 """
 
 import json
@@ -68,13 +78,16 @@ def safe_tool(
     Use as ``@safe_tool`` or ``@safe_tool(...)``. Forwards all keyword args
     (``strict_mode``, ``is_enabled``, ``timeout``, etc.) to ``@function_tool``;
     ``failure_error_function`` is the only one we set ourselves and it can't
-    be overridden from a caller (that's the whole point).
+    be overridden from a caller (that's the whole point). ``strict_mode``
+    defaults to False (see module docstring) and a caller may still opt back
+    in per tool.
     """
     if "failure_error_function" in kwargs:
         raise TypeError(
             "safe_tool sets failure_error_function itself; pass it via "
             "function_tool directly if you need a per-tool override."
         )
+    kwargs.setdefault("strict_mode", False)
 
     def wrap(f: Callable[..., Any]) -> FunctionTool:
         return function_tool(
