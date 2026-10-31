@@ -12,6 +12,7 @@ flowing to OpenAI's tracing dashboard. Per-call audit data is captured via
 ``AuditHooks``.
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -20,7 +21,7 @@ from agents import Agent, RunConfig, Runner
 from agents.exceptions import MaxTurnsExceeded
 from agents.models.openai_provider import OpenAIProvider
 from decouple import config
-from openai import AsyncOpenAI
+from openai import APIConnectionError, APIStatusError, AsyncOpenAI
 from pydantic import BaseModel, Field, field_validator
 
 from .base import ToolContext
@@ -37,6 +38,15 @@ from .shared import REASON_CLIP
 from .turn_budget import TurnBudget
 
 logger = logging.getLogger(__name__)
+
+# Attempts per recommendation run (first try included). The local gateway
+# rejects a model response with a 502 whenever the sampled output momentarily
+# violates a schema it is validating against (a tool argument, the structured
+# verdict) or the transport blips; re-sampling almost always clears it. Only
+# failures classified by ``_is_transient`` are retried — turn/tool-budget
+# exhaustion is deterministic and retrying just burns GPU time.
+AGENT_ATTEMPTS = max(1, int(config("AI_AGENT_ATTEMPTS", default=3)))
+RETRY_BACKOFF_SECONDS = float(config("AI_AGENT_RETRY_BACKOFF_SECONDS", default=15.0))
 
 
 class Recommendation(BaseModel):
@@ -58,8 +68,12 @@ class Recommendation(BaseModel):
             "keep the two aligned."
         ),
     )
+    # The schema cap is deliberately generous: the gateway validates the
+    # model's JSON against this schema and 502s the whole run on a violation,
+    # so a verdict lost to a long sentence is the worst outcome. The stored
+    # reason is clipped to REASON_CLIP regardless (see run_recommendation).
     reason: str = Field(
-        max_length=REASON_CLIP,
+        max_length=4 * REASON_CLIP,
         description=(
             "One or two complete sentences (about 300 characters at most) naming "
             "the single strongest signal driving the verdict and its concrete "
@@ -125,6 +139,21 @@ def build_agent(
     )
 
 
+def _is_transient(exc: BaseException) -> bool:
+    """Whether an agent-run failure is worth re-sampling.
+
+    Transport errors and 5xx/429 responses from the gateway are momentary:
+    the same prompt on a fresh sampling usually succeeds. Budget exhaustion
+    (turns, tool calls) is deterministic for the same conversation, and any
+    other exception is a bug — retrying either just wastes a GPU run.
+    """
+    if isinstance(exc, APIConnectionError):  # includes APITimeoutError
+        return True
+    if isinstance(exc, APIStatusError):
+        return exc.status_code == 429 or exc.status_code >= 500
+    return False
+
+
 async def run_recommendation(
     *,
     item_type: str,
@@ -139,80 +168,100 @@ async def run_recommendation(
     """Drive the recommendation Agent and return an ``AgentRunResult``.
 
     Model-level failures (turn cap, tool-budget cap, transport error) become
-    ``result.failure``; only truly exceptional bugs propagate.
+    ``result.failure``; only truly exceptional bugs propagate. Transient
+    failures (see :func:`_is_transient`) are retried in-place up to
+    ``AGENT_ATTEMPTS`` times with a linear backoff — each attempt is a fresh
+    sampling, which typically clears a schema rejection the gateway made.
     """
     tag = log_tag or f"agent[{item_type}:{ctx.candidate.get('uid')}]"
     agent = build_agent(item_type=item_type, model=model, system_prompt=system_prompt)
-    hooks = AuditHooks(max_tool_calls=max_tool_calls, log_tag=tag)
 
-    # Build a fresh httpx-backed client per run and close it before this task
-    # returns. The SDK would otherwise lazily build (and never close) a
+    # Build a fresh httpx-backed client per attempt and close it before this
+    # task returns. The SDK would otherwise lazily build (and never close) a
     # process-default AsyncOpenAI, leaking the socket on each ``asyncio.run``
     # exit. Per-run scoping also keeps httpx transports bound to the loop
     # that opened them — required when scheduler threads spin up short-lived
     # loops via ``asyncio.run``.
-    openai_client = AsyncOpenAI(
-        api_key=config("OPENAI_API_KEY"),
-        base_url=config("OPENAI_BASE_URL", default=None),
-    )
-    provider = OpenAIProvider(openai_client=openai_client)
-    run_config = RunConfig(tracing_disabled=True, model_provider=provider)
-    agent = TurnBudget(max_turns).prepare(agent, provider)
-
-    try:
+    result: Any = None
+    # Replaced per attempt below; initialized here so every return path
+    # (including a success on the first try) has a defined audit object.
+    hooks = AuditHooks(max_tool_calls=max_tool_calls, log_tag=tag)
+    for attempt in range(1, AGENT_ATTEMPTS + 1):
+        hooks = AuditHooks(max_tool_calls=max_tool_calls, log_tag=tag)
+        openai_client = AsyncOpenAI(
+            api_key=config("OPENAI_API_KEY"),
+            base_url=config("OPENAI_BASE_URL", default=None),
+        )
+        provider = OpenAIProvider(openai_client=openai_client)
+        run_config = RunConfig(tracing_disabled=True, model_provider=provider)
+        budgeted = TurnBudget(max_turns).prepare(agent, provider)
         try:
-            result = await Runner.run(
-                agent,
-                user_prompt,
-                context=ctx,
-                max_turns=max_turns,
-                hooks=hooks,
-                run_config=run_config,
+            try:
+                result = await Runner.run(
+                    budgeted,
+                    user_prompt,
+                    context=ctx,
+                    max_turns=max_turns,
+                    hooks=hooks,
+                    run_config=run_config,
+                )
+            finally:
+                # OpenAIProvider.aclose intentionally leaves the AsyncOpenAI
+                # client open (in case it's shared), so we close it ourselves.
+                await provider.aclose()
+                await openai_client.close()
+        except MaxTurnsExceeded as exc:
+            logger.warning("%s exhausted turns: %s", tag, exc)
+            return AgentRunResult(
+                failure={
+                    "code": "too_many_turns",
+                    "message": str(exc),
+                    "stage": "recommendation",
+                },
+                turns=hooks.turns,
+                tool_calls=hooks.tool_calls,
+                tool_log=hooks.tool_log,
             )
-        finally:
-            # OpenAIProvider.aclose intentionally leaves the AsyncOpenAI
-            # client open (in case it's shared), so we close it ourselves.
-            await provider.aclose()
-            await openai_client.close()
-    except MaxTurnsExceeded as exc:
-        logger.warning("%s exhausted turns: %s", tag, exc)
-        return AgentRunResult(
-            failure={
-                "code": "too_many_turns",
-                "message": str(exc),
-                "stage": "recommendation",
-            },
-            turns=hooks.turns,
-            tool_calls=hooks.tool_calls,
-            tool_log=hooks.tool_log,
-        )
-    except ToolCallBudgetExceeded as exc:
-        logger.warning("%s exhausted tool budget: %s", tag, exc)
-        return AgentRunResult(
-            failure={
-                "code": "too_many_tool_calls",
-                "message": str(exc),
-                "stage": "recommendation",
-            },
-            turns=hooks.turns,
-            tool_calls=hooks.tool_calls,
-            tool_log=hooks.tool_log,
-        )
-    except Exception as exc:
-        logger.exception("%s agent run failed", tag)
-        return AgentRunResult(
-            failure={
-                "code": exc.__class__.__name__,
-                "message": str(exc),
-                "stage": "request",
-            },
-            turns=hooks.turns,
-            tool_calls=hooks.tool_calls,
-            tool_log=hooks.tool_log,
-        )
+        except ToolCallBudgetExceeded as exc:
+            logger.warning("%s exhausted tool budget: %s", tag, exc)
+            return AgentRunResult(
+                failure={
+                    "code": "too_many_tool_calls",
+                    "message": str(exc),
+                    "stage": "recommendation",
+                },
+                turns=hooks.turns,
+                tool_calls=hooks.tool_calls,
+                tool_log=hooks.tool_log,
+            )
+        except Exception as exc:
+            if _is_transient(exc) and attempt < AGENT_ATTEMPTS:
+                delay = RETRY_BACKOFF_SECONDS * attempt
+                logger.warning(
+                    "%s transient failure (attempt %d/%d), retrying in %.0fs: %s",
+                    tag,
+                    attempt,
+                    AGENT_ATTEMPTS,
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
+                continue
+            logger.exception("%s agent run failed", tag)
+            return AgentRunResult(
+                failure={
+                    "code": exc.__class__.__name__,
+                    "message": str(exc),
+                    "stage": "request",
+                },
+                turns=hooks.turns,
+                tool_calls=hooks.tool_calls,
+                tool_log=hooks.tool_log,
+            )
+        break  # success
 
     rec: Recommendation = result.final_output
-    submission = {
+    submission: Dict[str, Any] = {
         "recommend": bool(rec.recommend),
         "score": max(0.0, min(float(rec.score), 1.0)),
         "reason": str(rec.reason)[:REASON_CLIP],

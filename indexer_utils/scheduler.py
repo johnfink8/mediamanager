@@ -55,6 +55,7 @@ JOBSTORE_TABLE = "apscheduler_jobs"
 PLEX_SCAN_JOB_ID = "plex_library_scan"
 CHECK_NEW_JOB_ID = "check_new_items"
 CHECK_TITLES_JOB_ID = "check_titles"
+ANNOTATION_REPAIR_JOB_ID = "annotation_repairs"
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,14 @@ JOB_DESCRIPTIONS: Dict[str, JobDescription] = {
         description=(
             "Backfill checked titles and poster URLs for items waiting "
             "on metadata from TVDB / IMDB / Radarr."
+        ),
+    ),
+    ANNOTATION_REPAIR_JOB_ID: JobDescription(
+        name="Repair failed recommendations",
+        description=(
+            "Re-run the AI annotation for pending candidates whose "
+            "recommendation is missing or failed, with exponential "
+            "backoff per item."
         ),
     ),
 }

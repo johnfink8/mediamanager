@@ -105,3 +105,41 @@ def test_safe_tool_rejects_explicit_failure_handler() -> None:
             Args: (none)
             """
             return {}
+
+
+def test_strict_mode_is_off_by_default() -> None:
+    """Optional params must stay optional in the emitted schema.
+
+    Strict mode forces every parameter into ``required`` with a nullable
+    type; Qwen then omits one and the serving gateway 502s the whole agent
+    run over an "invalid" tool call. Lenient is the safe default here.
+    """
+
+    @safe_tool
+    async def filters(
+        wrapper: RunContextWrapper[Any], query: str, limit: int = 5
+    ) -> Dict[str, Any]:
+        """Search with an optional limit.
+
+        Args:
+            query: Search text.
+            limit: Max results.
+        """
+        return {"query": query, "limit": limit}
+
+    assert filters.strict_json_schema is False
+    assert filters.params_json_schema.get("required") == ["query"]
+
+
+def test_strict_mode_can_be_opted_into() -> None:
+    @safe_tool(strict_mode=True)
+    async def strict(wrapper: RunContextWrapper[Any], n: int = 1) -> Dict[str, Any]:
+        """Strict echo.
+
+        Args:
+            n: A number.
+        """
+        return {"n": n}
+
+    assert strict.strict_json_schema is True
+    assert "n" in strict.params_json_schema.get("required")
