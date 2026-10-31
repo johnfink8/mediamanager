@@ -6,6 +6,7 @@ decision never clobbered. The agent itself is stubbed; its behaviour has its
 own tests.
 """
 
+import copy
 import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
@@ -43,7 +44,10 @@ def _seed(
         added=added,
         defer_until=defer_until,
         created_at=created_at,
-        attributes=dict(attrs) if attrs is not None else None,
+        # Deep copy: the repair pass stamps ai.repair into the outcome dict
+        # in place; a shared module-level fixture would leak that stamp into
+        # every later test (seeded items come back already "backed off").
+        attributes=copy.deepcopy(attrs) if attrs is not None else None,
     )
 
 
@@ -107,7 +111,8 @@ def _stub_annotate(monkeypatch: Any, outcomes: Dict[str, Any]) -> Dict[str, list
         outcome = outcomes[uid]
         if isinstance(outcome, BaseException):
             raise outcome
-        return outcome
+        # Fresh per call — the write-back stamps ai.repair into this dict.
+        return copy.deepcopy(outcome)
 
     monkeypatch.setattr(repairs, "annotate_with_ai_async", fake)
     return seen
@@ -185,7 +190,7 @@ async def test_decision_made_during_the_run_is_never_clobbered(
             row.ignore = True
             session.add(row)
             await session.commit()
-        return dict(OK_ATTRS)
+        return copy.deepcopy(OK_ATTRS)
 
     monkeypatch.setattr(repairs, "annotate_with_ai_async", decide_then_succeed)
     stats = await repairs.repair_broken_annotations()
